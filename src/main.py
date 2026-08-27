@@ -24,6 +24,7 @@ import os
 import socket
 import threading
 from contextlib import asynccontextmanager
+import urllib.parse
 
 from fastapi import FastAPI, Form, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -211,6 +212,13 @@ from .routers import aiops_gateway as aiops_gateway_router
 app.include_router(gateway_router.router, prefix="/gateway")
 app.include_router(gateway_keys_router.router, prefix="/gateway")
 app.include_router(aiops_gateway_router.router)
+
+# ── OTLP telemetry receiver (Claude Code usage capture) ───────────────────────
+# Prefix is set on the router itself, so the exported paths are
+# /otlp/v1/metrics and /otlp/v1/logs — what OTLP/HTTP derives from
+# OTEL_EXPORTER_OTLP_ENDPOINT=<host>/otlp.
+from .routers import otlp as otlp_router
+app.include_router(otlp_router.router)
 
 # ── VS Code plugin browser-based login flow ──────────────────────────────────
 _LOGIN_HTML = """<!DOCTYPE html>
@@ -477,6 +485,36 @@ _LOGIN_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+def _normalise_callback_uri(raw: str) -> str:
+    """Recover a usable vscode:// callback from a double-encoded value.
+
+    `openExternal()` takes a Uri, so the extension's login URL is round-tripped
+    through VS Code's `Uri.parse()`/`toString()`. That pair decodes every
+    component and re-encodes with a different table, so a callback carrying
+    `?windowId=2` can reach us as `...callback%3FwindowId%253D2`: after our own
+    single decode the separator is still `%3F` and the window id still `%253D`.
+
+    Left alone, `urlsplit()` sees no query, we append our params with `?`, and
+    the extension receives `windowId` buried in the *path* — invisible to VS
+    Code's URL router, which then hands the token to whichever window was last
+    active rather than the one that started the sign-in.
+
+    Unquoting until it stabilises restores a real query string. Only the
+    extension-supplied callback goes through here, never the token, and a
+    correctly-encoded callback contains no `%` so this is a no-op for it.
+    """
+    if not raw:
+        return raw
+    for _ in range(3):
+        if urllib.parse.urlsplit(raw).query:
+            break
+        unquoted = urllib.parse.unquote(raw)
+        if unquoted == raw:
+            break
+        raw = unquoted
+    return raw
+
+
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def plugin_login_page(request: Request):
     qs = "?" + str(request.url.query) if request.url.query else ""
@@ -492,7 +530,7 @@ async def plugin_login_submit(
     from .services.auth_service import authenticate, create_token
     from .config_settings import get_settings as _gs
 
-    callback_uri = request.query_params.get("callbackUri", "")
+    callback_uri = _normalise_callback_uri(request.query_params.get("callbackUri", ""))
     qs = "?" + str(request.url.query) if request.url.query else ""
 
     user = authenticate(username, password)
@@ -507,7 +545,6 @@ async def plugin_login_submit(
     expires_in = s.jwt_expire_minutes * 60
 
     if callback_uri:
-        import urllib.parse
         params = urllib.parse.urlencode({
             "access_token": token,
             "expires_in": expires_in,

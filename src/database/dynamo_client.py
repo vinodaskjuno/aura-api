@@ -21,8 +21,11 @@ Tables used across the platform:
   aura-gateway-providers     PK: providerId
   aura-gateway-provider-health  PK: providerId  SK: checkedAt
   aura-gateway-budgets       PK: pk (entityType#entityId)
+  aura-usage-daily           PK: pk (userId | "__org__")
+                             SK: sk (date#tool#model[#userId])
 """
 import logging
+from decimal import Decimal
 from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
@@ -69,6 +72,7 @@ _COMPOSITE_TABLES = {
     "agents":          ("agentRunId",   "orchestratorId"),
     "chat-sessions":   ("sessionId",    "userId"),
     "token-usage":     ("userId",       "sortKey"),       # sortKey = timestamp#messageId
+    "usage-daily":     ("pk",           "sk"),            # pk = userId|__org__, sk = date#tool#model
     "user-connectors": ("userId",       "connectorId"),
     "services":        ("projectId",    "serviceId"),
 }
@@ -81,6 +85,25 @@ def put_item(table_name: str, item: dict) -> None:
         _table(table_name).put_item(Item=item)
     except ClientError as e:
         logger.error("DynamoDB put_item failed [%s]: %s", table_name, e)
+        raise
+
+
+def put_item_if_absent(table_name: str, item: dict, key_fields: tuple[str, ...]) -> bool:
+    """Put an item only if no item with the same key exists.
+
+    Returns True if this write created the item, False if it already existed.
+    This is the dedup gate for at-least-once delivery: OTLP exporters retry, and
+    ADD-based rollup counters are not idempotent, so callers bump aggregates only
+    when this returns True.
+    """
+    cond = " AND ".join(f"attribute_not_exists({f})" for f in key_fields)
+    try:
+        _table(table_name).put_item(Item=item, ConditionExpression=cond)
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        logger.error("DynamoDB put_item_if_absent failed [%s]: %s", table_name, e)
         raise
 
 
@@ -147,17 +170,64 @@ def update_item(table_name: str, key: dict, updates: dict) -> dict | None:
         raise
 
 
+def _to_number(value: Any) -> Decimal:
+    """Coerce to Decimal — DynamoDB rejects Python floats outright."""
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        return Decimal(int(value))
+    if isinstance(value, int):
+        return Decimal(value)
+    # str() first: Decimal(float) carries binary float noise into the stored value.
+    return Decimal(str(value))
+
+
 def atomic_add(table_name: str, key: dict, field: str, delta: float) -> None:
     """Atomically increment a numeric field (ADD expression). Creates field if absent."""
+    atomic_add_many(table_name, key, {field: delta})
+
+
+def atomic_add_many(table_name: str, key: dict, deltas: dict[str, Any],
+                    set_fields: dict | None = None) -> None:
+    """Atomically increment several numeric fields in ONE request.
+
+    ADD creates absent fields, so this doubles as an upsert for counter rows.
+    `set_fields` writes non-numeric metadata (labels, timestamps) in the same
+    call via SET — cheaper and race-free versus a separate update_item.
+    """
+    if not deltas and not set_fields:
+        return
+
+    expr_names: dict = {}
+    expr_values: dict = {}
+    add_parts: list[str] = []
+    set_parts: list[str] = []
+
+    for i, (field, delta) in enumerate(deltas.items()):
+        expr_names[f"#a{i}"] = field
+        expr_values[f":a{i}"] = _to_number(delta)
+        add_parts.append(f"#a{i} :a{i}")
+
+    for i, (field, value) in enumerate((set_fields or {}).items()):
+        expr_names[f"#s{i}"] = field
+        expr_values[f":s{i}"] = value
+        set_parts.append(f"#s{i} = :s{i}")
+
+    expr = ""
+    if set_parts:
+        expr += "SET " + ", ".join(set_parts)
+    if add_parts:
+        expr += (" " if expr else "") + "ADD " + ", ".join(add_parts)
+
     try:
         _table(table_name).update_item(
             Key=key,
-            UpdateExpression="ADD #f :d",
-            ExpressionAttributeNames={"#f": field},
-            ExpressionAttributeValues={":d": delta},
+            UpdateExpression=expr,
+            ExpressionAttributeNames=expr_names,
+            ExpressionAttributeValues=expr_values,
         )
     except ClientError as e:
-        logger.error("DynamoDB atomic_add failed [%s]: %s", table_name, e)
+        logger.error("DynamoDB atomic_add_many failed [%s]: %s", table_name, e)
         raise
 
 
@@ -177,6 +247,46 @@ def query_items(table_name: str, pk_name: str, pk_value: Any,
         return resp.get("Items", [])
     except ClientError as e:
         logger.error("DynamoDB query failed [%s]: %s", table_name, e)
+        return []
+
+
+def query_range(table_name: str, pk_name: str, pk_value: Any,
+                sk_name: str, sk_prefix: str = None,
+                sk_from: str = None, sk_to: str = None,
+                index_name: str = None, limit: int = 1000) -> list[dict]:
+    """Query one partition with a sort-key prefix or range, following pagination.
+
+    Preferred over scan_items + Python-side filtering for time-windowed reads:
+    the filtering happens in DynamoDB, so results are neither truncated nor
+    charged for rows that are thrown away.
+    """
+    cond = Key(pk_name).eq(pk_value)
+    if sk_prefix:
+        cond &= Key(sk_name).begins_with(sk_prefix)
+    elif sk_from and sk_to:
+        cond &= Key(sk_name).between(sk_from, sk_to)
+    elif sk_from:
+        cond &= Key(sk_name).gte(sk_from)
+    elif sk_to:
+        cond &= Key(sk_name).lte(sk_to)
+
+    kwargs: dict = {"KeyConditionExpression": cond}
+    if index_name:
+        kwargs["IndexName"] = index_name
+
+    items: list[dict] = []
+    try:
+        table = _table(table_name)
+        while True:
+            resp = table.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key or len(items) >= limit:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        return items[:limit]
+    except ClientError as e:
+        logger.error("DynamoDB query_range failed [%s]: %s", table_name, e)
         return []
 
 
@@ -224,6 +334,10 @@ TABLE_SCHEMAS = [
         ],
     },
     {"name": "user-connectors", "pk": "userId",         "sk": "connectorId"},
+    # Daily usage rollups — pk is a userId or the literal "__org__" aggregate row,
+    # sk is "<date>#<tool>#<model>" (plus "#<userId>" on org rows). Counters are
+    # incremented with atomic_add_many so dashboards never scan raw events.
+    {"name": "usage-daily",     "pk": "pk",             "sk": "sk"},
     {"name": "budget-config",   "pk": "orgId",          "sk": None},
     {"name": "user-budgets",    "pk": "userId",         "sk": None},
     {

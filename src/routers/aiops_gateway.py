@@ -91,6 +91,45 @@ def usage_timeseries(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Usage — By tool x model (the model-wise matrix)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/usage/by-tool-model")
+def usage_by_tool_model(
+    period: str = Query("7d", description="today | 7d | 14d | 30d | 90d | all"),
+    user: dict = Depends(get_current_user),
+):
+    """Per-model usage attributed to the tool that spent it.
+
+    This is the breakdown the plugin and UI dashboards render: one row per
+    (tool, model) with input / output / cacheRead / cacheCreation tokens, cost,
+    cache-hit rate and average latency.
+    """
+    is_admin = user.get("role", "") in ("admin", "super_admin")
+    return {
+        "period": period,
+        "byToolModel": gateway_analytics.get_by_tool_model(user.get("userId"), period, is_admin),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Usage — Claude Code
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/usage/claude-code")
+def usage_claude_code(
+    period: str = Query("7d"),
+    user: dict = Depends(get_current_user),
+):
+    """Claude Code usage only, split by model and by surface (CLI vs VS Code extension).
+
+    Fed by the OTLP receiver at /otlp/v1/logs — see routers/otlp.py.
+    """
+    is_admin = user.get("role", "") in ("admin", "super_admin")
+    return gateway_analytics.get_claude_code_usage(user.get("userId"), period, is_admin)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Providers
 # ─────────────────────────────────────────────────────────────────────────────
 

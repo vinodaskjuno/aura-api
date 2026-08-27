@@ -6,6 +6,8 @@ DELETE /gateway/keys/{keyId}      — revoke a key
 GET    /gateway/keys/all          — admin: list all users' keys
 GET    /gateway/keys/me/{tool}    — get-or-create a key for a specific tool label
                                     (used by the VS Code plugin on login)
+POST   /gateway/keys/me/{tool}/rotate — replace that key and return the new plaintext
+                                    (recovery when the client no longer holds it)
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from src.routers.auth import get_current_user
 from src.services.gateway_service import (
     generate_api_key,
     get_or_create_tool_key,
+    rotate_tool_key,
     list_user_keys,
     revoke_api_key,
     list_all_keys,
@@ -24,7 +27,11 @@ from src.services.gateway_service import (
 router = APIRouter(tags=["gateway-keys"])
 
 # Valid tool labels the VS Code plugin can request keys for
-_VALID_TOOL_LABELS = {"aura-plugin", "claude-ext", "claude-cli", "codex-cli", "gemini-cli", "unknown"}
+_VALID_TOOL_LABELS = {
+    "aura-plugin", "claude-ext", "claude-cli", "codex-cli", "gemini-cli", "unknown",
+    # Emitted by the OTLP receiver from Claude Code's app.entrypoint
+    "claude-code-cli", "claude-code-ext", "claude-code-sdk",
+}
 
 
 class CreateKeyRequest(BaseModel):
@@ -61,6 +68,25 @@ def get_or_create_my_tool_key(tool_label: str, user: dict = Depends(get_current_
         raise HTTPException(status_code=400, detail=f"Unknown tool_label '{tool_label}'")
     user_id = user.get("userId", "")
     return get_or_create_tool_key(user_id, tool_label)
+
+
+@router.post("/keys/me/{tool_label}/rotate")
+def rotate_my_tool_key(tool_label: str, user: dict = Depends(get_current_user)):
+    """Replace this tool's key and return the new plaintext once.
+
+    The plaintext key is only ever returned at creation, so a client that has
+    lost it (SecretStorage cleared, reinstall, new machine) cannot recover it --
+    /keys/me/{tool} would keep answering {"exists": true} with no key, and
+    anything depending on it, such as Claude Code telemetry, would silently stop
+    reporting. Rotation replaces the key so the client can store a usable one.
+
+    Rotation invalidates the previous key everywhere it was in use, so clients
+    should call this only when they hold no key at all.
+    """
+    if tool_label not in _VALID_TOOL_LABELS:
+        raise HTTPException(status_code=400, detail=f"Unknown tool_label '{tool_label}'")
+    user_id = user.get("userId", "")
+    return rotate_tool_key(user_id, tool_label)
 
 
 @router.get("/keys")
