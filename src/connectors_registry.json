@@ -1,0 +1,14 @@
+[
+  {
+    "id": "30cba7e3-feab-47ea-a065-8a5db96f3d05",
+    "name": "org",
+    "type": "MCP",
+    "config": {
+      "endpoint": "http://localhost:8000/mock-mcp/sse"
+    },
+    "status": "idle",
+    "created_at": "2026-08-11T04:04:07.954266+00:00",
+    "updated_at": "2026-08-11T15:46:27.595840+00:00",
+    "last_synced": "2026-08-11T15:46:27.593846+00:00"
+  }
+]

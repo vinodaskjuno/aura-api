@@ -1,0 +1,30 @@
+# ── Secrets & credentials ────────────────────────────────────────────────────
+.env
+**/.env
+**/.env.*
+!**/.env.example
+credentials.ini
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/secrets.*
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Runtime state (not source) ───────────────────────────────────────────────
+# src/memory/ holds Fernet-encrypted conversation history; src/out/ is generated.
+src/memory/
+src/out/
+data/repos/
+workspace/
+
+.DS_Store

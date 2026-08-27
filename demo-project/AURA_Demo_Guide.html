@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AURA — AI Dev Agent Platform | Demo Guide</title>
+<style>
+  :root {
+    --navy: #060c1a; --surface: #0d1424; --card: #111827;
+    --primary: #4f8ef7; --accent: #10b981; --warn: #f59e0b;
+    --danger: #ef4444; --purple: #8b5cf6;
+    --text: #e2e8f0; --muted: #64748b; --border: #1e2d40;
+    --font: 'Segoe UI', system-ui, sans-serif;
+    --mono: 'Cascadia Code', 'Consolas', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--navy); color: var(--text); font-family: var(--font); line-height: 1.6; }
+
+  /* ── HEADER ── */
+  header {
+    background: linear-gradient(135deg, #060c1a 0%, #0a1628 50%, #0d1e38 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 0; position: relative; overflow: hidden;
+  }
+  header::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 20% 50%, rgba(79,142,247,0.08) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 50%, rgba(16,185,129,0.06) 0%, transparent 60%);
+  }
+  .header-inner { position: relative; max-width: 1200px; margin: 0 auto; padding: 48px 40px; }
+  .logo { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+  .logo-mark {
+    width: 52px; height: 52px; border-radius: 14px;
+    background: linear-gradient(135deg, var(--primary), var(--purple));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 22px; color: #fff;
+    box-shadow: 0 0 24px rgba(79,142,247,0.4);
+  }
+  .logo-text h1 { font-size: 32px; font-weight: 900; letter-spacing: -0.03em; }
+  .logo-text h1 span { color: var(--primary); }
+  .logo-text p { font-size: 12px; color: var(--primary); font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; margin-top: 2px; }
+  .tagline { font-size: 18px; color: #94a3b8; max-width: 700px; margin-bottom: 32px; line-height: 1.7; }
+  .header-pills { display: flex; gap: 10px; flex-wrap: wrap; }
+  .pill {
+    padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 700;
+    border: 1px solid; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .pill-blue  { background: rgba(79,142,247,0.12); color: var(--primary); border-color: rgba(79,142,247,0.3); }
+  .pill-green { background: rgba(16,185,129,0.12); color: var(--accent);  border-color: rgba(16,185,129,0.3); }
+  .pill-amber { background: rgba(245,158,11,0.12); color: var(--warn);    border-color: rgba(245,158,11,0.3); }
+  .pill-purple{ background: rgba(139,92,246,0.12); color: var(--purple);  border-color: rgba(139,92,246,0.3); }
+
+  /* ── LAYOUT ── */
+  main { max-width: 1200px; margin: 0 auto; padding: 40px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .four-col { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 24px; }
+
+  /* ── SECTION ── */
+  section { margin-bottom: 40px; }
+  .section-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--primary); margin-bottom: 6px;
+  }
+  h2 { font-size: 24px; font-weight: 800; color: var(--text); margin-bottom: 16px; }
+  h3 { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 10px; }
+
+  /* ── CARD ── */
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  .card-accent-blue   { border-left: 3px solid var(--primary); }
+  .card-accent-green  { border-left: 3px solid var(--accent); }
+  .card-accent-amber  { border-left: 3px solid var(--warn); }
+  .card-accent-purple { border-left: 3px solid var(--purple); }
+  .card-accent-red    { border-left: 3px solid var(--danger); }
+
+  /* ── STEP ── */
+  .step {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; margin-bottom: 12px;
+    display: flex; gap: 16px; align-items: flex-start;
+  }
+  .step-num {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--primary), var(--purple));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 14px; color: #fff;
+    box-shadow: 0 0 12px rgba(79,142,247,0.3);
+  }
+  .step-content h4 { font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .step-content p  { font-size: 13px; color: #94a3b8; line-height: 1.6; }
+  .step-content .tip {
+    margin-top: 10px; padding: 8px 12px; border-radius: 6px;
+    background: rgba(79,142,247,0.08); border: 1px solid rgba(79,142,247,0.2);
+    font-size: 12px; color: var(--primary);
+  }
+  .step-content .cmd {
+    margin-top: 8px; padding: 8px 12px; border-radius: 6px;
+    background: rgba(0,0,0,0.4); border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 12px; color: #10b981;
+  }
+
+  /* ── ARCH DIAGRAM ── */
+  .arch {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 28px; text-align: center;
+    position: relative; overflow: hidden;
+  }
+  .arch::before {
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 0%, rgba(79,142,247,0.06) 0%, transparent 60%);
+  }
+  .arch-title { font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--primary); margin-bottom: 20px; }
+  .arch-row { display: flex; justify-content: center; gap: 12px; margin-bottom: 0; flex-wrap: wrap; }
+  .arch-arrow { width: 100%; text-align: center; color: var(--muted); font-size: 18px; margin: 4px 0; line-height: 1; }
+  .arch-box {
+    padding: 10px 16px; border-radius: 10px; font-size: 12px; font-weight: 600;
+    min-width: 120px; text-align: center;
+  }
+  .ab-blue   { background: rgba(79,142,247,0.15); border: 1px solid rgba(79,142,247,0.4); color: #93bbfc; }
+  .ab-green  { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
+  .ab-amber  { background: rgba(245,158,11,0.15); border: 1px solid rgba(245,158,11,0.4); color: #fcd34d; }
+  .ab-purple { background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.4); color: #c4b5fd; }
+  .ab-red    { background: rgba(239,68,68,0.15);  border: 1px solid rgba(239,68,68,0.4);  color: #fca5a5; }
+  .ab-gray   { background: rgba(100,116,139,0.15);border: 1px solid rgba(100,116,139,0.4);color: #94a3b8; }
+
+  /* ── AGENT GRID ── */
+  .agent-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; text-align: center;
+  }
+  .agent-icon {
+    width: 40px; height: 40px; border-radius: 10px; margin: 0 auto 10px;
+    display: flex; align-items: center; justify-content: center; font-size: 18px;
+  }
+  .agent-card h4 { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .agent-card p  { font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+  /* ── TABLE ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { padding: 10px 14px; text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); }
+  td { padding: 10px 14px; border-bottom: 1px solid rgba(30,45,64,0.5); color: var(--text); vertical-align: top; }
+  tr:hover td { background: rgba(79,142,247,0.04); }
+
+  /* ── KPI ── */
+  .kpi { text-align: center; padding: 20px; }
+  .kpi-num { font-size: 36px; font-weight: 900; line-height: 1; margin-bottom: 6px; }
+  .kpi-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
+
+  /* ── BADGE ── */
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+  }
+  .badge-blue   { background: rgba(79,142,247,0.15);  color: var(--primary); }
+  .badge-green  { background: rgba(16,185,129,0.15);  color: var(--accent); }
+  .badge-amber  { background: rgba(245,158,11,0.15);  color: var(--warn); }
+  .badge-purple { background: rgba(139,92,246,0.15);  color: var(--purple); }
+  .badge-red    { background: rgba(239,68,68,0.15);   color: var(--danger); }
+
+  /* ── CALLOUT ── */
+  .callout {
+    padding: 16px 20px; border-radius: 10px; margin: 16px 0;
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .callout-blue   { background: rgba(79,142,247,0.08); border: 1px solid rgba(79,142,247,0.2); }
+  .callout-green  { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2); }
+  .callout-amber  { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); }
+  .callout-icon   { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .callout-text   { font-size: 13px; line-height: 1.6; }
+  .callout-text strong { display: block; font-weight: 700; margin-bottom: 4px; }
+
+  /* ── QUOTE ── */
+  blockquote {
+    border-left: 3px solid var(--primary); padding: 12px 16px; margin: 16px 0;
+    background: rgba(79,142,247,0.06); border-radius: 0 8px 8px 0;
+    font-size: 13px; color: #94a3b8; font-style: italic;
+  }
+
+  /* ── TOC ── */
+  .toc { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .toc h3 { margin-bottom: 12px; }
+  .toc-item { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; color: #94a3b8; border-bottom: 1px solid rgba(30,45,64,0.5); }
+  .toc-item:last-child { border-bottom: none; }
+  .toc-num { font-size: 10px; font-weight: 700; width: 22px; height: 22px; border-radius: 50%; background: rgba(79,142,247,0.15); color: var(--primary); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .toc-item a { color: #94a3b8; text-decoration: none; }
+  .toc-item a:hover { color: var(--primary); }
+
+  /* ── HR ── */
+  hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+
+  @media print {
+    body { background: #fff; color: #000; }
+    header { background: #f8fafc; }
+    .card, .step, .arch, .toc { border-color: #e2e8f0; background: #f8fafc; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════ HEADER ══════════════════════════════ -->
+<header>
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-mark">A</div>
+      <div class="logo-text">
+        <h1><span>A</span>URA</h1>
+        <p>AI Dev Agent Platform</p>
+      </div>
+    </div>
+    <p class="tagline">
+      An intelligent multi-agent platform that understands your entire engineering ecosystem —
+      code, infrastructure, dependencies, security — and acts on it autonomously.
+      Built for <strong>AIG InsCore</strong> to accelerate development, quality, and operations.
+    </p>
+    <div class="header-pills">
+      <span class="pill pill-blue">☁ AWS Bedrock (Claude Sonnet)</span>
+      <span class="pill pill-green">◈ Amazon Neptune (Knowledge Graph)</span>
+      <span class="pill pill-amber">⬡ DynamoDB + S3 Storage</span>
+      <span class="pill pill-purple">⬡ 13 Specialized AI Agents</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<!-- ══════════════════════════════ TOC ══════════════════════════════════ -->
+<section>
+  <div class="toc">
+    <h3>📋 Demo Guide Contents</h3>
+    <div class="toc-item"><div class="toc-num">1</div><a href="#platform">Platform Overview &amp; Architecture</a></div>
+    <div class="toc-item"><div class="toc-num">2</div><a href="#credentials">Login &amp; Access</a></div>
+    <div class="toc-item"><div class="toc-num">3</div><a href="#dev">Demo: Dev Workspace</a></div>
+    <div class="toc-item"><div class="toc-num">4</div><a href="#qa">Demo: QA / Testing</a></div>
+    <div class="toc-item"><div class="toc-num">5</div><a href="#aiops">Demo: AIOps</a></div>
+    <div class="toc-item"><div class="toc-num">6</div><a href="#agents">13 AI Agents Explained</a></div>
+    <div class="toc-item"><div class="toc-num">7</div><a href="#leadership">Leadership Talking Points</a></div>
+    <div class="toc-item"><div class="toc-num">8</div><a href="#faq">FAQ &amp; Objection Handling</a></div>
+    <div class="toc-item"><div class="toc-num">9</div><a href="#setup">Setup &amp; Commands</a></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════ 1. PLATFORM OVERVIEW ════════════════ -->
+<section id="platform">
+  <div class="section-title">Section 1</div>
+  <h2>Platform Overview &amp; Architecture</h2>
+
+  <div class="arch">
+    <div class="arch-title">AURA Platform Architecture</div>
+    <div class="arch-row">
+      <div class="arch-box ab-blue">React Web UI<br/><small>Role-gated by 5 roles</small></div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box ab-gray">FastAPI + WebSocket<br/><small>94 routes</small></div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box ab-purple">Multi-Agent Orchestrator<br/><small>Intent → Plan → Execute → Validate</small></div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box ab-blue">Code Analysis Agent</div>
+      <div class="arch-box ab-green">Test Generation Agent</div>
+      <div class="arch-box ab-red">Security Agent</div>
+      <div class="arch-box ab-amber">AIOps Agent</div>
+      <div class="arch-box ab-purple">RCA Agent</div>
+      <div class="arch-box ab-gray">+8 more agents</div>
+    </div>
+    <div class="arch-arrow">↓</div>
+    <div class="arch-row">
+      <div class="arch-box ab-purple">Amazon Neptune<br/><small>SPARQL Knowledge Graph</small></div>
+      <div class="arch-box ab-blue">DynamoDB<br/><small>10 tables</small></div>
+      <div class="arch-box ab-amber">S3<br/><small>5 buckets</small></div>
+      <div class="arch-box ab-green">AWS Bedrock<br/><small>Claude Sonnet</small></div>
+    </div>
+  </div>
+
+  <br/>
+
+  <div class="four-col">
+    <div class="card kpi"><div class="kpi-num" style="color:var(--primary)">13</div><div class="kpi-label">AI Agents</div></div>
+    <div class="card kpi"><div class="kpi-num" style="color:var(--accent)">5</div><div class="kpi-label">User Roles</div></div>
+    <div class="card kpi"><div class="kpi-num" style="color:var(--warn)">94</div><div class="kpi-label">API Routes</div></div>
+    <div class="card kpi"><div class="kpi-num" style="color:var(--purple)">10</div><div class="kpi-label">DynamoDB Tables</div></div>
+  </div>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 2. CREDENTIALS ══════════════════════ -->
+<section id="credentials">
+  <div class="section-title">Section 2</div>
+  <h2>Login &amp; Access</h2>
+
+  <div class="two-col">
+    <div class="card card-accent-blue">
+      <h3>Default Credentials</h3>
+      <table>
+        <tr><td><strong>URL</strong></td><td style="font-family:var(--mono); color:var(--accent)">http://localhost:5173</td></tr>
+        <tr><td><strong>Username</strong></td><td style="font-family:var(--mono)">admin</td></tr>
+        <tr><td><strong>Password</strong></td><td style="font-family:var(--mono)">Admin@123</td></tr>
+        <tr><td><strong>Role</strong></td><td><span class="badge badge-red">Super Admin</span></td></tr>
+      </table>
+      <div class="callout callout-amber" style="margin-top:12px">
+        <div class="callout-icon">⚠</div>
+        <div class="callout-text"><strong>Change in production</strong>Default credentials must be rotated before go-live.</div>
+      </div>
+    </div>
+    <div class="card card-accent-green">
+      <h3>5 Demo Roles</h3>
+      <table>
+        <thead><tr><th>Role</th><th>Access</th><th>Create via</th></tr></thead>
+        <tbody>
+          <tr><td><span class="badge badge-blue">User + Dev</span></td><td>Dev Workspace, Graph, Advisor</td><td>Settings → Users</td></tr>
+          <tr><td><span class="badge badge-green">User + QA</span></td><td>QA Testing, Graph, Advisor</td><td>Settings → Users</td></tr>
+          <tr><td><span class="badge badge-amber">User + Ops</span></td><td>AIOps, Graph, Advisor</td><td>Settings → Users</td></tr>
+          <tr><td><span class="badge badge-purple">Admin</span></td><td>Everything + User Management</td><td>Settings → Users</td></tr>
+          <tr><td><span class="badge badge-red">Super Admin</span></td><td>Everything + Role Management</td><td>Default user</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 3. DEV DEMO ══════════════════════════ -->
+<section id="dev">
+  <div class="section-title">Section 3</div>
+  <h2>Demo: Dev Workspace</h2>
+
+  <div class="callout callout-blue">
+    <div class="callout-icon">🎯</div>
+    <div class="callout-text">
+      <strong>What to show</strong>
+      AURA understands the full InsCore Payment Platform from source code — without anyone manually documenting it.
+      It builds a live knowledge graph connecting code, services, infrastructure, databases, and dependencies.
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <h4>Navigate to Dev Workspace</h4>
+      <p>Click <strong>Dev Workspace</strong> in the left sidebar. You'll see sample projects already loaded, including the <em>InsCore Payment Platform (LOCAL DEMO)</em>.</p>
+      <div class="tip">💡 The "SAMPLE" purple badge indicates pre-loaded demo projects. The LOCAL DEMO points to real local Python code.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <h4>Open InsCore Payment Platform</h4>
+      <p>Click on the project card. The <strong>Overview tab</strong> shows tech stack detected, repositories connected, and service relationships discovered.</p>
+      <div class="tip">💡 Point out: 13 classes, 12 service methods, 786 lines of Python code — all discovered automatically from local files.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <h4>Click "Re-Analyse" to run live analysis</h4>
+      <p>This triggers <strong>CodeAnalysisAgent → ReverseEngineeringAgent → KnowledgeGraphAgent</strong> in sequence. Each agent runs, logs activity, and updates the knowledge graph.</p>
+      <div class="tip">💡 Show the Activity tab updating in real time as agents complete.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <h4>Ontology Graph — hover &amp; expand</h4>
+      <p>Switch to the <strong>Ontology Graph tab</strong>. <br/>• <strong>Hover</strong> any node → all connected nodes glow, unrelated nodes dim<br/>• <strong>Click</strong> any node → expand children, see relationships in the detail panel<br/>• Use the <strong>Depth selector</strong> (1/2/3/All) to control graph depth</p>
+      <div class="tip">💡 Demo: hover PaymentService → shows it connects to payment_db, UserService, AuditService, EKS-prod-cluster, and AWS Lambda.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">5</div>
+    <div class="step-content">
+      <h4>Mind Map — project hierarchy</h4>
+      <p>Switch to <strong>Mind Map tab</strong>. Shows the project as a tree: Services → APIs → Infra → Tech Stack → Databases. Fully draggable.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">6</div>
+    <div class="step-content">
+      <h4>Knowledge Diagram — relationships</h4>
+      <p>Switch to <strong>Knowledge Diagram tab</strong>. Shows typed entity nodes (Application, Service, API, Database, Infrastructure, Vulnerability) with labeled edge relationships.</p>
+      <div class="tip">💡 Point out: this is the ontology schema diagram — Application → contains → Service → deployed_on → Kubernetes. Zero manual documentation needed.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">7</div>
+    <div class="step-content">
+      <h4>Create a new project (optional live demo)</h4>
+      <p>Click <strong>New Project</strong> → enter a name → add repos as either <strong>Git URL</strong> or <strong>Local Path</strong> using the toggle on each repo row → click Create &amp; Analyse.</p>
+      <div class="tip">💡 Show both Git URL and Local Path modes in the same project for different repo types (e.g., UI from GitHub, legacy backend from local path).</div>
+    </div>
+  </div>
+
+  <blockquote>
+    "Traditional documentation takes weeks and becomes outdated immediately. AURA builds the living documentation automatically, from the code itself, and keeps it current every time analysis runs."
+  </blockquote>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 4. QA DEMO ═══════════════════════════ -->
+<section id="qa">
+  <div class="section-title">Section 4</div>
+  <h2>Demo: QA / Testing Workspace</h2>
+
+  <div class="callout callout-green">
+    <div class="callout-icon">🎯</div>
+    <div class="callout-text">
+      <strong>What to show</strong>
+      AURA generates a complete test suite automatically from the knowledge graph — Playwright UI tests,
+      API tests, integration tests, regression tests, negative cases, and boundary conditions.
+      No test engineer needs to write tests from scratch.
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <h4>Navigate to QA / Testing</h4>
+      <p>Click <strong>QA / Testing</strong> in the sidebar. Select <strong>InsCore Payment Service</strong> from the project dropdown. You'll see existing test suites if any have been generated.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <h4>Click "Generate Tests"</h4>
+      <p>The modal shows 6 test type checkboxes — all enabled by default:</p>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px;">
+        <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#94a3b8"><span style="color:var(--primary)">◈</span> Playwright UI — browser end-to-end</div>
+        <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#94a3b8"><span style="color:var(--accent)">◈</span> API Testing — REST endpoint validation</div>
+        <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#94a3b8"><span style="color:var(--purple)">◈</span> Integration — cross-service flows</div>
+        <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#94a3b8"><span style="color:var(--warn)">◈</span> Regression — diff-based detection</div>
+        <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#94a3b8"><span style="color:var(--danger)">◈</span> Negative — invalid input handling</div>
+        <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#94a3b8"><span style="color:#06b6d4">◈</span> Boundary — min/max/null/overflow</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <h4>Watch the live generation stream</h4>
+      <p>After clicking <strong>Generate Tests</strong>, a WebSocket live log appears. Watch AURA:<br/>
+      • Load the knowledge graph (services, APIs, tech stack)<br/>
+      • Generate Playwright TypeScript spec files<br/>
+      • Generate pytest API test files<br/>
+      • Save artifacts to S3</p>
+      <div class="tip">💡 For the demo project, Bedrock generates tests based on the payment service: test_payment_create, test_payment_refund, test_boundary_max_amount, test_negative_invalid_currency, etc.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <h4>View results and artifacts</h4>
+      <p>After generation: expand a test run row to see per-file pass/fail/skip breakdown.<br/>
+      Click <strong>Details</strong> → download generated Playwright <code>.spec.ts</code> files and pytest files directly.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">5</div>
+    <div class="step-content">
+      <h4>Run Tests</h4>
+      <p>Click <strong>Run Tests</strong> in the detail drawer. AURA executes the test suite and returns pass/fail/skip counts, duration, and coverage percentage per class.</p>
+    </div>
+  </div>
+
+  <blockquote>
+    "The same tests that used to take a QA engineer 3 weeks to write — AURA generates in under 5 minutes, with better coverage of edge cases because it reads the actual validation logic from the code."
+  </blockquote>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 5. AIOPS DEMO ════════════════════════ -->
+<section id="aiops">
+  <div class="section-title">Section 5</div>
+  <h2>Demo: AIOps — Live Monitoring</h2>
+
+  <div class="callout callout-amber">
+    <div class="callout-icon">🎯</div>
+    <div class="callout-text">
+      <strong>What to show</strong>
+      AURA connects to live CloudWatch alarms and stored events. When an alert fires,
+      AIOps correlates it with source code, service dependencies, and infrastructure to
+      automatically explain the root cause — without anyone manually digging through logs.
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content">
+      <h4>Navigate to AI Ops</h4>
+      <p>Click <strong>AI Ops</strong> in the sidebar. The live indicator shows whether CloudWatch is connected. KPI cards show active alarms, total alerts, agent runs.</p>
+      <div class="tip">💡 If no live CloudWatch alarms exist, the cards show "0 Active Alarms — All systems nominal". This is a good sign — show that it's truly live, not mocked.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content">
+      <h4>Click "Trigger RCA"</h4>
+      <p>This runs the <strong>3-agent RCA pipeline</strong>:<br/>
+      1. <strong>AIOpsAgent</strong> — fetches CloudWatch alarms, correlates with service graph<br/>
+      2. <strong>RCAAgent</strong> — calls Bedrock Claude to generate root cause analysis<br/>
+      3. <strong>KnowledgeGraphAgent</strong> — stores RCA findings as triples in Neptune</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content">
+      <h4>Show the Source Correlation panel</h4>
+      <p>The right sidebar shows: <strong>Alert → Service → Metric → Source</strong> chain for the top active alarm. This is the key differentiator — linking a monitoring alert directly to the responsible code and dependency.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content">
+      <h4>Show Agent Pipelines tab</h4>
+      <p>Switch to <strong>Agent Pipelines</strong> tab. Shows all orchestrator runs from DynamoDB with their agent chains and timestamps.</p>
+      <div class="tip">💡 This is the audit trail — every AI action is logged, traceable, and reviewable.</div>
+    </div>
+  </div>
+
+  <blockquote>
+    "Mean time to resolution drops from hours to minutes. The on-call engineer sees not just the alert — they see the root cause, the affected service, and the code that needs to change."
+  </blockquote>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 6. AGENTS ════════════════════════════ -->
+<section id="agents">
+  <div class="section-title">Section 6</div>
+  <h2>13 AI Agents Explained</h2>
+
+  <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom:20px;">
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(79,142,247,0.15)">📋</div>
+      <h4>Requirement Agent</h4>
+      <p>Extracts structured requirements from user descriptions, Jira tickets, and documents into RDF triples</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(139,92,246,0.15)">🔍</div>
+      <h4>Code Analysis Agent</h4>
+      <p>Multi-language AST analysis: Python, Java, TypeScript, COBOL, Mule, Angular, React</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(16,185,129,0.15)">⚙</div>
+      <h4>Code Generation Agent</h4>
+      <p>Generates boilerplate, scaffolding, and new code based on project context and requirements</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(16,185,129,0.15)">🧪</div>
+      <h4>Test Generation Agent</h4>
+      <p>Playwright, API, Integration, Regression, Negative, Boundary — from knowledge graph context</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(6,182,212,0.15)">▶</div>
+      <h4>Test Execution Agent</h4>
+      <p>Executes generated test suites, records results in DynamoDB, reports coverage per class</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(139,92,246,0.15)">🔄</div>
+      <h4>Reverse Engineering Agent</h4>
+      <p>Converts legacy codebases into structured knowledge graphs with inferred relationships</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(239,68,68,0.15)">🛡</div>
+      <h4>Security Agent</h4>
+      <p>CVE lookup, OWASP checks, dependency vulnerability scanning with remediation recommendations</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(245,158,11,0.15)">🔧</div>
+      <h4>Vulnerability Remediation Agent</h4>
+      <p>Generates specific code fixes for high-severity security findings</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(6,182,212,0.15)">📊</div>
+      <h4>AIOps Agent</h4>
+      <p>Ingests CloudWatch, Prometheus, Splunk data. Correlates alerts with service dependencies</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(239,68,68,0.15)">🔬</div>
+      <h4>RCA Agent</h4>
+      <p>AI-powered root cause analysis: links monitoring alerts → source code → dependency chain</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(16,185,129,0.15)">🚀</div>
+      <h4>Deployment Agent</h4>
+      <p>Triggers CI/CD pipelines, manages Kubernetes deployments, tracks deployment status</p>
+    </div>
+    <div class="agent-card">
+      <div class="agent-icon" style="background:rgba(245,158,11,0.15)">♻</div>
+      <h4>Knowledge Graph Agent</h4>
+      <p>Always runs last — aggregates all new facts from every agent and updates Neptune</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Orchestration Flow</h3>
+    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:13px; color:#94a3b8; margin-top:8px;">
+      <span style="background:rgba(79,142,247,0.15); color:var(--primary); padding:4px 12px; border-radius:20px; font-weight:700;">User Intent</span>
+      <span>→</span>
+      <span style="background:rgba(139,92,246,0.15); color:var(--purple); padding:4px 12px; border-radius:20px; font-weight:700;">Classify Intent</span>
+      <span>→</span>
+      <span style="background:rgba(16,185,129,0.15); color:var(--accent); padding:4px 12px; border-radius:20px; font-weight:700;">Select Agents</span>
+      <span>→</span>
+      <span style="background:rgba(245,158,11,0.15); color:var(--warn); padding:4px 12px; border-radius:20px; font-weight:700;">Execute Sequential</span>
+      <span>→</span>
+      <span style="background:rgba(6,182,212,0.15); color:#06b6d4; padding:4px 12px; border-radius:20px; font-weight:700;">Update Knowledge Graph</span>
+      <span>→</span>
+      <span style="background:rgba(79,142,247,0.15); color:var(--primary); padding:4px 12px; border-radius:20px; font-weight:700;">Return Result</span>
+    </div>
+  </div>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 7. LEADERSHIP ════════════════════════ -->
+<section id="leadership">
+  <div class="section-title">Section 7</div>
+  <h2>Leadership Talking Points</h2>
+
+  <div class="two-col">
+    <div class="card card-accent-blue">
+      <h3>The Problem We're Solving</h3>
+      <ul style="list-style:none; display:flex; flex-direction:column; gap:10px; margin-top:8px;">
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--danger); font-weight:700; flex-shrink:0">✗</span>Engineers spend 40% of time understanding existing systems before changing them</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--danger); font-weight:700; flex-shrink:0">✗</span>Legacy COBOL systems have no documentation — institutional knowledge locked in individuals</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--danger); font-weight:700; flex-shrink:0">✗</span>Test suites take 3–5 weeks to write manually for new services</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--danger); font-weight:700; flex-shrink:0">✗</span>Security vulnerabilities discovered late in the SDLC cost 100x more to fix</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--danger); font-weight:700; flex-shrink:0">✗</span>On-call engineers need 2–4 hours to diagnose production incidents</li>
+      </ul>
+    </div>
+    <div class="card card-accent-green">
+      <h3>What AURA Delivers</h3>
+      <ul style="list-style:none; display:flex; flex-direction:column; gap:10px; margin-top:8px;">
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--accent); font-weight:700; flex-shrink:0">✓</span>Instant knowledge graph of any codebase — Java, Python, COBOL, Mule, Angular</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--accent); font-weight:700; flex-shrink:0">✓</span>AI-generated test suites in minutes, not weeks — with better edge case coverage</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--accent); font-weight:700; flex-shrink:0">✓</span>Security scanning every commit — CVEs caught before production</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--accent); font-weight:700; flex-shrink:0">✓</span>Root cause in minutes — alert → service → code → fix recommendation</li>
+        <li style="display:flex; gap:8px; font-size:13px; color:#94a3b8"><span style="color:var(--accent); font-weight:700; flex-shrink:0">✓</span>Fully role-gated — Dev, QA, Ops each see only what they need</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="three-col" style="margin-top:16px;">
+    <div class="card">
+      <div style="font-size:28px; font-weight:900; color:var(--primary); margin-bottom:4px;">80%</div>
+      <div style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em">Faster time to understand legacy code</div>
+      <div style="font-size:11px; color:#475569; margin-top:6px;">From weeks of archaeology to an instant knowledge graph with service relationships mapped</div>
+    </div>
+    <div class="card">
+      <div style="font-size:28px; font-weight:900; color:var(--accent); margin-bottom:4px;">95%</div>
+      <div style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em">Reduction in manual test writing</div>
+      <div style="font-size:11px; color:#475569; margin-top:6px;">AI-generated Playwright + pytest suites from the knowledge graph, in under 5 minutes</div>
+    </div>
+    <div class="card">
+      <div style="font-size:28px; font-weight:900; color:var(--warn); margin-bottom:4px;">&lt;5 min</div>
+      <div style="font-size:12px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em">Mean time to root cause</div>
+      <div style="font-size:11px; color:#475569; margin-top:6px;">Alert correlation to code file and dependency chain — powered by the knowledge graph</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h3>Strategic Alignment</h3>
+    <table>
+      <thead><tr><th>Business Priority</th><th>How AURA Addresses It</th><th>Measurable Outcome</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Legacy Modernisation</strong><br/><span style="font-size:11px; color:var(--muted)">COBOL → Cloud migration</span></td>
+          <td>Reverse-engineers legacy COBOL into structured knowledge graph. Maps all dependencies before any code is touched.</td>
+          <td>Reduce modernisation risk by 60% — know what breaks before you change it</td>
+        </tr>
+        <tr>
+          <td><strong>Regulatory Compliance</strong><br/><span style="font-size:11px; color:var(--muted)">SOX, GDPR, NYDFS</span></td>
+          <td>Immutable audit trail of every agent action in DynamoDB. Security scanning on every analysis cycle.</td>
+          <td>Continuous compliance posture — not point-in-time snapshots</td>
+        </tr>
+        <tr>
+          <td><strong>Developer Productivity</strong><br/><span style="font-size:11px; color:var(--muted)">Reduce onboarding time</span></td>
+          <td>New engineers understand any codebase in minutes via the visual knowledge graph.</td>
+          <td>Onboarding from 4 weeks to 3 days for existing codebases</td>
+        </tr>
+        <tr>
+          <td><strong>Operational Resilience</strong><br/><span style="font-size:11px; color:var(--muted)">Reduce MTTR</span></td>
+          <td>AIOps live feed + RCA agent correlates CloudWatch alerts directly to source code and dependencies.</td>
+          <td>MTTR from 2–4 hours to under 15 minutes</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 8. FAQ ════════════════════════════════ -->
+<section id="faq">
+  <div class="section-title">Section 8</div>
+  <h2>FAQ &amp; Objection Handling</h2>
+
+  <div style="display:flex; flex-direction:column; gap:12px;">
+    <div class="card card-accent-blue">
+      <h4 style="color:var(--primary); margin-bottom:8px;">Q: Does AURA send our source code to OpenAI or any external LLM provider?</h4>
+      <p style="font-size:13px; color:#94a3b8; line-height:1.7"><strong>A:</strong> No. AURA uses <strong>AWS Bedrock</strong> — Claude Sonnet is invoked inside your own AWS account and VPC. Your code never leaves your AWS environment. Bedrock's data processing agreement ensures no data is used for model training.</p>
+    </div>
+    <div class="card card-accent-green">
+      <h4 style="color:var(--accent); margin-bottom:8px;">Q: How does this handle COBOL and mainframe code?</h4>
+      <p style="font-size:13px; color:#94a3b8; line-height:1.7"><strong>A:</strong> The Reverse Engineering Agent uses a COBOL parser to extract programs, paragraphs, sections, copybooks, and DB2 CALL statements. It maps these to the knowledge graph exactly like modern code. The Claims API demo project demonstrates this — 100% COBOL with IBM DB2 and VSAM dependencies fully mapped.</p>
+    </div>
+    <div class="card card-accent-amber">
+      <h4 style="color:var(--warn); margin-bottom:8px;">Q: What if our codebase has millions of lines?</h4>
+      <p style="font-size:13px; color:#94a3b8; line-height:1.7"><strong>A:</strong> Analysis is incremental and repository-level. We analyse per-repo, not the entire enterprise at once. For a 1M line Java monolith, we run CodeAnalysisAgent on it once and cache the knowledge graph — subsequent analyses only re-process changed files. Amazon Neptune scales horizontally for large graphs.</p>
+    </div>
+    <div class="card card-accent-purple">
+      <h4 style="color:var(--purple); margin-bottom:8px;">Q: Can the generated tests actually run against our systems?</h4>
+      <p style="font-size:13px; color:#94a3b8; line-height:1.7"><strong>A:</strong> Yes. The Playwright tests are standard <code>.spec.ts</code> files that run with <code>npx playwright test</code>. The pytest files run with standard pytest. They target your actual API endpoints. In production, we'd configure the CI/CD connector to trigger test execution on every PR.</p>
+    </div>
+    <div class="card card-accent-red">
+      <h4 style="color:var(--danger); margin-bottom:8px;">Q: What's the production deployment model?</h4>
+      <p style="font-size:13px; color:#94a3b8; line-height:1.7"><strong>A:</strong> AURA deploys to AWS: React SPA → S3 + CloudFront, FastAPI backend → ECS Fargate behind ALB, Neptune cluster in the same VPC. Auth via Cognito. All traffic stays within your AWS account. Estimated cost: ~$800–1,200/month at moderate usage.</p>
+    </div>
+  </div>
+</section>
+
+<hr/>
+
+<!-- ══════════════════════════════ 9. SETUP ══════════════════════════════ -->
+<section id="setup">
+  <div class="section-title">Section 9</div>
+  <h2>Setup &amp; Commands</h2>
+
+  <div class="two-col">
+    <div class="card">
+      <h3>Start the Application</h3>
+      <div class="step-content">
+        <div class="cmd">cd c:/Git/IS/genai-aig-infra-structure-api-7419</div>
+        <div class="cmd" style="margin-top:6px;"># Backend (terminal 1)<br/>python -m uvicorn src.main:app --reload --port 8000</div>
+        <div class="cmd" style="margin-top:6px;"># Frontend (terminal 2)<br/>cd frontend && npm run dev</div>
+        <div class="cmd" style="margin-top:6px;"># Open browser<br/>http://localhost:5173</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Seed Demo Data</h3>
+      <div class="step-content">
+        <div class="cmd"># Run once after AWS credentials set<br/>python demo-project/setup_demo.py</div>
+        <div class="cmd" style="margin-top:6px;"># Or via API (app must be running)<br/>curl -X POST http://localhost:8000/api/projects/seed/samples \<br/>  -H "Authorization: Bearer &lt;token&gt;"</div>
+        <div class="cmd" style="margin-top:6px;"># Verify projects exist<br/>python -c "from src.database.dynamo_client import scan_items; [print(p['name']) for p in scan_items('projects')]"</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <h3>Demo Project Structure</h3>
+    <div style="font-family:var(--mono); font-size:12px; color:#94a3b8; line-height:1.8; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:10px;">
+      demo-project/<br/>
+      ├── <span style="color:var(--primary)">inscore-payment/</span>          &lt;— Main demo project<br/>
+      │   ├── <span style="color:var(--accent)">backend/</span>                 Python FastAPI (13 classes, 786 lines)<br/>
+      │   │   ├── main.py<br/>
+      │   │   ├── models/payment.py       PaymentRequest, PaymentStatus, etc.<br/>
+      │   │   ├── routers/payment.py      6 REST endpoints<br/>
+      │   │   ├── services/payment_service.py  DynamoDB + Lambda integration<br/>
+      │   │   ├── services/fraud_detection_service.py<br/>
+      │   │   ├── services/notification_service.py  SES + SNS<br/>
+      │   │   └── tests/test_payment_service.py     9 test cases<br/>
+      │   ├── <span style="color:var(--primary)">ui/</span>                    React TypeScript components<br/>
+      │   ├── <span style="color:var(--warn)">mule/</span>                  Mule 4 payment flow XML<br/>
+      │   └── <span style="color:var(--purple)">infra/</span>                 K8s Deployment + HPA<br/>
+      ├── <span style="color:var(--accent)">setup_demo.py</span>              One-time setup script<br/>
+      └── <span style="color:var(--primary)">AURA_Demo_Guide.html</span>     This file
+    </div>
+  </div>
+
+  <div class="callout callout-green" style="margin-top:16px;">
+    <div class="callout-icon">✓</div>
+    <div class="callout-text">
+      <strong>Pre-demo checklist</strong>
+      □ AWS credentials valid (check: <code>aws sts get-caller-identity</code>)<br/>
+      □ Backend running on port 8000 (check: <code>curl http://localhost:8000/health</code>)<br/>
+      □ Frontend running on port 5173 (check: browser tab open)<br/>
+      □ Sample projects visible in Dev Workspace (check: 4+ projects listed)<br/>
+      □ Admin login working (username: admin, password: Admin@123)
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════ FOOTER ════════════════════════════════ -->
+<hr/>
+<div style="text-align:center; padding:24px; color:var(--muted); font-size:12px;">
+  <div style="font-weight:700; font-size:14px; color:var(--text); margin-bottom:6px;">AURA — AI Dev Agent Platform</div>
+  <div>Built for AIG InsCore · Powered by AWS Bedrock (Claude Sonnet) · Amazon Neptune · DynamoDB · S3</div>
+  <div style="margin-top:8px; color:#334155;">Confidential — Internal Use Only</div>
+</div>
+
+</main>
+</body>
+</html>

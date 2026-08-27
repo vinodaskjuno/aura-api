@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+*.env.local
+credentials.ini
+**/*.pem
+**/*.key
+**/*_secret*
+**/*_credentials*
+
+# Encrypted memory store (contains conversation history)
+memory/
+
+# Generated artifacts
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/

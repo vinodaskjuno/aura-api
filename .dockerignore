@@ -1,0 +1,36 @@
+# ── Secrets: must never enter an image layer ─────────────────────────────────
+**/.env
+**/.env.*
+**/credentials.ini
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/secrets.*
+
+# ── Virtualenvs & caches (host-arch binaries; must not leak into the image) ──
+.venv/
+venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# ── Fixtures & local state: large, and not needed at runtime ─────────────────
+data/repos/
+demo-project/
+src/data/
+src/out/
+src/memory/
+
+# ── Repo metadata & docs ────────────────────────────────────────────────────
+.git/
+.github/
+.gitignore
+**/*.md
+*.html
+
+# NOT ignored: docker/ — backend.Dockerfile COPYs docker/entrypoint.sh at build
+# time (backend.Dockerfile:59).

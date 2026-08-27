@@ -1,0 +1,87 @@
+"""AURA AI Gateway — API key management endpoints.
+
+POST   /gateway/keys              — create a new key (returned once, store it)
+GET    /gateway/keys              — list caller's active keys
+DELETE /gateway/keys/{keyId}      — revoke a key
+GET    /gateway/keys/all          — admin: list all users' keys
+GET    /gateway/keys/me/{tool}    — get-or-create a key for a specific tool label
+                                    (used by the VS Code plugin on login)
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from src.routers.auth import get_current_user
+from src.services.gateway_service import (
+    generate_api_key,
+    get_or_create_tool_key,
+    list_user_keys,
+    revoke_api_key,
+    list_all_keys,
+)
+
+router = APIRouter(tags=["gateway-keys"])
+
+# Valid tool labels the VS Code plugin can request keys for
+_VALID_TOOL_LABELS = {"aura-plugin", "claude-ext", "claude-cli", "codex-cli", "gemini-cli", "unknown"}
+
+
+class CreateKeyRequest(BaseModel):
+    label: str = "default"
+    tool_label: str = "unknown"
+
+
+@router.post("/keys", status_code=201)
+def create_gateway_key(body: CreateKeyRequest, user: dict = Depends(get_current_user)):
+    """Generate a new gateway API key for the calling user."""
+    user_id = user.get("userId", "")
+    return generate_api_key(user_id, label=body.label, tool_label=body.tool_label)
+
+
+@router.get("/keys/me/{tool_label}")
+def get_or_create_my_tool_key(tool_label: str, user: dict = Depends(get_current_user)):
+    """Get-or-create a gateway key for the given tool label.
+
+    The VS Code plugin calls this once per tool on login:
+      GET /gateway/keys/me/aura-plugin
+      GET /gateway/keys/me/claude-ext
+      GET /gateway/keys/me/claude-cli
+      GET /gateway/keys/me/codex-cli
+
+    If an active key already exists for this (user, tool_label) pair the existing
+    key metadata is returned (plaintext key is NOT re-shown after creation).
+    If no active key exists a new one is created and the plaintext key is returned
+    once — the plugin must store it in VS Code SecretStorage immediately.
+
+    Response:
+      { keyId, key (only on first creation), keyHint, toolLabel, createdAt, exists }
+    """
+    if tool_label not in _VALID_TOOL_LABELS:
+        raise HTTPException(status_code=400, detail=f"Unknown tool_label '{tool_label}'")
+    user_id = user.get("userId", "")
+    return get_or_create_tool_key(user_id, tool_label)
+
+
+@router.get("/keys")
+def get_my_keys(user: dict = Depends(get_current_user)):
+    """List active gateway API keys for the calling user."""
+    user_id = user.get("userId", "")
+    return {"keys": list_user_keys(user_id)}
+
+
+@router.delete("/keys/{key_id}", status_code=200)
+def delete_gateway_key(key_id: str, user: dict = Depends(get_current_user)):
+    """Revoke a gateway API key."""
+    user_id = user.get("userId", "")
+    is_admin = user.get("role", "") in ("admin", "super_admin")
+    revoke_api_key(key_id, user_id, is_admin=is_admin)
+    return {"ok": True, "keyId": key_id}
+
+
+@router.get("/keys/all")
+def get_all_keys(user: dict = Depends(get_current_user)):
+    """List all gateway API keys across all users (admin only)."""
+    if user.get("role", "") not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"keys": list_all_keys()}

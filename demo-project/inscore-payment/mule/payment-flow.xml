@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation">
+
+  <!-- InsCore Payment Integration Flow — Mule 4 -->
+  <!-- Routes payment events between InsCore backend and external payment processors -->
+
+  <http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config">
+    <http:listener-connection host="0.0.0.0" port="8081"/>
+  </http:listener-config>
+
+  <db:config name="PostgreSQL_Config" doc:name="PostgreSQL Config">
+    <db:my-sql-connection host="${db.host}" port="5432"
+                          user="${db.user}" password="${db.password}"
+                          database="inscore_payments"/>
+  </db:config>
+
+  <!-- Main payment processing flow -->
+  <flow name="process-payment-flow">
+    <http:listener doc:name="POST /mule/payment" config-ref="HTTP_Listener_config" path="/mule/payment" allowedMethods="POST"/>
+
+    <ee:transform doc:name="Validate and transform payload">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+  paymentId:  uuid(),
+  policyId:   payload.policy_id,
+  amount:     payload.amount as Number,
+  currency:   payload.currency default "USD",
+  method:     payload.method,
+  timestamp:  now() as String,
+  status:     "PENDING"
+}]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+
+    <!-- Fraud check sub-flow -->
+    <flow-ref name="fraud-check-subflow" doc:name="Fraud Check"/>
+
+    <choice doc:name="Route by fraud risk">
+      <when expression="#[vars.fraudScore > 0.85]">
+        <set-variable variableName="status" value="BLOCKED" doc:name="Block high-risk"/>
+        <logger level="WARN" message="Payment blocked — high fraud risk: #[payload.paymentId]"/>
+      </when>
+      <otherwise>
+        <flow-ref name="send-to-payment-processor" doc:name="Process payment"/>
+        <flow-ref name="persist-payment-record" doc:name="Persist to DB"/>
+        <flow-ref name="send-notification" doc:name="Notify customer"/>
+      </otherwise>
+    </choice>
+
+    <ee:transform doc:name="Build response">
+      <ee:message>
+        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ payment_id: payload.paymentId, status: vars.status default "SUBMITTED" }
+]]></ee:set-payload>
+      </ee:message>
+    </ee:transform>
+  </flow>
+
+  <!-- Fraud scoring sub-flow -->
+  <sub-flow name="fraud-check-subflow">
+    <http:request method="POST" url="${fraud.service.url}/score"
+                  doc:name="Call Fraud Detection API">
+      <http:body>#[payload]</http:body>
+    </http:request>
+    <set-variable variableName="fraudScore" value="#[payload.score as Number]" doc:name="Store fraud score"/>
+  </sub-flow>
+
+  <!-- DB persistence sub-flow -->
+  <sub-flow name="persist-payment-record">
+    <db:insert doc:name="Insert payment record" config-ref="PostgreSQL_Config">
+      <db:sql>INSERT INTO payments (payment_id, policy_id, amount, method, status, created_at)
+              VALUES (:paymentId, :policyId, :amount, :method, 'PENDING', :timestamp)</db:sql>
+      <db:input-parameters>#[{ paymentId: payload.paymentId, policyId: payload.policyId,
+        amount: payload.amount, method: payload.method, timestamp: payload.timestamp }]</db:input-parameters>
+    </db:insert>
+  </sub-flow>
+
+  <!-- Error handling -->
+  <error-handler name="payment-error-handler">
+    <on-error-propagate type="DB:CONNECTIVITY">
+      <logger level="ERROR" message="Database connectivity failure: #[error.description]"/>
+    </on-error-propagate>
+    <on-error-continue type="HTTP:NOT_FOUND">
+      <set-payload value='{"error": "Payment service unavailable", "code": "SERVICE_DOWN"}'
+                   mimeType="application/json"/>
+    </on-error-continue>
+  </error-handler>
+
+</mule>
