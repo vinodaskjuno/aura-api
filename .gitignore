@@ -28,3 +28,8 @@ data/repos/
 workspace/
 
 .DS_Store
+
+# Demo fixture — a standalone git repo used by the DevMate/QualityMind demo.
+# It must have its own .git so POST /api/git/clone can clone it, which makes it
+# unsuitable for committing into this repo as a nested checkout.
+demo-project/aura-demo-shop/

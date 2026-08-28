@@ -165,6 +165,32 @@ def detach_repo(
 
 # ── Ingest ────────────────────────────────────────────────────────────────────
 
+def _promote_project(project_id: str) -> None:
+    """Mark a project `analyzed` once a service has ingested successfully.
+
+    Ingest set the SERVICE status but left the PROJECT at "pending", and
+    GET /api/qa/projects only returns projects whose status is in an allow-list
+    (qa.py). So a freshly ingested project was invisible in QualityMind and the
+    operator had to PUT the status by hand.
+    """
+    try:
+        rows = db.query_items("projects", "projectId", project_id, limit=1)
+        if not rows:
+            log.warning("Cannot promote unknown project %s", project_id)
+            return
+        current = rows[0].get("status", "")
+        if current in ("analyzed", "active"):
+            return
+        db.update_item(
+            "projects",
+            {"projectId": project_id, "userId": rows[0]["userId"]},
+            {"status": "analyzed", "updatedAt": datetime.now(timezone.utc).isoformat()},
+        )
+        log.info("Project %s promoted %s -> analyzed after ingest", project_id, current or "pending")
+    except Exception as exc:  # noqa: BLE001 — never fail an ingest over this
+        log.warning("Could not promote project %s: %s", project_id, exc)
+
+
 @router.post("/{service_id}/ingest")
 def ingest_service_endpoint(
     project_id: str,
@@ -191,6 +217,7 @@ def ingest_service_endpoint(
             _JOBS[job_id]["status"] = "done"
             _JOBS[job_id]["result"] = result
             _JOBS[job_id]["log"] = result.get("log", [])
+            _promote_project(project_id)
         except Exception as exc:
             _JOBS[job_id]["status"] = "failed"
             _JOBS[job_id]["log"].append(f"Error: {exc}")

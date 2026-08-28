@@ -28,12 +28,30 @@ class CodeAnalysisAgent(BaseAgent):
             result.log("No project_id — skipping code analysis")
             return result.finish("partial")
 
-        # Pull project connectors from DynamoDB
+        # Pull project connectors from DynamoDB.
+        # Two tables carry connectors and they are populated by different surfaces:
+        #   `connectors`       <- POST /api/projects (the project wizard, Data Loader)
+        #   `user-connectors`  <- the global /connectors page
+        # This only read `user-connectors`, so every project created through a
+        # project wizard analysed as "partial" with "No connectors found". Read both.
+        connectors = []
         try:
             from src.database.dynamo_client import scan_items
-            all_connectors = scan_items("user-connectors", limit=500)
-            connectors = [c for c in all_connectors if c.get("projectId") == project_id]
-        except Exception:
+            seen: set[str] = set()
+            for table in ("connectors", "user-connectors"):
+                try:
+                    rows = scan_items(table, limit=500)
+                except Exception:  # noqa: BLE001 — a missing table must not hide the other
+                    continue
+                for c in rows:
+                    if c.get("projectId") != project_id:
+                        continue
+                    key = c.get("connectorId") or f"{table}:{len(seen)}"
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    connectors.append(c)
+        except Exception:  # noqa: BLE001
             connectors = []
 
         if not connectors:

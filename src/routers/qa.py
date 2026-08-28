@@ -23,6 +23,9 @@ class GenerateTestsRequest(BaseModel):
 
 class RunTestsRequest(BaseModel):
     run_id: str | None = None
+    # Without this the run is stored under projectId "default" and never appears in
+    # the project's suites list — the results simply vanish.
+    project_id: str | None = None
     test_types: list[str] = []
 
 
@@ -92,6 +95,21 @@ async def generate_tests(req: GenerateTestsRequest,
     }
 
 
+def _s3_key(uri: str) -> str:
+    """Strip the bucket prefix off an s3:// URI to get the object key.
+
+    The literal "s3://aura-test-artifacts/" never matched: s3_client._bucket()
+    resolves to "aura-<accountId>-test-artifacts", so the whole s3:// URI was being
+    passed to presigned_url as a key and every artifact link 404'd. Derive the real
+    bucket name instead of hardcoding it.
+    """
+    if not uri.startswith("s3://"):
+        return uri
+    rest = uri[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    return key or rest
+
+
 @router.post("/run")
 async def run_tests(req: RunTestsRequest,
                      user: dict = Depends(require_permission("qa_workspace"))):
@@ -99,11 +117,14 @@ async def run_tests(req: RunTestsRequest,
     from src.agents.base_agent import AgentContext, AgentResult, S3Ref
     from src.agents.test_execution_agent import TestExecutionAgent
 
+    # project_id was omitted, so every re-run was written under projectId "default"
+    # and never appeared in GET /projects/{id}/suites — the results were invisible.
     context = AgentContext(
         user_id=user["userId"],
         username=user["username"],
         role=user["role"],
         intent="Execute test suite",
+        project_id=req.project_id,
         session_id=str(uuid.uuid4()),
     )
 
@@ -114,7 +135,7 @@ async def run_tests(req: RunTestsRequest,
         if matching:
             mock_gen = AgentResult(agent_name="test_generation_agent")
             mock_gen.artifacts = [
-                S3Ref(bucket="aura-test-artifacts", key=a.replace("s3://aura-test-artifacts/", ""), uri=a)
+                S3Ref(bucket="test-artifacts", key=_s3_key(a), uri=a)
                 for a in matching.get("artifacts", [])
             ]
             context.prior_results["test_generation_agent"] = mock_gen
@@ -143,7 +164,7 @@ def get_run_artifacts(run_id: str, user: dict = Depends(require_permission("qa_w
         raise HTTPException(status_code=404, detail="Run not found")
     result = []
     for uri in run.get("artifacts", []):
-        key = uri.replace("s3://aura-test-artifacts/", "")
+        key = _s3_key(uri)
         try:
             url = presigned_url("test-artifacts", key, expires=3600)
             result.append({"key": key, "url": url, "filename": key.split("/")[-1]})
@@ -340,7 +361,7 @@ async def get_container_screenshots(run_id: str,
     screenshots_uris = run.get("screenshots", [])
     result = []
     for uri in screenshots_uris:
-        key = uri.replace("s3://aura-test-artifacts/", "")
+        key = _s3_key(uri)
         try:
             url  = presigned_url("test-artifacts", key, expires=3600)
             name = key.split("/")[-1]

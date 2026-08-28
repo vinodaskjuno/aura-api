@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from src.routers.auth import get_current_user
 
 # Persistent workspace root for cloned repos (ECS-friendly; override via env var)
-_WORKSPACE_ROOT = Path(os.environ.get("AURA_WORKSPACE", "/workspace"))
+_WORKSPACE_ROOT = Path(os.environ.get("AURA_WORKSPACE", "/workspace")).resolve()
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/git", tags=["git-ops"])
@@ -171,7 +171,11 @@ def create_pull_request(body: PRCreate, user: dict = Depends(get_current_user)):
 
 def _clone_path(project_id: str) -> Path:
     """Return the persistent clone directory for a project."""
-    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", project_id)
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", project_id or "")
+    if not safe:
+        # `_WORKSPACE_ROOT / ""` is the workspace root itself, so a blank id would
+        # target every project's clone directory at once.
+        raise HTTPException(status_code=400, detail="projectId is required")
     return _WORKSPACE_ROOT / safe
 
 
@@ -224,12 +228,20 @@ def clone_repo(body: CloneRequest, user: dict = Depends(get_current_user)):
         if result.returncode != 0:
             raise HTTPException(status_code=400, detail=f"Clone failed: {result.stderr[:400]}")
 
-        # Persist clonedPath to DynamoDB project record (best-effort)
+        # Persist clonedPath to DynamoDB project record (best-effort).
+        # `projects` is a COMPOSITE table (projectId + userId) — updating with the
+        # partition key alone is rejected by DynamoDB, so this silently never
+        # persisted. _resolve_project_dir happens to check the well-known path
+        # first, which is why the tools still worked and the bug stayed hidden.
         try:
             from src.database import dynamo_client as db
-            db.update_item("projects", {"projectId": body.projectId}, {"clonedPath": str(target), "clonedBranch": body.branch})
-        except Exception:
-            pass
+            db.update_item(
+                "projects",
+                {"projectId": body.projectId, "userId": user["userId"]},
+                {"clonedPath": str(target), "clonedBranch": body.branch},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not persist clonedPath for %s: %s", body.projectId, exc)
 
         return {"success": True, "clonedPath": str(target), "message": f"Cloned '{body.branch}' to {target}"}
     except subprocess.TimeoutExpired:
@@ -408,3 +420,44 @@ def commit_and_push(body: CommitRequest, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=408, detail="Git operation timed out")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Pending changes — the approval gate ──────────────────────────────────────
+# DevMate's write_file stages a change instead of writing it. These endpoints let
+# the operator review the diff and decide. Before this, the agent overwrote repo
+# files the instant it emitted a tool_use block, with no preview and no undo.
+
+class PendingActionRequest(BaseModel):
+    projectId: str
+    path: str
+
+
+@router.get("/pending/{project_id}")
+def get_pending_changes(project_id: str, user: dict = Depends(get_current_user)):
+    """Changes DevMate has proposed for this project but not yet written."""
+    from src.services.advisor import tools as advisor_tools
+    return {"changes": advisor_tools.list_pending(project_id)}
+
+
+@router.post("/pending/apply")
+def apply_pending_change(body: PendingActionRequest,
+                         user: dict = Depends(get_current_user)):
+    """Write one staged change to disk."""
+    from src.services.advisor import tools as advisor_tools
+    result = advisor_tools.apply_pending(body.projectId, body.path)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    log.info("User %s applied agent change %s in %s",
+             user.get("username"), body.path, body.projectId)
+    return result
+
+
+@router.post("/pending/discard")
+def discard_pending_change(body: PendingActionRequest,
+                           user: dict = Depends(get_current_user)):
+    """Drop a staged change without writing it."""
+    from src.services.advisor import tools as advisor_tools
+    result = advisor_tools.discard_pending(body.projectId, body.path)
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result

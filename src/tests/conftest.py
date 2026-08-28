@@ -24,6 +24,33 @@ import pytest  # noqa: E402
 FIXTURES = Path(__file__).resolve().parents[1] / "observability" / "eval" / "fixtures"
 
 
+# ── No real LLM calls from tests ─────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _no_real_llm(monkeypatch):
+    """Fail any bedrock-runtime call instead of letting a test spend real money.
+
+    Several agents construct `boto3.client("bedrock-runtime")` directly. While
+    BEDROCK_MODEL_ID pointed at a retired model these failed instantly; once it was
+    fixed the same code paths started making genuine paid inference calls, and the
+    suite went from 5s to 142s. Agents already handle an LLM failure by degrading,
+    so raising here exercises the fallback rather than the wallet.
+
+    Tests that need model output install a stub via the `stub_llm` fixture.
+    """
+    import boto3
+
+    real_client = boto3.client
+
+    def guarded(service_name, *args, **kwargs):
+        if service_name in ("bedrock-runtime", "bedrock"):
+            raise RuntimeError(
+                "Real LLM call attempted in a test. Use the stub_llm fixture.")
+        return real_client(service_name, *args, **kwargs)
+
+    monkeypatch.setattr(boto3, "client", guarded)
+
+
 # ── In-memory DynamoDB ───────────────────────────────────────────────────────
 
 def _reject_floats(table: str, value, path: str = "") -> None:

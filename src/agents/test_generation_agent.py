@@ -12,6 +12,21 @@ For each test type requested, generate realistic, executable test code.
 Return JSON: {"test_suites": [{"type": "playwright_ui|api|integration|regression|negative|boundary", "filename": "...", "content": "...", "test_count": N}]}"""
 
 
+def _generated_dir(clone_dir) -> str:
+    """Where to place generated suites inside the clone.
+
+    Prefer sitting beside an existing tests/ directory so relative imports and any
+    conftest.py already resolve; fall back to a top-level tests/generated.
+    """
+    from pathlib import Path
+    for candidate in sorted(Path(clone_dir).glob("**/tests")):
+        if candidate.is_dir() and not any(
+            p in candidate.parts for p in (".git", "node_modules", ".venv")
+        ):
+            return str((candidate / "generated").relative_to(clone_dir))
+    return "tests/generated"
+
+
 class TestGenerationAgent(BaseAgent):
     name = "test_generation_agent"
     description = "Generate Playwright, API, integration, regression, negative and boundary tests from code analysis"
@@ -98,6 +113,32 @@ For Playwright tests use TypeScript. For API tests use both Playwright API and p
                 result.log(f"  Saved {suite['type']}: {suite['filename']} ({suite.get('test_count', 0)} tests)")
         except Exception as exc:
             result.log(f"S3 save warning: {exc}")
+
+        # Also write the suites into the cloned repo so they can actually be RUN.
+        # Uploading to S3 alone left generation and execution disconnected: the tests
+        # existed as objects nobody could execute.
+        try:
+            from src.services.advisor.tools import _resolve_project_dir
+            clone_dir = _resolve_project_dir(project_id)
+            written = 0
+            for suite in suites:
+                name = str(suite.get("filename", "")).replace("\\", "/").split("/")[-1]
+                if not name.endswith(".py"):
+                    continue          # only pytest suites are executable today
+                if not name.startswith("test_"):
+                    name = f"test_{name}"
+                dest = clone_dir / _generated_dir(clone_dir) / name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                (dest.parent / "__init__.py").touch(exist_ok=True)
+                dest.write_text(suite["content"], encoding="utf-8")
+                written += 1
+            if written:
+                result.log(f"  Wrote {written} runnable suite(s) into the clone at "
+                           f"{_generated_dir(clone_dir)}")
+        except FileNotFoundError:
+            result.log("  No cloned repo — tests saved to S3 only, not executable")
+        except Exception as exc:  # noqa: BLE001
+            result.log(f"  Could not write tests into the clone: {exc}")
 
         # Persist test run metadata to DynamoDB (non-blocking)
         try:
