@@ -1,0 +1,936 @@
+{
+ "services": [
+  "checkout-service"
+ ],
+ "logs": [
+  {
+   "timestamp": "2026-08-01T10:00:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc00 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000000",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc00",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:00:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc01 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000001",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:01:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc02 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000002",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc02",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:01:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc03 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000003",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc03",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:02:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc04 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000004",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc04",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:02:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc05 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000005",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc05",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:03:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc06 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000006",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc06",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:03:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc07 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000007",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc07",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:04:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc08 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000008",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc08",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:04:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc09 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000009",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc09",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:05:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc10 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000010",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc10",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:05:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc11 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000011",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc11",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:06:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc12 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000012",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc12",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:06:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc13 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000013",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc13",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:07:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc14 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000014",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc14",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:07:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc15 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000015",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc15",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:08:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc16 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000016",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc16",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:08:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc17 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000017",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc17",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:09:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc18 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000018",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc18",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:09:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc19 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000019",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc19",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:10:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc20 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000020",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc20",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:10:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc21 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000021",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc21",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:11:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc22 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000022",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc22",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:11:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc23 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000023",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc23",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:12:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc24 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000024",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc24",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:12:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc25 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000025",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc25",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:13:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc26 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000026",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc26",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:13:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc27 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000027",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc27",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:14:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc28 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000028",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc28",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:14:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc29 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000029",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc29",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:15:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc30 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000030",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc30",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:15:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc31 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000031",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc31",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:16:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc32 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000032",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc32",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:16:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc33 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000033",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc33",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:17:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc34 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000034",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc34",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:17:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc35 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000035",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc35",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:18:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc36 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000036",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc36",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:18:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc37 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000037",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc37",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:19:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc38 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000038",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc38",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:19:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "java.lang.OutOfMemoryError: Java heap space in pod checkout-7d9f4b-abc39 on node ip-10-42-3-17.ec2.internal (10.42.3.17) req 7f3a9c1b-0000-4000-8000-000000000039",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc39",
+    "namespace": "prod-checkout",
+    "cluster": "prod-use1-cluster"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=1"
+  },
+  {
+   "timestamp": "2026-08-01T10:30:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "HikariPool-1 - Connection is not available, request timed out after 30000ms",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=2"
+  },
+  {
+   "timestamp": "2026-08-01T10:31:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "HikariPool-1 - Connection is not available, request timed out after 30001ms",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=2"
+  },
+  {
+   "timestamp": "2026-08-01T10:32:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "HikariPool-1 - Connection is not available, request timed out after 30002ms",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=2"
+  },
+  {
+   "timestamp": "2026-08-01T10:33:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "HikariPool-1 - Connection is not available, request timed out after 30003ms",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=2"
+  },
+  {
+   "timestamp": "2026-08-01T10:34:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "HikariPool-1 - Connection is not available, request timed out after 30004ms",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=2"
+  },
+  {
+   "timestamp": "2026-08-01T10:35:00Z",
+   "level": "ERROR",
+   "service": "checkout-service",
+   "body": "HikariPool-1 - Connection is not available, request timed out after 30005ms",
+   "labels": {
+    "pod": "checkout-7d9f4b-abc01"
+   },
+   "source_url": "https://grafana.internal.corp/explore?x=2"
+  }
+ ],
+ "metrics": [
+  {
+   "series_id": "m_p99",
+   "metric": "http_request_duration_seconds",
+   "service": "checkout-service",
+   "unit": "ms",
+   "points": [
+    {
+     "timestamp": "2026-08-01T10:00:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:01:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:02:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:03:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:04:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:05:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:06:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:07:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:08:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:09:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:10:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:11:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:12:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:13:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:14:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:15:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:16:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:17:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:18:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:19:00Z",
+     "value": 120.0
+    },
+    {
+     "timestamp": "2026-08-01T10:20:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:21:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:22:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:23:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:24:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:25:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:26:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:27:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:28:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:29:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:30:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:31:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:32:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:33:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:34:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:35:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:36:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:37:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:38:00Z",
+     "value": 2840.0
+    },
+    {
+     "timestamp": "2026-08-01T10:39:00Z",
+     "value": 2840.0
+    }
+   ],
+   "source_url": "https://grafana.internal.corp/explore?m=p99"
+  },
+  {
+   "series_id": "m_mem",
+   "metric": "container_memory_working_set_bytes",
+   "service": "checkout-service",
+   "unit": "bytes",
+   "points": [
+    {
+     "timestamp": "2026-08-01T10:00:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:01:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:02:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:03:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:04:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:05:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:06:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:07:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:08:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:09:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:10:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:11:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:12:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:13:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:14:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:15:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:16:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:17:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:18:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:19:00Z",
+     "value": 520000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:20:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:21:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:22:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:23:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:24:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:25:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:26:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:27:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:28:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:29:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:30:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:31:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:32:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:33:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:34:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:35:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:36:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:37:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:38:00Z",
+     "value": 1020000000.0
+    },
+    {
+     "timestamp": "2026-08-01T10:39:00Z",
+     "value": 1020000000.0
+    }
+   ],
+   "source_url": "https://grafana.internal.corp/explore?m=mem"
+  }
+ ],
+ "events": [
+  {
+   "kind": "deploy",
+   "timestamp": "2026-08-01T10:16:00Z",
+   "service": "checkout-service",
+   "title": "Deployed checkout-service v2.14.3",
+   "version": "v2.14.3",
+   "actor": "ci-bot",
+   "description": "raise JVM -Xmx to 1024m",
+   "source_url": "https://github.com/acme/checkout/releases/v2.14.3"
+  },
+  {
+   "kind": "deploy",
+   "timestamp": "2026-08-01T08:05:00Z",
+   "service": "checkout-service",
+   "title": "Deployed checkout-service v2.14.2",
+   "version": "v2.14.2",
+   "actor": "ci-bot",
+   "source_url": "https://github.com/acme/checkout/releases/v2.14.2"
+  },
+  {
+   "kind": "k8s_event",
+   "timestamp": "2026-08-01T10:22:00Z",
+   "service": "checkout-service",
+   "title": "OOMKilled: checkout-7d9f4b-abc01",
+   "description": "Container killed, exit 137",
+   "labels": {
+    "reason": "OOMKilled",
+    "namespace": "prod-checkout"
+   }
+  }
+ ],
+ "traces": [
+  {
+   "trace_id": "tr-001",
+   "root_service": "checkout-service",
+   "root_operation": "POST /checkout",
+   "start_time": "2026-08-01T10:25:00Z",
+   "duration_ms": 4820.0,
+   "span_count": 34,
+   "error_count": 3,
+   "status": "error",
+   "services_touched": [
+    "checkout-service",
+    "payment-service"
+   ],
+   "source_url": "https://grafana.internal.corp/explore?traceId=tr-001"
+  }
+ ]
+}

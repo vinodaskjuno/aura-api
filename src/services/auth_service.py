@@ -28,7 +28,10 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "advisor", "upload", "logs",
     ],
     "user_ops": [
-        "dashboard", "aiops", "knowledge_graph", "advisor", "logs",
+        "dashboard", "aiops", "observability", "knowledge_graph", "advisor", "logs",
+        # `connectors` is required so an ops user can configure the observability
+        # providers their own page depends on.
+        "connectors",
     ],
     "ontology_maintainer": [
         "dashboard", "dev_workspace", "knowledge_graph",
@@ -36,13 +39,13 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "scheduler", "advisor", "logs",
     ],
     "admin": [
-        "dashboard", "dev_workspace", "qa_workspace", "aiops",
+        "dashboard", "dev_workspace", "qa_workspace", "aiops", "observability",
         "knowledge_graph", "ontology", "ontology_maintain", "advisor",
         "connectors", "upload", "logs", "settings", "user_management",
         "scheduler",
     ],
     "super_admin": [
-        "dashboard", "dev_workspace", "qa_workspace", "aiops",
+        "dashboard", "dev_workspace", "qa_workspace", "aiops", "observability",
         "knowledge_graph", "ontology", "ontology_maintain", "advisor",
         "connectors", "upload", "logs", "settings", "user_management",
         "role_management", "scheduler",

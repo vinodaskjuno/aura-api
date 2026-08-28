@@ -1,0 +1,1733 @@
+[
+  {
+    "label": "DeploymentEnvironment",
+    "properties": {
+      "externalId": "env:prod",
+      "source": "file_upload",
+      "status": "active",
+      "name": "prod",
+      "region": "us-east-1",
+      "isProduction": true,
+      "changeFreeze": true,
+      "vpcId": "vpc-021c28",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "DeploymentEnvironment",
+    "properties": {
+      "externalId": "env:staging",
+      "source": "file_upload",
+      "status": "active",
+      "name": "staging",
+      "region": "us-east-1",
+      "isProduction": false,
+      "changeFreeze": false,
+      "vpcId": "vpc-88ab13",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "DeploymentEnvironment",
+    "properties": {
+      "externalId": "env:dev",
+      "source": "file_upload",
+      "status": "active",
+      "name": "dev",
+      "region": "eu-west-1",
+      "isProduction": false,
+      "changeFreeze": false,
+      "vpcId": "vpc-19fe70",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api",
+      "criticality": "tier-1",
+      "lifecycle": "active",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:payments-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-api",
+      "criticality": "tier-1",
+      "lifecycle": "active",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:policy-ui",
+      "source": "file_upload",
+      "status": "active",
+      "name": "policy-ui",
+      "criticality": "tier-2",
+      "lifecycle": "active",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Team",
+    "properties": {
+      "externalId": "team:claims-eng",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Claims Engineering",
+      "memberCount": 14,
+      "costCentre": "CC-4410",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Team",
+    "properties": {
+      "externalId": "team:platform-core",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Platform Core",
+      "memberCount": 9,
+      "costCentre": "CC-2201",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Project",
+    "properties": {
+      "externalId": "proj:claims-modernisation",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Claims Modernisation",
+      "portfolio": "Core Insurance",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Project",
+    "properties": {
+      "externalId": "proj:digital-channels",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Digital Channels",
+      "portfolio": "Customer",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-vpc",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-prod-vpc",
+      "type": "vpc",
+      "cidr": "10.40.0.0/16",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "flowLogsEnabled": false,
+      "openToWorld": false,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-subnet-a",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-prod-private-1a",
+      "type": "subnet",
+      "cidr": "10.40.1.0/24",
+      "availabilityZone": "us-east-1a",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "flowLogsEnabled": true,
+      "openToWorld": false,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-sg-web",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-prod-sg-web",
+      "type": "security-group",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "ingressRuleCount": 4,
+      "egressRuleCount": 1,
+      "openToWorld": true,
+      "openPorts": "80,443",
+      "flowLogsEnabled": true,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:stg-vpc",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-stg-vpc",
+      "type": "vpc",
+      "cidr": "10.50.0.0/16",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "flowLogsEnabled": true,
+      "openToWorld": false,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:prod-use1",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-prod-use1",
+      "provider": "EKS",
+      "version": "1.29",
+      "region": "us-east-1",
+      "nodeCount": 42,
+      "podCapacity": 1680,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:stg-use1",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-stg-use1",
+      "provider": "EKS",
+      "version": "1.28",
+      "region": "us-east-1",
+      "nodeCount": 8,
+      "podCapacity": 320,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-01",
+      "source": "file_upload",
+      "status": "active",
+      "name": "ip-10-40-1-31",
+      "instanceType": "m6i.2xlarge",
+      "os": "Amazon Linux 2023",
+      "cpuCores": 8,
+      "memoryGb": 32,
+      "privateIp": "10.40.1.31",
+      "patchLevel": "current",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-02",
+      "source": "file_upload",
+      "status": "active",
+      "name": "ip-10-40-1-84",
+      "instanceType": "m6i.2xlarge",
+      "os": "Amazon Linux 2023",
+      "cpuCores": 8,
+      "memoryGb": 32,
+      "privateIp": "10.40.1.84",
+      "patchLevel": "stale",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:stg-node-01",
+      "source": "file_upload",
+      "status": "active",
+      "name": "ip-10-50-1-12",
+      "instanceType": "t3.large",
+      "os": "Amazon Linux 2023",
+      "cpuCores": 2,
+      "memoryGb": 8,
+      "privateIp": "10.50.1.12",
+      "patchLevel": "current",
+      "region": "us-east-1",
+      "provider": "AWS",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Server",
+    "properties": {
+      "externalId": "srv:legacy-policy",
+      "source": "file_upload",
+      "status": "active",
+      "name": "legacy-policy-01",
+      "location": "on-premise",
+      "os": "RHEL 7.9",
+      "ipAddress": "192.168.14.22",
+      "endOfSupport": "2026-11-30T00:00:00Z",
+      "managed": false,
+      "cpuCores": 16,
+      "memoryGb": 64,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Server",
+    "properties": {
+      "externalId": "srv:legacy-print",
+      "source": "file_upload",
+      "status": "active",
+      "name": "legacy-print-01",
+      "location": "on-premise",
+      "os": "Windows Server 2019",
+      "ipAddress": "192.168.14.40",
+      "endOfSupport": "2029-01-09T00:00:00Z",
+      "managed": true,
+      "cpuCores": 4,
+      "memoryGb": 16,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api",
+      "image": "aura/claims-api:3.14.2",
+      "replicas": 4,
+      "cpuRequest": "1000m",
+      "memoryRequest": "2Gi",
+      "restartCount": 12,
+      "namespace": "claims",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:payments-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-api",
+      "image": "aura/payments-api:2.8.0",
+      "replicas": 3,
+      "cpuRequest": "1500m",
+      "memoryRequest": "3Gi",
+      "restartCount": 0,
+      "namespace": "payments",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:policy-ui",
+      "source": "file_upload",
+      "status": "active",
+      "name": "policy-ui",
+      "image": "aura/policy-ui:1.9.4",
+      "replicas": 2,
+      "cpuRequest": "250m",
+      "memoryRequest": "512Mi",
+      "restartCount": 1,
+      "namespace": "web",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-prod-alb",
+      "resourceType": "ApplicationLoadBalancer",
+      "provider": "AWS",
+      "region": "us-east-1",
+      "encrypted": true,
+      "monthlyCostUsd": 340,
+      "dnsName": "aura-prod-alb.us-east-1.elb.amazonaws.com",
+      "internal": false,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod-listener",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-prod-alb:443",
+      "resourceType": "LbListener",
+      "provider": "AWS",
+      "region": "us-east-1",
+      "encrypted": true,
+      "monthlyCostUsd": 0,
+      "port": 443,
+      "protocol": "HTTPS",
+      "tlsEnabled": true,
+      "sslPolicy": "ELBSecurityPolicy-TLS13-1-2",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:s3-claims-docs",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-claims-documents",
+      "resourceType": "S3Bucket",
+      "provider": "AWS",
+      "region": "us-east-1",
+      "encrypted": false,
+      "publicAccessBlocked": false,
+      "versioning": true,
+      "monthlyCostUsd": 85,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:sqs-events",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-claim-events",
+      "resourceType": "SqsQueue",
+      "provider": "AWS",
+      "region": "us-east-1",
+      "encrypted": true,
+      "monthlyCostUsd": 180,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:ecr-claims",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura/claims-api",
+      "resourceType": "EcrRepository",
+      "provider": "AWS",
+      "region": "us-east-1",
+      "encrypted": true,
+      "scanOnPush": true,
+      "monthlyCostUsd": 22,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Database",
+    "properties": {
+      "externalId": "db:claims-pg",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-claims-prod",
+      "engine": "postgres",
+      "version": "15.4",
+      "sizeGb": 340,
+      "encryptedAtRest": true,
+      "multiAz": true,
+      "backupSchedule": "daily-03:00-utc",
+      "hostname": "aura-claims-prod.cluster-xyz.us-east-1.rds.amazonaws.com",
+      "region": "us-east-1",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Database",
+    "properties": {
+      "externalId": "db:payments-mysql",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-payments-prod",
+      "engine": "mysql",
+      "version": "8.0.35",
+      "sizeGb": 180,
+      "encryptedAtRest": false,
+      "multiAz": false,
+      "backupSchedule": "daily-04:00-utc",
+      "hostname": "aura-payments-prod.cluster-abc.us-east-1.rds.amazonaws.com",
+      "region": "us-east-1",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "IAMRole",
+    "properties": {
+      "externalId": "iam:claims-task-role",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-claims-task-role",
+      "trustedPrincipal": "ecs-tasks.amazonaws.com",
+      "managedPolicyCount": 2,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "IAMRole",
+    "properties": {
+      "externalId": "iam:payments-task-role",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-payments-task-role",
+      "trustedPrincipal": "ecs-tasks.amazonaws.com",
+      "managedPolicyCount": 1,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "IAMRole",
+    "properties": {
+      "externalId": "iam:orphan-legacy-role",
+      "source": "file_upload",
+      "status": "active",
+      "name": "aura-legacy-batch-role",
+      "trustedPrincipal": "ec2.amazonaws.com",
+      "managedPolicyCount": 0,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "IAMPolicy",
+    "properties": {
+      "externalId": "iampol:claims-rw",
+      "source": "file_upload",
+      "status": "active",
+      "name": "ClaimsDocumentsReadWrite",
+      "statementCount": 4,
+      "hasWildcardAction": false,
+      "hasWildcardResource": false,
+      "attachmentType": "managed",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "IAMPolicy",
+    "properties": {
+      "externalId": "iampol:admin-star",
+      "source": "file_upload",
+      "status": "active",
+      "name": "LegacyAdminFullAccess",
+      "statementCount": 1,
+      "hasWildcardAction": true,
+      "hasWildcardResource": true,
+      "attachmentType": "inline",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "ServiceAccount",
+    "properties": {
+      "externalId": "sa:claims-irsa",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api-sa",
+      "namespace": "claims",
+      "annotatedRoleArn": "arn:aws:iam::458800000068:role/aura-claims-task-role",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:claims-api:3.14.2",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api:3.14.2",
+      "type": "container",
+      "sizeMb": 142,
+      "signed": true,
+      "digest": "sha256:9f3a1c7b2e5d",
+      "builtAt": "2026-08-22T09:27:00Z",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:claims-3.14.2-prod",
+      "source": "file_upload",
+      "status": "success",
+      "name": "claims-api 3.14.2 \u2192 prod",
+      "strategy": "blue-green",
+      "durationSec": 214,
+      "deployedBy": "a.rivera",
+      "deployedAt": "2026-08-22T10:02:00Z",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Infrastructure",
+    "properties": {
+      "externalId": "infra:legacy-mainframe",
+      "source": "file_upload",
+      "status": "active",
+      "name": "zOS-MAINFRAME-01",
+      "type": "mainframe",
+      "hostname": "zos-mf-01",
+      "ip": "192.168.9.10",
+      "region": "on-premise",
+      "environment": "production",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "SecurityFinding",
+    "properties": {
+      "externalId": "find:s3-public-claims",
+      "source": "file_upload",
+      "status": "open",
+      "name": "S3 bucket allows public read",
+      "severity": "critical",
+      "cvssScore": 9.1,
+      "discoveredAt": "2026-08-18T00:00:00Z",
+      "scanner": "wiz",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "SecurityFinding",
+    "properties": {
+      "externalId": "find:sg-open-world",
+      "source": "file_upload",
+      "status": "open",
+      "name": "Security group open to 0.0.0.0/0 on 80,443",
+      "severity": "high",
+      "cvssScore": 7.4,
+      "discoveredAt": "2026-08-20T00:00:00Z",
+      "scanner": "wiz",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "SecurityFinding",
+    "properties": {
+      "externalId": "find:vm-unpatched",
+      "source": "file_upload",
+      "status": "open",
+      "name": "Host missing critical OS patches",
+      "severity": "critical",
+      "cvssScore": 8.8,
+      "discoveredAt": "2026-08-21T00:00:00Z",
+      "scanner": "crowdstrike",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "SecurityFinding",
+    "properties": {
+      "externalId": "find:mysql-unencrypted",
+      "source": "file_upload",
+      "status": "open",
+      "name": "RDS instance not encrypted at rest",
+      "severity": "high",
+      "cvssScore": 7.0,
+      "discoveredAt": "2026-08-12T00:00:00Z",
+      "scanner": "wiz",
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "AttackPath",
+    "properties": {
+      "externalId": "atk:internet-to-payments-db",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Internet \u2192 ALB \u2192 payments-api \u2192 unencrypted DB",
+      "likelihood": "medium",
+      "impact": "critical",
+      "hopCount": 4,
+      "dataset": "sample-infra"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-vpc",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:stg-vpc",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:staging",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-subnet-a",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-vpc",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-sg-web",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-vpc",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-sg-web",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ROUTES_TO",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-subnet-a",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Database",
+    "properties": {
+      "externalId": "db:claims-pg",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Database",
+    "properties": {
+      "externalId": "db:payments-mysql",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-subnet-a",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:prod-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:stg-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:staging",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:prod-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONTAINS",
+        "targetLabel": "Container",
+        "targetExternalId": "ctr:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:prod-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONTAINS",
+        "targetLabel": "Container",
+        "targetExternalId": "ctr:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:stg-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONTAINS",
+        "targetLabel": "Container",
+        "targetExternalId": "ctr:policy-ui",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:prod-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HOSTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "KubernetesCluster",
+    "properties": {
+      "externalId": "k8s:prod-use1",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HOSTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-01",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "KubernetesCluster",
+        "targetExternalId": "k8s:prod-use1",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-02",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "KubernetesCluster",
+        "targetExternalId": "k8s:prod-use1",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:stg-node-01",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "KubernetesCluster",
+        "targetExternalId": "k8s:stg-use1",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-01",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-subnet-a",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-02",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-subnet-a",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Server",
+    "properties": {
+      "externalId": "srv:legacy-policy",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HOSTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:policy-ui",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "RUNS_ON",
+        "targetLabel": "VM",
+        "targetExternalId": "vm:prod-node-01",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "RUNS_ON",
+        "targetLabel": "VM",
+        "targetExternalId": "vm:prod-node-02",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:policy-ui",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "RUNS_ON",
+        "targetLabel": "VM",
+        "targetExternalId": "vm:stg-node-01",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "KubernetesCluster",
+        "targetExternalId": "k8s:prod-use1",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:claims-api:3.14.2",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ACCESSES_AS",
+        "targetLabel": "IAMRole",
+        "targetExternalId": "iam:claims-task-role",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ACCESSES_AS",
+        "targetLabel": "ServiceAccount",
+        "targetExternalId": "sa:claims-irsa",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ACCESSES_AS",
+        "targetLabel": "IAMRole",
+        "targetExternalId": "iam:payments-task-role",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONNECTS_TO",
+        "targetLabel": "Database",
+        "targetExternalId": "db:claims-pg",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONNECTS_TO",
+        "targetLabel": "CloudResource",
+        "targetExternalId": "cloud:sqs-events",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONNECTS_TO",
+        "targetLabel": "Database",
+        "targetExternalId": "db:payments-mysql",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Container",
+    "properties": {
+      "externalId": "ctr:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "EXPOSED_VIA",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-sg-web",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-vpc",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:s3-claims-docs",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:sqs-events",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:ecr-claims",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod-listener",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "CloudResource",
+        "targetExternalId": "cloud:alb-prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "EXPOSED_VIA",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-sg-web",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ROUTES_TO",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ROUTES_TO",
+        "targetLabel": "Container",
+        "targetExternalId": "ctr:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:alb-prod",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONTAINS",
+        "targetLabel": "Database",
+        "targetExternalId": "db:claims-pg",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "RUNS_ON",
+        "targetLabel": "Container",
+        "targetExternalId": "ctr:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "RUNS_ON",
+        "targetLabel": "Container",
+        "targetExternalId": "ctr:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:policy-ui",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "RUNS_ON",
+        "targetLabel": "Infrastructure",
+        "targetExternalId": "infra:legacy-mainframe",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "EXPOSED_VIA",
+        "targetLabel": "Network",
+        "targetExternalId": "net:prod-sg-web",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ACCESSES_AS",
+        "targetLabel": "IAMRole",
+        "targetExternalId": "iam:claims-task-role",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONNECTS_TO",
+        "targetLabel": "Database",
+        "targetExternalId": "db:claims-pg",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "CONNECTS_TO",
+        "targetLabel": "Database",
+        "targetExternalId": "db:payments-mysql",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:policy-ui",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:platform-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:claims-modernisation",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:payments-api",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:claims-modernisation",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:policy-ui",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:digital-channels",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "IAMRole",
+    "properties": {
+      "externalId": "iam:claims-task-role",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "GOVERNED_BY",
+        "targetLabel": "IAMPolicy",
+        "targetExternalId": "iampol:claims-rw",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "IAMRole",
+    "properties": {
+      "externalId": "iam:payments-task-role",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "GOVERNED_BY",
+        "targetLabel": "IAMPolicy",
+        "targetExternalId": "iampol:admin-star",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:claims-3.14.2-prod",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:claims-api:3.14.2",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CloudResource",
+    "properties": {
+      "externalId": "cloud:s3-claims-docs",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "SecurityFinding",
+        "targetExternalId": "find:s3-public-claims",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Network",
+    "properties": {
+      "externalId": "net:prod-sg-web",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "SecurityFinding",
+        "targetExternalId": "find:sg-open-world",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "VM",
+    "properties": {
+      "externalId": "vm:prod-node-02",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "SecurityFinding",
+        "targetExternalId": "find:vm-unpatched",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Infrastructure",
+    "properties": {
+      "externalId": "infra:legacy-mainframe",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "SecurityFinding",
+        "targetExternalId": "find:vm-unpatched",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "SecurityFinding",
+    "properties": {
+      "externalId": "find:mysql-unencrypted",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "AttackPath",
+    "properties": {
+      "externalId": "atk:internet-to-payments-db",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ROUTES_TO",
+        "targetLabel": "Database",
+        "targetExternalId": "db:payments-mysql",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "AttackPath",
+    "properties": {
+      "externalId": "atk:internet-to-payments-db",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "ROUTES_TO",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "AttackPath",
+    "properties": {
+      "externalId": "atk:internet-to-payments-db",
+      "dataset": "sample-infra"
+    },
+    "relationships": [
+      {
+        "type": "REFERENCED_BY",
+        "targetLabel": "SecurityFinding",
+        "targetExternalId": "find:mysql-unencrypted",
+        "props": {}
+      }
+    ]
+  }
+]

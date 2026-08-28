@@ -131,6 +131,8 @@ async def lifespan(app: FastAPI):
 
 
 # ── App and middleware ────────────────────────────────────────────────────────
+from src.routers import observability as observability_router
+
 app = FastAPI(title="Aura API", lifespan=lifespan, redirect_slashes=False)
 
 _settings = get_settings()
@@ -172,6 +174,7 @@ from .routers import aiops as aiops_router
 from .routers import sop as sop_router
 from .routers import ontology_universe as ontology_universe_router
 from .routers import ontology_loader as ontology_loader_router
+from .routers import ontology_lens as ontology_lens_router
 from .routers import scheduler_router
 from .routers import chat_sessions as chat_sessions_router
 from .routers import git_ops as git_ops_router
@@ -190,9 +193,11 @@ app.include_router(orchestrator_router.router)
 app.include_router(projects_router.router)
 app.include_router(qa_router.router)
 app.include_router(aiops_router.router)
+app.include_router(observability_router.router)
 app.include_router(sop_router.router)
 app.include_router(ontology_universe_router.router)
 app.include_router(ontology_loader_router.router)
+app.include_router(ontology_lens_router.router)
 app.include_router(scheduler_router.router)
 app.include_router(chat_sessions_router.router)
 app.include_router(git_ops_router.router)

@@ -26,6 +26,13 @@ Available agents:
   deployment_agent          - trigger CI/CD pipelines and Kubernetes deployments
   self_healing_agent        - auto-remediate Kubernetes pod failures
   knowledge_graph_agent     - update and query the Neptune knowledge graph
+  obs_signal_collector      - collect logs/metrics/traces/deploys from Grafana, Datadog, Sentry, Elasticsearch, CloudWatch, Kubernetes
+  obs_correlator            - correlate signals into a timeline and align deploys to change points
+  obs_case_retrieval        - retrieve similar past incidents as priors
+  obs_runbook               - match a runbook and mark steps the evidence satisfies
+  obs_hypothesis            - generate competing root-cause hypotheses
+  obs_root_cause            - produce an evidence-cited root cause
+  obs_verifier              - re-check signals after a fix window
 
 Rules:
 - Always include knowledge_graph_agent LAST if any other agent produces output
@@ -33,6 +40,9 @@ Rules:
 - For test requests: test_generation_agent (and test_execution_agent if "run" is mentioned)
 - For security requests: security_agent + vulnerability_remediation_agent + knowledge_graph_agent
 - For incident/alert/ops: aiops_agent + rca_agent + knowledge_graph_agent
+- For a full SRE investigation of a live service (observability, Grafana/Loki/Datadog/
+  Sentry, "investigate", "root cause with evidence", postmortem): obs_signal_collector +
+  obs_correlator + obs_case_retrieval + obs_runbook + obs_hypothesis + obs_root_cause
 - Return ONLY valid JSON, no extra text.
 
 Example output:
@@ -85,6 +95,11 @@ def _keyword_classify(user_message: str) -> dict:
         agents += ["aiops_agent"]
     if any(w in msg for w in ["root cause", "rca", "why", "failure", "outage"]):
         agents += ["rca_agent"]
+    if any(w in msg for w in ["investigate", "observability", "sre", "postmortem",
+                              "runbook", "loki", "grafana", "datadog", "sentry",
+                              "trace", "span", "evidence", "correlate"]):
+        agents += ["obs_signal_collector", "obs_correlator", "obs_case_retrieval",
+                   "obs_runbook", "obs_hypothesis", "obs_root_cause"]
     if any(w in msg for w in ["deploy", "release", "pipeline", "ci/cd", "kubernetes", "k8s"]):
         agents += ["deployment_agent"]
     if any(w in msg for w in ["requirement", "story", "feature", "jira"]):

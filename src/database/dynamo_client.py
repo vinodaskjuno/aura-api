@@ -26,6 +26,7 @@ Tables used across the platform:
 """
 import logging
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
@@ -75,14 +76,79 @@ _COMPOSITE_TABLES = {
     "usage-daily":     ("pk",           "sk"),            # pk = userId|__org__, sk = date#tool#model
     "user-connectors": ("userId",       "connectorId"),
     "services":        ("projectId",    "serviceId"),
+    # Observability / SRE agents
+    "observability-investigations": ("investigationId", "createdAt"),
+    "observability-evidence":       ("investigationId", "evidenceId"),
+    "observability-outcomes":       ("investigationId", "recordedAt"),
+    "observability-cases":          ("caseId",          "createdAt"),
+    "observability-traces":         ("runId",           "seq"),
+    "notification-log":             ("dedupeKey",       "sentAt"),
 }
+
+
+# ── GSI key hygiene ──────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=None)
+def _gsi_key_attrs(table_name: str) -> frozenset[str]:
+    """Attribute names used as a key by any GSI on this table."""
+    for schema in TABLE_SCHEMAS:
+        if schema["name"] != table_name:
+            continue
+        names: set[str] = set()
+        for gsi in schema.get("gsis", []):
+            if gsi.get("pk"):
+                names.add(gsi["pk"])
+            if gsi.get("sk"):
+                names.add(gsi["sk"])
+        return frozenset(names)
+    return frozenset()
+
+
+def _decimalize(value: Any) -> Any:
+    """Recursively convert floats to Decimal.
+
+    DynamoDB rejects Python floats outright, and boto3 raises deep inside its
+    serializer with a message that names no field — so a single nested float (a
+    confidence score inside a findings list, say) fails the whole write with a
+    traceback that points at boto3 rather than at the offending data.
+    """
+    if isinstance(value, bool):
+        return value                      # bool before int/float — bools are fine
+    if isinstance(value, float):
+        # str() first: Decimal(float) carries binary float noise into storage.
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _decimalize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_decimalize(v) for v in value]
+    return value
+
+
+def _drop_empty_gsi_keys(table_name: str, item: dict) -> dict:
+    """Remove GSI key attributes whose value is an empty string.
+
+    DynamoDB rejects an empty string for ANY index key attribute, so a row that
+    legitimately has no project or no service would fail the whole write. Omitting
+    the attribute instead makes the index sparse: the row is stored and simply does
+    not appear in that index — which is the correct semantics, because querying
+    "investigations for project ''" is not a meaningful question.
+    """
+    keys = _gsi_key_attrs(table_name)
+    if not keys:
+        return item
+    dropped = [k for k in keys if item.get(k) == ""]
+    if not dropped:
+        return item
+    logger.debug("Omitting empty GSI key(s) %s from %s row", dropped, table_name)
+    return {k: v for k, v in item.items() if k not in dropped}
 
 
 # ── CRUD helpers ─────────────────────────────────────────────────────────────
 
 def put_item(table_name: str, item: dict) -> None:
     try:
-        _table(table_name).put_item(Item=item)
+        _table(table_name).put_item(
+            Item=_decimalize(_drop_empty_gsi_keys(table_name, item)))
     except ClientError as e:
         logger.error("DynamoDB put_item failed [%s]: %s", table_name, e)
         raise
@@ -146,6 +212,11 @@ def delete_item(table_name: str, key: dict) -> None:
 
 def update_item(table_name: str, key: dict, updates: dict) -> dict | None:
     """Update individual fields. `updates` is a flat dict of field→value."""
+    # Setting a GSI key to "" is rejected exactly as it is on put; skip those.
+    updates = {k: _decimalize(v) for k, v in updates.items()
+               if not (v == "" and k in _gsi_key_attrs(table_name))}
+    if not updates:
+        return None
     expr_parts = []
     expr_names: dict = {}
     expr_values: dict = {}
@@ -365,6 +436,37 @@ TABLE_SCHEMAS = [
     {"name": "gateway-providers",      "pk": "providerId", "sk": None},
     {"name": "gateway-provider-health","pk": "providerId", "sk": "checkedAt"},
     {"name": "gateway-budgets",        "pk": "pk",         "sk": None},
+    # ── Observability / SRE agents ───────────────────────────────────────────
+    # Evidence payloads live in S3 (a real incident is megabytes; DynamoDB items
+    # cap at 400KB). These tables hold indexes and records the SPA pages through.
+    {
+        "name": "observability-investigations",
+        "pk": "investigationId",
+        "sk": "createdAt",
+        "gsis": [
+            {"index": "projectId-createdAt-index",   "pk": "projectId",   "sk": "createdAt"},
+            {"index": "serviceName-createdAt-index", "pk": "serviceName", "sk": "createdAt"},
+        ],
+    },
+    {"name": "observability-evidence", "pk": "investigationId", "sk": "evidenceId"},
+    {
+        "name": "observability-outcomes",
+        "pk": "investigationId",
+        "sk": "recordedAt",
+        "gsis": [
+            {"index": "verdict-recordedAt-index", "pk": "verdict", "sk": "recordedAt"},
+        ],
+    },
+    {
+        "name": "observability-cases",
+        "pk": "caseId",
+        "sk": "createdAt",
+        "gsis": [
+            {"index": "serviceName-createdAt-index", "pk": "serviceName", "sk": "createdAt"},
+        ],
+    },
+    {"name": "observability-traces",   "pk": "runId",     "sk": "seq"},
+    {"name": "notification-log",       "pk": "dedupeKey", "sk": "sentAt"},
 ]
 
 

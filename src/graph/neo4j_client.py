@@ -123,6 +123,22 @@ INDEXES_DDL = [
     # Provenance/version queries
     "CREATE INDEX node_version IF NOT EXISTS FOR (n:Service) ON (n.versionId)",
     "CREATE INDEX rel_confidence IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+    # ── Observability / SRE agents ───────────────────────────────────────────
+    "CREATE INDEX incident_started IF NOT EXISTS FOR (n:Incident) ON (n.startedAt)",
+    "CREATE INDEX incident_service IF NOT EXISTS FOR (n:Incident) ON (n.serviceName)",
+    "CREATE INDEX alert_ts IF NOT EXISTS FOR (n:Alert) ON (n.timestamp)",
+    "CREATE INDEX runbook_origin IF NOT EXISTS FOR (n:Runbook) ON (n.origin)",
+    "CREATE INDEX runbook_status IF NOT EXISTS FOR (n:Runbook) ON (n.status)",
+]
+
+# Full-text indexes back runbook matching and case retrieval. Deliberately not a
+# vector store: no embedding library exists in requirements.txt, and FTS scoring is
+# deterministic, explainable, and directly scoreable by the eval harness.
+FULLTEXT_DDL = [
+    "CREATE FULLTEXT INDEX runbook_fts IF NOT EXISTS "
+    "FOR (n:Runbook) ON EACH [n.title, n.bodySnippet, n.tags, n.services]",
+    "CREATE FULLTEXT INDEX incident_fts IF NOT EXISTS "
+    "FOR (n:Incident) ON EACH [n.title, n.rootCauseStatement, n.errorSignatures, n.serviceName]",
 ]
 
 
@@ -132,12 +148,13 @@ def ensure_schema():
         return
     constraints = _build_constraints_ddl()
     with session() as s:
-        for ddl in constraints + INDEXES_DDL:
+        for ddl in constraints + INDEXES_DDL + FULLTEXT_DDL:
             try:
                 s.run(ddl)
             except Exception:
                 pass
-    log.info("Neo4j schema ready (%d constraints, %d indexes)", len(constraints), len(INDEXES_DDL))
+    log.info("Neo4j schema ready (%d constraints, %d indexes, %d fulltext)",
+             len(constraints), len(INDEXES_DDL), len(FULLTEXT_DDL))
 
 
 # ── Generic MERGE upsert ──────────────────────────────────────────────────────
@@ -232,7 +249,7 @@ def link_nodes_by_eid(
             result = s.run(cypher, from_eid=from_eid, to_eid=to_eid, props=p)
             return result.single() is not None
     except Exception as exc:
-        logger.debug("link_nodes_by_eid %s→%s [%s]: %s", from_eid, to_eid, rel_type, exc)
+        log.debug("link_nodes_by_eid %s→%s [%s]: %s", from_eid, to_eid, rel_type, exc)
         return False
 
 
@@ -281,65 +298,204 @@ def retire_node(label: str, external_id: str) -> bool:
 
 # ── Query helpers ─────────────────────────────────────────────────────────────
 
+def _label_expr(labels, var: str) -> str:
+    """Build a Neo4j 5 label expression (e.g. ``n:Service|API``) from a label list.
+
+    Every entry is validated against the canonical ``schema.ALL_LABELS`` before it
+    reaches Cypher, because callers pass values straight from query strings.
+    Raises ValueError when nothing survives validation.
+    """
+    from src.ontology.schema import ALL_LABELS
+    safe = [l for l in labels if l in ALL_LABELS]
+    if not safe:
+        raise ValueError(f"no recognised labels in {labels!r}")
+    return f"{var}:" + "|".join(safe)
+
+
+def _node_row(rec) -> dict:
+    """Map a (id, labels, props) record to the force-graph node shape."""
+    props = dict(rec["props"])
+    labels = rec["labels"]
+    node_type = labels[0] if labels else "Unknown"
+    return {
+        "id": rec["id"],
+        "label": props.get("name", props.get("externalId", rec["id"])),
+        "node_type": node_type,
+        "source": props.get("source", "unknown"),
+        "status": props.get("status", "active"),
+        **{k: v for k, v in props.items() if k not in ("name",)},
+    }
+
+
+def _link_row(rec) -> dict:
+    """Map a (id, source, target, rel_type, props) record to the link shape."""
+    props = dict(rec["props"])
+    # Rename provenance 'source' → 'prov_source' to avoid collision with
+    # force-graph's own 'source' field (mutated to a node object in place).
+    if "source" in props:
+        props["prov_source"] = props.pop("source")
+    return {
+        "id": rec["id"],
+        "source": rec["source"],
+        "target": rec["target"],
+        "type": rec["rel_type"],
+        **props,
+    }
+
+
 def get_org_graph(
     type_filter: list[str] | None = None,
     source_filter: list[str] | None = None,
     limit: int = 5000,
 ) -> dict:
-    """Return nodes + relationships for the full org ontology."""
-    where_clauses = []
-    if type_filter:
-        labels_str = "|".join(f"n:{t}" for t in type_filter)
-        where_clauses.append(f"({labels_str})")
-    if source_filter:
-        where_clauses.append("n.source IN $sources")
+    """Return nodes + relationships for the full org ontology.
 
-    where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    Relationships are keyed off the returned node ids so that both endpoints are
+    guaranteed present — a filtered graph never contains dangling links.
+    """
+    node_where: list[str] = []
+    params: dict[str, Any] = {"limit": limit}
+
+    if type_filter:
+        node_where.append(f"({_label_expr(type_filter, 'n')})")
+    if source_filter:
+        node_where.append("n.source IN $sources")
+        params["sources"] = source_filter
+
+    node_clause = ("WHERE " + " AND ".join(node_where)) if node_where else ""
 
     node_cypher = f"""
     MATCH (n)
-    {where}
+    {node_clause}
     RETURN elementId(n) AS id, labels(n) AS labels, properties(n) AS props
-    LIMIT {limit}
+    ORDER BY coalesce(n.updatedAt, n.createdAt, '') DESC
+    LIMIT $limit
     """
-    rel_cypher = f"""
+
+    # coalesce(): a relationship with no explicit 'active' property is live.
+    # `r.active <> false` would evaluate to NULL and silently drop the row.
+    rel_cypher = """
+    UNWIND $ids AS nid
+    MATCH (a) WHERE elementId(a) = nid
     MATCH (a)-[r]->(b)
-    {where.replace('n.', 'a.')}
-    WHERE r.active <> false
-    RETURN elementId(r) AS id, elementId(a) AS source, elementId(b) AS target,
-           type(r) AS rel_type, properties(r) AS props
-    LIMIT {limit * 3}
+    WHERE elementId(b) IN $ids
+      AND coalesce(r.active, true) = true
+    RETURN DISTINCT elementId(r) AS id, elementId(a) AS source,
+           elementId(b) AS target, type(r) AS rel_type, properties(r) AS props
+    LIMIT $rel_limit
     """
+
     nodes, links = [], []
     with session() as s:
-        for rec in s.run(node_cypher, sources=source_filter or []):
-            props = dict(rec["props"])
-            labels = rec["labels"]
-            node_type = labels[0] if labels else "Unknown"
-            nodes.append({
-                "id": rec["id"],
-                "label": props.get("name", props.get("externalId", rec["id"])),
-                "node_type": node_type,
-                "source": props.get("source", "unknown"),
-                "status": props.get("status", "active"),
-                **{k: v for k, v in props.items()
-                   if k not in ("name",)},
-            })
-        for rec in s.run(rel_cypher, sources=source_filter or []):
-            props = dict(rec["props"])
-            # Rename provenance 'source' → 'prov_source' to avoid collision
-            # with force-graph's own 'source' field (mutated to node object)
-            if "source" in props:
-                props["prov_source"] = props.pop("source")
-            links.append({
-                "id": rec["id"],
-                "source": rec["source"],
-                "target": rec["target"],
-                "type": rec["rel_type"],
-                **props,
-            })
+        for rec in s.run(node_cypher, **params):
+            nodes.append(_node_row(rec))
+        ids = [n["id"] for n in nodes]
+        if ids:
+            for rec in s.run(rel_cypher, ids=ids, rel_limit=limit * 3):
+                links.append(_link_row(rec))
     return {"nodes": nodes, "links": links}
 
+
+def get_lens_graph(
+    lens,
+    *,
+    limit: int = 5000,
+    sources: list[str] | None = None,
+    envs: list[str] | None = None,
+    drop_orphans: bool = False,
+) -> dict:
+    """Return the subgraph projected by ``lens`` (a :class:`src.ontology.lenses.Lens`).
+
+    Two statements, one session. The edge query is seeded from the node ids
+    returned by the first, and each edge must match one of the lens's typed
+    EdgeSpecs — so ``DEPENDS_ON`` scoped to ``Repository → Dependency`` does not
+    drag in the ``Service → Service`` mesh.
+
+    Nodes are ordered anchors-first so that a truncated lens still contains its
+    topology skeleton; only leaves are dropped.
+    """
+    label_expr = _label_expr(list(lens.labels), "n")
+
+    node_where = ["coalesce(n.status, 'active') <> 'retired'"]
+    params: dict[str, Any] = {"limit": limit}
+    if sources:
+        node_where.append("n.source IN $sources")
+        params["sources"] = sources
+    if envs:
+        node_where.append("n.environment IN $envs")
+        params["envs"] = envs
+
+    # Anchor labels sort first, so `limit` sheds leaves rather than the skeleton.
+    anchor_expr = _label_expr(list(lens.anchor_labels), "n")
+    anchor_case = f"CASE WHEN n:{anchor_expr.split(':', 1)[1]} THEN 0 ELSE 1 END"
+
+    node_cypher = f"""
+    MATCH ({label_expr})
+    WHERE {' AND '.join(node_where)}
+    RETURN elementId(n) AS id, labels(n) AS labels, properties(n) AS props
+    ORDER BY {anchor_case}, coalesce(n.updatedAt, n.createdAt, '') DESC
+    LIMIT $limit
+    """
+
+    # One clause per EdgeSpec. Built from frozen server-side constants that were
+    # validated against schema.ALL_LABELS at import, never from request input.
+    clauses = []
+    for e in lens.edges:
+        frm = _label_expr(list(e.from_labels), "a")
+        to = _label_expr(list(e.to_labels), "b")
+        clauses.append(
+            f"(type(r) = '{e.rel_type}' AND a:{frm.split(':', 1)[1]} "
+            f"AND b:{to.split(':', 1)[1]})"
+        )
+    edge_predicate = "\n           OR ".join(clauses)
+
+    rel_cypher = f"""
+    UNWIND $ids AS nid
+    MATCH (a) WHERE elementId(a) = nid
+    MATCH (a)-[r]->(b)
+    WHERE elementId(b) IN $ids
+      AND coalesce(r.active, true) = true
+      AND ({edge_predicate})
+    RETURN DISTINCT elementId(r) AS id, elementId(a) AS source,
+           elementId(b) AS target, type(r) AS rel_type, properties(r) AS props
+    LIMIT $rel_limit
+    """
+
+    nodes, links = [], []
+    with session() as s:
+        for rec in s.run(node_cypher, **params):
+            nodes.append(_node_row(rec))
+        ids = [n["id"] for n in nodes]
+        if ids:
+            for rec in s.run(rel_cypher, ids=ids, rel_limit=limit * 3):
+                links.append(_link_row(rec))
+
+    # lensTier is stamped here rather than in _node_row: tiers are lens-local,
+    # and this is what removes the frontend's duplicated NODE_TIER map.
+    for n in nodes:
+        n["lensTier"] = lens.tiers.get(n["node_type"], max(lens.tiers.values(), default=0))
+
+    connected = {l["source"] for l in links} | {l["target"] for l in links}
+    orphan_count = sum(1 for n in nodes if n["id"] not in connected)
+    if drop_orphans and orphan_count:
+        nodes = [n for n in nodes if n["id"] in connected]
+
+    return {
+        "nodes": nodes,
+        "links": links,
+        "meta": {
+            "lensId": lens.id,
+            "lensName": lens.name,
+            "nodeCount": len(nodes),
+            "linkCount": len(links),
+            "orphanCount": orphan_count,
+            "truncated": len(nodes) >= limit,
+            "limit": limit,
+            "labels": list(lens.labels),
+            "tiers": dict(lens.tiers),
+            "available": True,
+        },
+    }
 
 def get_project_subgraph(project_name: str, hops: int = 1) -> dict:
     """
@@ -605,3 +761,133 @@ def count_orphan_nodes() -> int:
             "MATCH (n) WHERE NOT (n)--() RETURN count(n) AS total"
         ).single()
         return result["total"] if result else 0
+
+
+# ── Observability: full-text retrieval ───────────────────────────────────────
+
+def _fts_escape(text: str) -> str:
+    """Neutralise Lucene operators so operator text can't blow up the query."""
+    import re as _re
+    cleaned = _re.sub(r'[+\-&|!(){}\[\]^"~*?:\\/]', " ", text or "")
+    return " ".join(cleaned.split())
+
+
+def search_runbooks(
+    service: str = "",
+    alert_signature: str = "",
+    labels: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Full-text search over Runbook nodes, returning nodes + a raw FTS score.
+
+    Relevance *ranking* is deliberately done by the caller
+    (src/observability/runbooks.py::score_runbooks) so the weighting is testable
+    without a live database. Swapping FTS for embeddings later happens behind this
+    signature — nothing above needs to know.
+    """
+    if not is_available():
+        return []
+    terms = " ".join(filter(None, [
+        _fts_escape(service), _fts_escape(alert_signature),
+        _fts_escape(" ".join(labels or [])),
+    ])).strip()
+    if not terms:
+        terms = "*"
+    cypher = """
+    CALL db.index.fulltext.queryNodes('runbook_fts', $terms)
+    YIELD node, score
+    RETURN node AS n, score AS fts_score,
+           [(node)-[:DOCUMENTS]->(s) | s.name] AS documented_services
+    ORDER BY score DESC LIMIT $limit
+    """
+    try:
+        rows = run_query(cypher, {"terms": terms, "limit": limit})
+        return [{**dict(r["n"]),
+                 "fts_score": r["fts_score"],
+                 "documented_services": r.get("documented_services") or []}
+                for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("search_runbooks failed: %s", exc)
+        return []
+
+
+def search_incidents(
+    service: str = "",
+    signatures: list[str] | None = None,
+    limit: int = 20,
+    exclude_investigation_id: str = "",
+) -> list[dict]:
+    """Full-text search over past Incident nodes, for case-based retrieval."""
+    if not is_available():
+        return []
+    terms = " ".join(filter(None, [
+        _fts_escape(service), _fts_escape(" ".join(signatures or [])),
+    ])).strip()
+    if not terms:
+        return []
+    cypher = """
+    CALL db.index.fulltext.queryNodes('incident_fts', $terms)
+    YIELD node, score
+    WHERE node.externalId <> $exclude
+    OPTIONAL MATCH (node)-[:HAS_OUTCOME]->(o:IncidentOutcome)
+    RETURN node AS n, score AS fts_score, o AS outcome
+    ORDER BY score DESC LIMIT $limit
+    """
+    try:
+        rows = run_query(cypher, {
+            "terms": terms, "limit": limit,
+            "exclude": exclude_investigation_id or "__none__",
+        })
+        out = []
+        for r in rows:
+            node = dict(r["n"])
+            node["fts_score"] = r["fts_score"]
+            node["outcome"] = dict(r["outcome"]) if r.get("outcome") else None
+            out.append(node)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("search_incidents failed: %s", exc)
+        return []
+
+
+def service_neighbours(service_name: str, hops: int = 2) -> dict:
+    """Upstream/downstream services within N hops — the blast radius query."""
+    if not is_available() or not service_name:
+        return {"upstream": [], "downstream": [], "hops": hops, "source": "neo4j"}
+    cypher = f"""
+    MATCH (s:Service {{name: $name}})
+    OPTIONAL MATCH (s)-[:DEPENDS_ON|CALLS|CONNECTS_TO*1..{int(hops)}]->(d)
+    OPTIONAL MATCH (u)-[:DEPENDS_ON|CALLS|CONNECTS_TO*1..{int(hops)}]->(s)
+    RETURN collect(DISTINCT d.name) AS downstream,
+           collect(DISTINCT u.name) AS upstream
+    """
+    try:
+        rows = run_query(cypher, {"name": service_name})
+        if not rows:
+            return {"upstream": [], "downstream": [], "hops": hops, "source": "neo4j"}
+        row = rows[0]
+        return {
+            "upstream": [x for x in (row.get("upstream") or []) if x],
+            "downstream": [x for x in (row.get("downstream") or []) if x],
+            "hops": hops,
+            "source": "neo4j",
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("service_neighbours failed: %s", exc)
+        return {"upstream": [], "downstream": [], "hops": hops, "source": "neo4j"}
+
+
+def list_service_names(limit: int = 500) -> list[str]:
+    """All known Service node names — the authoritative service vocabulary."""
+    if not is_available():
+        return []
+    try:
+        rows = run_query(
+            "MATCH (s:Service) WHERE s.name IS NOT NULL "
+            "RETURN DISTINCT s.name AS name ORDER BY name LIMIT $limit",
+            {"limit": limit},
+        )
+        return [r["name"] for r in rows if r.get("name")]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("list_service_names failed: %s", exc)
+        return []

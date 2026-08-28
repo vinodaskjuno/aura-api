@@ -9,6 +9,9 @@ from src.connectors.api_connector import ApiConnector
 from src.connectors.sql_connector import SqlConnector
 from src.connectors.cloud_storage_connector import CloudStorageConnector
 from src.connectors.mcp_connector import McpConnector
+from src.connectors.sources.pagerduty import PagerDutyConnector
+from src.connectors.sources.kubernetes import KubernetesConnector
+from src.connectors.sources.confluence import ConfluenceConnector
 
 REGISTRY_PATH = Path(__file__).parent.parent / "connectors_registry.json"
 
@@ -18,6 +21,10 @@ _TYPE_MAP: dict[str, type[AbstractConnector]] = {
     "s3": CloudStorageConnector,
     "cloud": CloudStorageConnector,
     "mcp": McpConnector,
+    # Previously written but never registered — their sync() bodies are now real.
+    "pagerduty": PagerDutyConnector,
+    "kubernetes": KubernetesConnector,
+    "confluence": ConfluenceConnector,
 }
 
 

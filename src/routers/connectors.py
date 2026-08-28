@@ -16,8 +16,13 @@ from src.database import dynamo_client as db
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
-CONNECTOR_TYPES = {"git", "project_mgmt", "itsm", "security", "storage", "sql", "mcp", "api"}
+CONNECTOR_TYPES = {"git", "project_mgmt", "itsm", "security", "storage", "sql", "mcp", "api",
+                   "observability", "incident", "notification"}
 PROVIDER_MAP = {
+    "observability": ["grafana_loki", "grafana_mimir", "grafana_tempo", "datadog",
+                      "sentry", "elasticsearch", "kubernetes", "cloudwatch"],
+    "incident":      ["pagerduty"],
+    "notification":  ["slack", "telegram"],
     "git":          ["github", "gitlab", "bitbucket", "azure_devops"],
     "project_mgmt": ["jira", "rally", "azure_boards"],
     "itsm":         ["servicenow"],
@@ -57,12 +62,30 @@ class ConnectorUpdate(BaseModel):
     repoUrl: str | None = None
 
 
+# Substring match, case- and separator-insensitive. The previous exact-match list
+# covered only camelCase keys, while every connector under connectors/sources/ uses
+# snake_case (api_token, secret_access_key, app_key) — so those secrets were being
+# returned to the client in full.
+_SECRET_HINTS = (
+    "token", "password", "secret", "apikey", "appkey", "clientsecret",
+    "credentials", "authtoken", "bottoken", "dsn", "accesskey", "privatekey",
+    "passphrase", "webhookurl", "cacert", "sessionkey",
+)
+
+
+def _is_secret(key: str) -> bool:
+    normalized = key.replace("_", "").replace("-", "").lower()
+    return any(hint in normalized for hint in _SECRET_HINTS)
+
+
 def _safe_config(config: dict) -> dict:
     """Mask sensitive fields for API responses."""
     masked = dict(config)
-    for key in ("token", "password", "secret", "apiKey", "clientSecret", "credentials"):
-        if key in masked and masked[key]:
-            masked[key] = masked[key][:4] + "****" if len(str(masked[key])) > 4 else "****"
+    for key, value in list(masked.items()):
+        if not value or not _is_secret(key):
+            continue
+        text = str(value)
+        masked[key] = (text[:4] + "****") if len(text) > 4 else "****"
     return masked
 
 

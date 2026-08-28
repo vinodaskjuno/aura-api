@@ -35,10 +35,13 @@ class Settings(BaseSettings):
     # "anthropic" → Anthropic API directly (needs anthropic_api_key)
     llm_backend: str = "anthropic"
     anthropic_api_key: str = ""
-    anthropic_model_id: str = "claude-3-5-sonnet-20241022"
+    anthropic_model_id: str = "claude-opus-5"
 
     # ── Bedrock ───────────────────────────────────────────────────────────────
-    bedrock_model_id: str = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    # Must be a cross-region INFERENCE PROFILE id (region prefix: us. / eu. / apac.),
+    # not a bare foundation-model id. Current Anthropic models are not invocable
+    # on-demand by their bare id — Bedrock rejects that with a ValidationException.
+    bedrock_model_id: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     bedrock_region: str = "us-east-1"
 
     # ── Deployment environment ────────────────────────────────────────────────
@@ -81,6 +84,58 @@ class Settings(BaseSettings):
     # ── App ───────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     app_env: str = "development"                    # development | staging | production
+
+    # ── Observability / SRE agents ────────────────────────────────────────────
+    # Org-wide fallbacks. Per-user/per-project credentials live in the
+    # `user-connectors` DynamoDB table and take precedence (see
+    # src/observability/credentials.py::resolve_config).
+    grafana_url: str = ""
+    loki_url: str = ""
+    mimir_url: str = ""
+    tempo_url: str = ""
+    grafana_api_token: str = ""
+    grafana_org_id: str = ""
+
+    datadog_api_key: str = ""
+    datadog_app_key: str = ""
+    datadog_site: str = "datadoghq.com"
+
+    sentry_auth_token: str = ""
+    sentry_org: str = ""
+    sentry_base_url: str = "https://sentry.io"
+
+    elasticsearch_url: str = ""
+    elasticsearch_api_key: str = ""
+    elasticsearch_index_pattern: str = "logs-*"
+
+    pagerduty_api_token: str = ""
+    kubernetes_api_server: str = ""
+    kubernetes_token: str = ""
+    kubernetes_namespace: str = ""
+
+    observability_query_timeout_s: int = 20
+    observability_max_log_records: int = 500
+    observability_max_evidence_records: int = 400
+    observability_case_corpus_floor: int = 5        # below this, retrieval stays inert
+    observability_learning_min_confidence: float = 0.5   # outcomes below this never teach
+    observability_promotion_min_confidence: float = 0.7  # runbook synthesis/promotion gate
+    observability_promotion_repeat_count: int = 3        # candidate -> active
+
+    # ── Reversible identifier masking ────────────────────────────────────────
+    observability_masking_enabled: bool = True
+    observability_mask_classes: str = "pod,host,ip,account,cluster,namespace,email,url_host"
+    observability_mask_max_tokens: int = 5000
+    observability_mask_ttl_s: int = 7200
+
+    # ── Notifications ────────────────────────────────────────────────────────
+    notifications_enabled: bool = True
+    slack_bot_token: str = ""
+    slack_webhook_url: str = ""
+    slack_default_channel: str = ""
+    telegram_bot_token: str = ""
+    telegram_default_chat_id: str = ""
+    notification_dedupe_ttl_s: int = 3600
+    app_public_url: str = "http://localhost:5173"   # for deep links in notifications
 
     class Config:
         env_file = str(SRC_DIR / ".env")   # absolute path — works regardless of cwd

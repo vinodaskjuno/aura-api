@@ -54,6 +54,14 @@ def bootstrap() -> None:
     from src.agents.teacher_agent import TeacherAgent
     from src.agents.impact_analyzer_agent import ImpactAnalyzerAgent
     from src.agents.remediation_agent import RemediationAgent
+    # Observability / SRE agents
+    from src.agents.obs_signal_collector_agent import ObsSignalCollectorAgent
+    from src.agents.obs_correlator_agent import ObsCorrelatorAgent
+    from src.agents.obs_case_retrieval_agent import ObsCaseRetrievalAgent
+    from src.agents.obs_runbook_agent import ObsRunbookAgent
+    from src.agents.obs_hypothesis_agent import ObsHypothesisAgent
+    from src.agents.obs_root_cause_agent import ObsRootCauseAgent
+    from src.agents.obs_verifier_agent import ObsVerifierAgent
 
     for agent in [
         # Legacy agents
@@ -69,5 +77,8 @@ def bootstrap() -> None:
         InfrastructureAnalyzerAgent(), KnowledgeAnalyzerAgent(), ArticleAnalyzerAgent(),
         GraphBuilderAgent(), GraphReviewerAgent(), KnowledgeValidatorAgent(),
         TourBuilderAgent(), TeacherAgent(), ImpactAnalyzerAgent(), RemediationAgent(),
+        # Observability / SRE agents
+        ObsSignalCollectorAgent(), ObsCorrelatorAgent(), ObsCaseRetrievalAgent(),
+        ObsRunbookAgent(), ObsHypothesisAgent(), ObsRootCauseAgent(), ObsVerifierAgent(),
     ]:
         register(agent)

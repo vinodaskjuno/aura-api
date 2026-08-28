@@ -27,9 +27,50 @@ class PagerDutyConnector(AbstractConnector):
             return False, str(exc)
 
     def sync(self) -> SyncResult:
+        """Persist incidents as Incident nodes linked to their Service.
+
+        Previously this only incremented a counter and wrote nothing, which is why
+        the connector was never registered anywhere.
+        """
         result = SyncResult()
+        try:
+            from src.graph import neo4j_client as graph
+            from src.ontology.schema import KNOWN_SOURCES  # noqa: F401  (vocabulary check)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"graph unavailable: {exc}")
+            return result
+
         for incident in self._fetch_incidents():
-            result.entities_added += 1
+            try:
+                eid = f"pagerduty:{incident.get('id','')}"
+                service = (incident.get("service") or {}).get("summary", "") or "UnknownService"
+                props = {
+                    "name": incident.get("title") or incident.get("summary", ""),
+                    "title": incident.get("title") or incident.get("summary", ""),
+                    "status": incident.get("status", ""),
+                    "urgency": incident.get("urgency", ""),
+                    "startedAt": incident.get("created_at", ""),
+                    "resolvedAt": incident.get("resolved_at", "") or "",
+                    "serviceName": service,
+                    "sourceUrl": incident.get("html_url", ""),
+                    "source": "pagerduty",
+                    "incidentNumber": str(incident.get("incident_number", "")),
+                }
+                existing = graph.upsert_node("Incident", eid, props)
+                graph.upsert_node("Service", f"service:{service}", {"name": service})
+                graph.upsert_relationship(
+                    "Service", f"service:{service}", "Incident", eid, "HAS_INCIDENT",
+                    provenance={"source": "pagerduty",
+                                "sourceRecordId": incident.get("id", ""),
+                                "discoveredBy": "pagerduty_connector",
+                                "confidence": 1.0, "factType": "known"},
+                )
+                if existing:
+                    result.entities_updated += 1
+                else:
+                    result.entities_added += 1
+            except Exception as exc:  # noqa: BLE001
+                result.errors.append(str(exc))
         return result
 
     def get_metadata(self) -> list[dict[str, Any]]:

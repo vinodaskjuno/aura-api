@@ -38,7 +38,43 @@ class KubernetesConnector(AbstractConnector):
             deploys = apps_v1.list_deployment_for_all_namespaces().items if not ns else \
                       apps_v1.list_namespaced_deployment(ns).items
 
-            result.entities_added = len(pods) + len(svcs) + len(deploys)
+            from src.graph import neo4j_client as graph
+
+            cluster = self.config.get("cluster_name") or self.config.get("context") or "default"
+            cluster_eid = f"k8s:cluster:{cluster}"
+            graph.upsert_node("KubernetesCluster", cluster_eid,
+                              {"name": cluster, "source": "kubernetes"})
+
+            for svc in svcs:
+                eid = f"k8s:svc:{svc.metadata.namespace}/{svc.metadata.name}"
+                graph.upsert_node("Service", eid, {
+                    "name": svc.metadata.name, "namespace": svc.metadata.namespace,
+                    "clusterName": cluster, "source": "kubernetes",
+                    "type": getattr(svc.spec, "type", "") or "",
+                })
+                graph.upsert_relationship(
+                    "KubernetesCluster", cluster_eid, "Service", eid, "HOSTS",
+                    provenance={"source": "kubernetes", "discoveredBy": "kubernetes_connector",
+                                "confidence": 1.0, "factType": "known"})
+                result.entities_added += 1
+
+            for dep in deploys:
+                eid = f"k8s:deploy:{dep.metadata.namespace}/{dep.metadata.name}"
+                graph.upsert_node("Deployment", eid, {
+                    "name": dep.metadata.name, "namespace": dep.metadata.namespace,
+                    "clusterName": cluster, "source": "kubernetes",
+                    "replicas": getattr(dep.spec, "replicas", 0) or 0,
+                })
+                result.entities_added += 1
+
+            for pod in pods:
+                eid = f"k8s:pod:{pod.metadata.namespace}/{pod.metadata.name}"
+                graph.upsert_node("Container", eid, {
+                    "name": pod.metadata.name, "namespace": pod.metadata.namespace,
+                    "clusterName": cluster, "nodeName": pod.spec.node_name or "",
+                    "phase": pod.status.phase or "", "source": "kubernetes",
+                })
+                result.entities_added += 1
         except Exception as exc:
             result.errors.append(str(exc))
         return result

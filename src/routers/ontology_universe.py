@@ -151,6 +151,9 @@ def get_org_graph(
     source_filter = [s.strip() for s in sources.split(",")] if sources else None
     try:
         return neo4j.get_org_graph(type_filter=type_filter, source_filter=source_filter, limit=limit)
+    except ValueError as exc:
+        # Unrecognised label in ?types= — client error, not a server fault.
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         log.exception("get_org_graph failed")
         raise HTTPException(status_code=500, detail=str(exc))

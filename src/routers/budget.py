@@ -115,8 +115,46 @@ def update_user_budget(user_id: str, model_id: str, cost: float) -> None:
                     "lastAlertTier": 0,
                 })
         db.atomic_add("user-budgets", {"userId": user_id}, field, Decimal(str(round(cost, 6))))
+        _maybe_alert(user_id, tier, config)
     except Exception as exc:
         log.warning("update_user_budget failed for %s: %s", user_id, exc)
+
+
+def _maybe_alert(user_id: str, tier: int, config: dict) -> None:
+    """Fire the budget-threshold notification.
+
+    `alertThreshold` and `lastAlertTier` have both existed since this router was
+    written — the threshold was computed and the tier was read and written, but
+    nothing ever dispatched anything. This is the missing half.
+    """
+    try:
+        budget = _get_user_budget(user_id)
+        limit = float(config.get(f"tier{tier}LimitUSD", 0) or 0)
+        if limit <= 0:
+            return
+        spend = float(budget.get(f"tier{tier}SpendUSD", 0) or 0)
+        ratio = spend / limit
+        threshold = float(config.get("alertThreshold", 0.8) or 0.8)
+        if ratio < threshold or int(budget.get("lastAlertTier", 0)) == tier:
+            return
+
+        from src.services.notifications import dispatcher
+        from src.services.notifications.base import Notification
+        dispatcher.send_sync(Notification(
+            kind="budget_threshold",
+            severity="high" if ratio >= 1.0 else "medium",
+            title=f"LLM budget at {ratio:.0%} for tier {tier}",
+            body=f"User {user_id} has spent ${spend:.2f} of the ${limit:.2f} "
+                 f"tier-{tier} limit this period.",
+            fields=[{"label": "Tier", "value": str(tier)},
+                    {"label": "Spend", "value": f"${spend:.2f}"},
+                    {"label": "Limit", "value": f"${limit:.2f}"}],
+            dedupe_key=f"budget:{user_id}:{tier}:{budget.get('periodStart','')}",
+        ), user_id=user_id)
+        db.update_item("user-budgets", {"userId": user_id}, {"lastAlertTier": tier})
+        log.info("Budget alert dispatched for %s at tier %d (%.0f%%)", user_id, tier, ratio * 100)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("budget alert skipped: %s", exc)
 
 
 async def check_and_enforce_budget(

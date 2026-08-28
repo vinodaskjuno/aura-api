@@ -40,3 +40,4 @@ anyio==4.7.0
 # === AI Gateway — external provider SDKs ===
 openai>=1.52.0
 google-generativeai>=0.8.0
+kubernetes>=29.0.0

@@ -139,6 +139,10 @@ KNOWN_SOURCES = [
     "snyk", "crowdstrike", "okta", "entra_id", "cyberark",
     "datadog", "pagerduty", "splunk", "manual", "ai_inferred",
     "file_upload", "mcp_connector", "api_ingest", "scheduler",
+    # Observability / SRE agents
+    "observability", "loki", "mimir", "tempo", "grafana",
+    "sentry", "elasticsearch", "cloudwatch", "prometheus",
+    "slack", "telegram",
 ]
 
 FACT_TYPES = ["known", "inferred", "hypothesis"]

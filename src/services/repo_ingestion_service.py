@@ -443,6 +443,7 @@ def _empty_result() -> dict[str, Any]:
         "flows": [], "modules": [], "tables": [], "business_rules": [],
         "feature_flags": [], "cloud_resources": [], "k8s_clusters": [],
         "networks": [], "pipelines": [], "containers": [], "features": [],
+        "servers": [],
         "business_processes": [], "description_hints": "",
     }
 
@@ -452,7 +453,7 @@ def _merge_results(base: dict, new: dict) -> None:
         "tech_stack", "apis", "databases", "downstream_calls", "dependencies",
         "topics", "environments", "flows", "modules", "tables", "business_rules",
         "feature_flags", "cloud_resources", "k8s_clusters", "networks", "pipelines",
-        "containers", "features", "business_processes",
+        "containers", "features", "business_processes", "servers",
     ]
     for k in list_keys:
         base[k] = base.get(k, []) + new.get(k, [])

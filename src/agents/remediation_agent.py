@@ -53,8 +53,10 @@ class RemediationAgent(BaseAgent):
         except Exception as exc:  # noqa: BLE001
             result.log(f"Graph query failed: {exc}")
 
-        # Get RCA result if available
-        rca = context.prior_results.get("rca_agent")
+        # Get RCA result if available — either the legacy AIOps rca_agent or the
+        # observability investigation pipeline's obs_root_cause.
+        rca = (context.prior_results.get("rca_agent")
+               or context.prior_results.get("obs_root_cause"))
         rca_ctx = rca.output if rca else {}
 
         prompt = _build_prompt(target_id, related_ctx, rca_ctx, context.intent)

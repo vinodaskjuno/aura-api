@@ -1,0 +1,1923 @@
+[
+  {
+    "label": "Team",
+    "properties": {
+      "externalId": "team:claims-eng",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Claims Engineering",
+      "memberCount": 14,
+      "costCentre": "CC-4410",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Team",
+    "properties": {
+      "externalId": "team:platform-core",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Platform Core",
+      "memberCount": 9,
+      "costCentre": "CC-2201",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "User",
+    "properties": {
+      "externalId": "user:a.rivera",
+      "source": "file_upload",
+      "status": "active",
+      "name": "A. Rivera",
+      "email": "a.rivera@aura.com",
+      "role": "Staff Engineer",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "User",
+    "properties": {
+      "externalId": "user:m.chen",
+      "source": "file_upload",
+      "status": "active",
+      "name": "M. Chen",
+      "email": "m.chen@aura.com",
+      "role": "Tech Lead",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "User",
+    "properties": {
+      "externalId": "user:s.patel",
+      "source": "file_upload",
+      "status": "active",
+      "name": "S. Patel",
+      "email": "s.patel@aura.com",
+      "role": "SRE",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "DeploymentEnvironment",
+    "properties": {
+      "externalId": "env:prod",
+      "source": "file_upload",
+      "status": "active",
+      "name": "prod",
+      "region": "us-east-1",
+      "isProduction": true,
+      "changeFreeze": true,
+      "vpcId": "vpc-021c28",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "DeploymentEnvironment",
+    "properties": {
+      "externalId": "env:staging",
+      "source": "file_upload",
+      "status": "active",
+      "name": "staging",
+      "region": "us-east-1",
+      "isProduction": false,
+      "changeFreeze": false,
+      "vpcId": "vpc-88ab13",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "DeploymentEnvironment",
+    "properties": {
+      "externalId": "env:dev",
+      "source": "file_upload",
+      "status": "active",
+      "name": "dev",
+      "region": "eu-west-1",
+      "isProduction": false,
+      "changeFreeze": false,
+      "vpcId": "vpc-19fe70",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:claims-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api",
+      "criticality": "tier-1",
+      "lifecycle": "active",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:payments-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-api",
+      "criticality": "tier-1",
+      "lifecycle": "active",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:policy-ui",
+      "source": "file_upload",
+      "status": "active",
+      "name": "policy-ui",
+      "criticality": "tier-2",
+      "lifecycle": "active",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Service",
+    "properties": {
+      "externalId": "svc:notify",
+      "source": "file_upload",
+      "status": "active",
+      "name": "notify",
+      "criticality": "tier-3",
+      "lifecycle": "active",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Project",
+    "properties": {
+      "externalId": "proj:claims-modernisation",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Claims Modernisation",
+      "portfolio": "Core Insurance",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Project",
+    "properties": {
+      "externalId": "proj:digital-channels",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Digital Channels",
+      "portfolio": "Customer",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api",
+      "language": "Python",
+      "defaultBranch": "main",
+      "linesOfCode": 48210,
+      "openPullRequests": 6,
+      "lastCommit": "2026-08-22T09:14:00Z",
+      "visibility": "internal",
+      "url": "https://github.com/aura/claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-api",
+      "language": "Java",
+      "defaultBranch": "main",
+      "linesOfCode": 91340,
+      "openPullRequests": 11,
+      "lastCommit": "2026-08-25T16:02:00Z",
+      "visibility": "internal",
+      "url": "https://github.com/aura/payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:policy-ui",
+      "source": "file_upload",
+      "status": "active",
+      "name": "policy-ui",
+      "language": "TypeScript",
+      "defaultBranch": "main",
+      "linesOfCode": 22870,
+      "openPullRequests": 3,
+      "lastCommit": "2026-08-26T11:40:00Z",
+      "visibility": "internal",
+      "url": "https://github.com/aura/policy-ui",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:notify-svc",
+      "source": "file_upload",
+      "status": "active",
+      "name": "notify-svc",
+      "language": "Go",
+      "defaultBranch": "main",
+      "linesOfCode": 15600,
+      "openPullRequests": 2,
+      "lastCommit": "2026-08-20T08:05:00Z",
+      "visibility": "public",
+      "url": "https://github.com/aura/notify-svc",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:fraud-ml",
+      "source": "file_upload",
+      "status": "active",
+      "name": "fraud-ml",
+      "language": "Python",
+      "defaultBranch": "main",
+      "linesOfCode": 33100,
+      "openPullRequests": 8,
+      "lastCommit": "2026-04-18T13:22:00Z",
+      "visibility": "internal",
+      "url": "https://github.com/aura/fraud-ml",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:legacy-batch",
+      "source": "file_upload",
+      "status": "active",
+      "name": "legacy-batch",
+      "language": "COBOL",
+      "defaultBranch": "master",
+      "linesOfCode": 128400,
+      "openPullRequests": 0,
+      "lastCommit": "2025-07-11T04:30:00Z",
+      "visibility": "internal",
+      "url": "https://github.com/aura/legacy-batch",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Module",
+    "properties": {
+      "externalId": "mod:claims-adjudication",
+      "source": "file_upload",
+      "status": "active",
+      "name": "adjudication",
+      "packagePath": "src/adjudication",
+      "publicSymbols": 12,
+      "language": "Python",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Module",
+    "properties": {
+      "externalId": "mod:claims-intake",
+      "source": "file_upload",
+      "status": "active",
+      "name": "intake",
+      "packagePath": "src/intake",
+      "publicSymbols": 7,
+      "language": "Python",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Module",
+    "properties": {
+      "externalId": "mod:payments-ledger",
+      "source": "file_upload",
+      "status": "active",
+      "name": "ledger",
+      "packagePath": "com/aura/ledger",
+      "publicSymbols": 19,
+      "language": "Java",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/engine.py",
+      "source": "file_upload",
+      "status": "active",
+      "name": "engine.py",
+      "path": "src/adjudication/engine.py",
+      "language": "Python",
+      "linesOfCode": 1204,
+      "complexity": 18,
+      "testCoverage": 0.58,
+      "lastModified": "2026-08-22T09:14:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/rules.py",
+      "source": "file_upload",
+      "status": "active",
+      "name": "rules.py",
+      "path": "src/adjudication/rules.py",
+      "language": "Python",
+      "linesOfCode": 642,
+      "complexity": 9,
+      "testCoverage": 0.86,
+      "lastModified": "2026-08-19T15:30:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/intake.py",
+      "source": "file_upload",
+      "status": "active",
+      "name": "intake.py",
+      "path": "src/intake/intake.py",
+      "language": "Python",
+      "linesOfCode": 388,
+      "complexity": 6,
+      "testCoverage": 0.91,
+      "lastModified": "2026-08-14T10:12:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:payments/Ledger.java",
+      "source": "file_upload",
+      "status": "active",
+      "name": "Ledger.java",
+      "path": "com/aura/ledger/Ledger.java",
+      "language": "Java",
+      "linesOfCode": 2140,
+      "complexity": 27,
+      "testCoverage": 0.41,
+      "lastModified": "2026-08-25T16:02:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:AdjudicationEngine",
+      "source": "file_upload",
+      "status": "active",
+      "name": "AdjudicationEngine",
+      "visibility": "public",
+      "methods": 14,
+      "isAbstract": false,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:BaseEngine",
+      "source": "file_upload",
+      "status": "active",
+      "name": "BaseEngine",
+      "visibility": "public",
+      "methods": 5,
+      "isAbstract": true,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:RuleSet",
+      "source": "file_upload",
+      "status": "active",
+      "name": "RuleSet",
+      "visibility": "public",
+      "methods": 8,
+      "isAbstract": false,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:adjudicate",
+      "source": "file_upload",
+      "status": "active",
+      "name": "adjudicate",
+      "linesOfCode": 142,
+      "cyclomaticComplexity": 12,
+      "isAsync": false,
+      "hasTests": true,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:score_claim",
+      "source": "file_upload",
+      "status": "active",
+      "name": "score_claim",
+      "linesOfCode": 64,
+      "cyclomaticComplexity": 7,
+      "isAsync": true,
+      "hasTests": false,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:validate",
+      "source": "file_upload",
+      "status": "active",
+      "name": "validate",
+      "linesOfCode": 38,
+      "cyclomaticComplexity": 4,
+      "isAsync": false,
+      "hasTests": true,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Dependency",
+    "properties": {
+      "externalId": "dep:requests",
+      "source": "file_upload",
+      "status": "active",
+      "name": "requests",
+      "version": "2.28.1",
+      "registry": "pypi",
+      "license": "Apache-2.0",
+      "directDependents": 9,
+      "hasKnownVulnerability": true,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Dependency",
+    "properties": {
+      "externalId": "dep:log4j-core",
+      "source": "file_upload",
+      "status": "active",
+      "name": "log4j-core",
+      "version": "2.14.1",
+      "registry": "maven",
+      "license": "Apache-2.0",
+      "directDependents": 4,
+      "hasKnownVulnerability": true,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Dependency",
+    "properties": {
+      "externalId": "dep:pydantic",
+      "source": "file_upload",
+      "status": "active",
+      "name": "pydantic",
+      "version": "2.5.0",
+      "registry": "pypi",
+      "license": "MIT",
+      "directDependents": 12,
+      "hasKnownVulnerability": false,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Dependency",
+    "properties": {
+      "externalId": "dep:spring-boot",
+      "source": "file_upload",
+      "status": "active",
+      "name": "spring-boot",
+      "version": "3.1.2",
+      "registry": "maven",
+      "license": "Apache-2.0",
+      "directDependents": 6,
+      "hasKnownVulnerability": false,
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Vulnerability",
+    "properties": {
+      "externalId": "vuln:CVE-2023-32681",
+      "source": "file_upload",
+      "status": "active",
+      "name": "CVE-2023-32681",
+      "severity": "medium",
+      "cvssScore": 6.1,
+      "publishedAt": "2023-05-26T00:00:00Z",
+      "fixedVersion": "2.31.0",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Vulnerability",
+    "properties": {
+      "externalId": "vuln:CVE-2021-44228",
+      "source": "file_upload",
+      "status": "active",
+      "name": "CVE-2021-44228 (Log4Shell)",
+      "severity": "critical",
+      "cvssScore": 10.0,
+      "publishedAt": "2021-12-10T00:00:00Z",
+      "fixedVersion": "2.17.1",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Configuration",
+    "properties": {
+      "externalId": "cfg:claims-api-prod",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api.prod.yaml",
+      "environment": "production",
+      "format": "yaml",
+      "secretRefs": 3,
+      "lastChanged": "2026-08-11T07:45:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Configuration",
+    "properties": {
+      "externalId": "cfg:payments-api-prod",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-api.prod.yaml",
+      "environment": "production",
+      "format": "yaml",
+      "secretRefs": 0,
+      "lastChanged": "2026-07-02T12:00:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "FeatureFlag",
+    "properties": {
+      "externalId": "ff:new-adjudication-engine",
+      "source": "file_upload",
+      "status": "active",
+      "name": "new-adjudication-engine",
+      "enabled": true,
+      "rolloutPercent": 100,
+      "owner": "a.rivera",
+      "createdAt": "2025-09-02T00:00:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "FeatureFlag",
+    "properties": {
+      "externalId": "ff:instant-payout",
+      "source": "file_upload",
+      "status": "active",
+      "name": "instant-payout",
+      "enabled": true,
+      "rolloutPercent": 25,
+      "owner": "m.chen",
+      "createdAt": "2026-07-14T00:00:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:claims-ci",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-ci",
+      "tool": "GitHub Actions",
+      "successRatePercent": 96.4,
+      "totalRuns": 1240,
+      "avgDurationSec": 412,
+      "lastRun": "2026-08-22T09:20:00Z",
+      "triggersOn": "push,pull_request",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:payments-ci",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-ci",
+      "tool": "Jenkins",
+      "successRatePercent": 88.2,
+      "totalRuns": 4100,
+      "avgDurationSec": 1180,
+      "lastRun": "2026-08-25T16:10:00Z",
+      "triggersOn": "push",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:policy-ui-ci",
+      "source": "file_upload",
+      "status": "active",
+      "name": "policy-ui-ci",
+      "tool": "GitHub Actions",
+      "successRatePercent": 99.1,
+      "totalRuns": 880,
+      "avgDurationSec": 205,
+      "lastRun": "2026-08-26T11:45:00Z",
+      "triggersOn": "push,pull_request",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:notify-ci",
+      "source": "file_upload",
+      "status": "active",
+      "name": "notify-ci",
+      "tool": "GitHub Actions",
+      "successRatePercent": 97.8,
+      "totalRuns": 310,
+      "avgDurationSec": 150,
+      "lastRun": "2026-08-20T08:10:00Z",
+      "triggersOn": "push",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:fraud-ml-ci",
+      "source": "file_upload",
+      "status": "active",
+      "name": "fraud-ml-ci",
+      "tool": "Jenkins",
+      "successRatePercent": 72.5,
+      "totalRuns": 95,
+      "avgDurationSec": 2400,
+      "lastRun": "2026-04-18T13:30:00Z",
+      "triggersOn": "manual",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:claims-api:3.14.2",
+      "source": "file_upload",
+      "status": "active",
+      "name": "claims-api:3.14.2",
+      "type": "container",
+      "sizeMb": 142,
+      "signed": true,
+      "digest": "sha256:9f3a1c7b2e5d",
+      "builtAt": "2026-08-22T09:27:00Z",
+      "registry": "ecr",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:payments-api:2.8.0",
+      "source": "file_upload",
+      "status": "active",
+      "name": "payments-api:2.8.0",
+      "type": "container",
+      "sizeMb": 318,
+      "signed": false,
+      "digest": "sha256:41ba90ce77d2",
+      "builtAt": "2026-08-25T16:29:00Z",
+      "registry": "ecr",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:policy-ui:1.9.4",
+      "source": "file_upload",
+      "status": "active",
+      "name": "policy-ui:1.9.4",
+      "type": "container",
+      "sizeMb": 64,
+      "signed": true,
+      "digest": "sha256:c02e88a1f4b6",
+      "builtAt": "2026-08-26T11:49:00Z",
+      "registry": "ecr",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:claims-3.14.2-prod",
+      "source": "file_upload",
+      "status": "success",
+      "name": "claims-api 3.14.2 \u2192 prod",
+      "strategy": "blue-green",
+      "durationSec": 214,
+      "deployedBy": "a.rivera",
+      "deployedAt": "2026-08-22T10:02:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:payments-2.8.0-prod",
+      "source": "file_upload",
+      "status": "failed",
+      "name": "payments-api 2.8.0 \u2192 prod",
+      "strategy": "rolling",
+      "durationSec": 602,
+      "deployedBy": "m.chen",
+      "deployedAt": "2026-08-25T17:15:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:policy-ui-1.9.4-stg",
+      "source": "file_upload",
+      "status": "success",
+      "name": "policy-ui 1.9.4 \u2192 staging",
+      "strategy": "rolling",
+      "durationSec": 98,
+      "deployedBy": "s.patel",
+      "deployedAt": "2026-08-26T12:05:00Z",
+      "dataset": "sample-git"
+    },
+    "relationships": []
+  },
+  {
+    "label": "User",
+    "properties": {
+      "externalId": "user:a.rivera",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "User",
+    "properties": {
+      "externalId": "user:m.chen",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "User",
+    "properties": {
+      "externalId": "user:s.patel",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Team",
+        "targetExternalId": "team:platform-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:policy-ui",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:platform-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:notify-svc",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:platform-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:fraud-ml",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "User",
+        "targetExternalId": "user:a.rivera",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:claims-modernisation",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:claims-modernisation",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:policy-ui",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:digital-channels",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:notify-svc",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:digital-channels",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:fraud-ml",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:claims-modernisation",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:legacy-batch",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Project",
+        "targetExternalId": "proj:claims-modernisation",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Project",
+    "properties": {
+      "externalId": "proj:claims-modernisation",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:claims-eng",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Project",
+    "properties": {
+      "externalId": "proj:digital-channels",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "OWNED_BY",
+        "targetLabel": "Team",
+        "targetExternalId": "team:platform-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:policy-ui",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:policy-ui",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:notify-svc",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:notify",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Module",
+    "properties": {
+      "externalId": "mod:claims-adjudication",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Module",
+    "properties": {
+      "externalId": "mod:claims-intake",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Module",
+    "properties": {
+      "externalId": "mod:payments-ledger",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Configuration",
+    "properties": {
+      "externalId": "cfg:claims-api-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Configuration",
+    "properties": {
+      "externalId": "cfg:payments-api-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/engine.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "COMMITTED_TO",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/rules.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "COMMITTED_TO",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/intake.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "COMMITTED_TO",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:payments/Ledger.java",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "COMMITTED_TO",
+        "targetLabel": "Repository",
+        "targetExternalId": "repo:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/engine.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Module",
+        "targetExternalId": "mod:claims-adjudication",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/rules.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Module",
+        "targetExternalId": "mod:claims-adjudication",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/intake.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Module",
+        "targetExternalId": "mod:claims-intake",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:payments/Ledger.java",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Module",
+        "targetExternalId": "mod:payments-ledger",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/engine.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPORTS",
+        "targetLabel": "CodeFile",
+        "targetExternalId": "file:claims/rules.py",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "CodeFile",
+    "properties": {
+      "externalId": "file:claims/intake.py",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPORTS",
+        "targetLabel": "CodeFile",
+        "targetExternalId": "file:claims/rules.py",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:AdjudicationEngine",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "CodeFile",
+        "targetExternalId": "file:claims/engine.py",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:BaseEngine",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "CodeFile",
+        "targetExternalId": "file:claims/engine.py",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:RuleSet",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "CodeFile",
+        "targetExternalId": "file:claims/rules.py",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:AdjudicationEngine",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BELONGS_TO",
+        "targetLabel": "Module",
+        "targetExternalId": "mod:claims-adjudication",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Class",
+    "properties": {
+      "externalId": "cls:AdjudicationEngine",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "EXTENDS",
+        "targetLabel": "Class",
+        "targetExternalId": "cls:BaseEngine",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:adjudicate",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Class",
+        "targetExternalId": "cls:AdjudicationEngine",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:score_claim",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Class",
+        "targetExternalId": "cls:AdjudicationEngine",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:validate",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Class",
+        "targetExternalId": "cls:RuleSet",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:adjudicate",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "CALLS",
+        "targetLabel": "Function",
+        "targetExternalId": "fn:score_claim",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Function",
+    "properties": {
+      "externalId": "fn:adjudicate",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "CALLS",
+        "targetLabel": "Function",
+        "targetExternalId": "fn:validate",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPENDS_ON",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:requests",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPENDS_ON",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:pydantic",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:fraud-ml",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPENDS_ON",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:requests",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPENDS_ON",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:log4j-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPENDS_ON",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:spring-boot",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Vulnerability",
+    "properties": {
+      "externalId": "vuln:CVE-2023-32681",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:requests",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Vulnerability",
+    "properties": {
+      "externalId": "vuln:CVE-2021-44228",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "HAS_FINDING",
+        "targetLabel": "Dependency",
+        "targetExternalId": "dep:log4j-core",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:claims-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BUILT_BY",
+        "targetLabel": "BuildPipeline",
+        "targetExternalId": "pipe:claims-ci",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:payments-api",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BUILT_BY",
+        "targetLabel": "BuildPipeline",
+        "targetExternalId": "pipe:payments-ci",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:policy-ui",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BUILT_BY",
+        "targetLabel": "BuildPipeline",
+        "targetExternalId": "pipe:policy-ui-ci",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:notify-svc",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BUILT_BY",
+        "targetLabel": "BuildPipeline",
+        "targetExternalId": "pipe:notify-ci",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Repository",
+    "properties": {
+      "externalId": "repo:fraud-ml",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "BUILT_BY",
+        "targetLabel": "BuildPipeline",
+        "targetExternalId": "pipe:fraud-ml-ci",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:claims-ci",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PRODUCES",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:claims-api:3.14.2",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:payments-ci",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PRODUCES",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:payments-api:2.8.0",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildPipeline",
+    "properties": {
+      "externalId": "pipe:policy-ui-ci",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PRODUCES",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:policy-ui:1.9.4",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:claims-api:3.14.2",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:payments-api:2.8.0",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "BuildArtifact",
+    "properties": {
+      "externalId": "art:policy-ui:1.9.4",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:staging",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:claims-3.14.2-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:claims-api:3.14.2",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:payments-2.8.0-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:payments-api:2.8.0",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:policy-ui-1.9.4-stg",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "BuildArtifact",
+        "targetExternalId": "art:policy-ui:1.9.4",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:claims-3.14.2-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:payments-2.8.0-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:prod",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:policy-ui-1.9.4-stg",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "DEPLOYED_TO",
+        "targetLabel": "DeploymentEnvironment",
+        "targetExternalId": "env:staging",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:claims-3.14.2-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "Deployment",
+    "properties": {
+      "externalId": "deploy:payments-2.8.0-prod",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "IMPLEMENTS",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "FeatureFlag",
+    "properties": {
+      "externalId": "ff:new-adjudication-engine",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:claims-api",
+        "props": {}
+      }
+    ]
+  },
+  {
+    "label": "FeatureFlag",
+    "properties": {
+      "externalId": "ff:instant-payout",
+      "dataset": "sample-git"
+    },
+    "relationships": [
+      {
+        "type": "PART_OF",
+        "targetLabel": "Service",
+        "targetExternalId": "svc:payments-api",
+        "props": {}
+      }
+    ]
+  }
+]

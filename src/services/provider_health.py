@@ -68,6 +68,33 @@ def _store_result(provider_id: str, healthy: bool, status_code: int, error: str)
         })
     except Exception as exc:
         log.debug("provider_health: failed to store result for %s: %s", provider_id, exc)
+    _alert_on_transition(provider_id, healthy, status_code, error, now)
+
+
+_LAST_HEALTHY: dict[str, bool] = {}
+
+
+def _alert_on_transition(provider_id: str, healthy: bool, status_code: int,
+                         error: str, now: str) -> None:
+    """Notify only on a healthy -> unhealthy edge, never on every failing probe."""
+    previous = _LAST_HEALTHY.get(provider_id)
+    _LAST_HEALTHY[provider_id] = healthy
+    if previous is None or previous == healthy or healthy:
+        return
+    try:
+        from src.services.notifications import dispatcher
+        from src.services.notifications.base import Notification
+        dispatcher.send_sync(Notification(
+            kind="provider_down",
+            severity="high",
+            title=f"LLM provider unhealthy: {provider_id}",
+            body=error or f"Probe returned HTTP {status_code}.",
+            fields=[{"label": "Provider", "value": provider_id},
+                    {"label": "Status", "value": str(status_code)}],
+            dedupe_key=f"provider_down:{provider_id}:{now[:13]}",
+        ))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("provider_health alert skipped: %s", exc)
 
 
 def get_latest_health() -> list[dict]:

@@ -21,21 +21,22 @@ WebSocket events emitted:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
 
 from src.agents.base_agent import AgentContext, AgentResult
+from src.orchestrator.dag_runtime import (
+    Emitter, Stage, make_context, run_stages, ws_emitter,
+)
 from src.services.ontology_version_service import create_version_record
 
 log = logging.getLogger(__name__)
 
 # Stage definitions: list of (stage_number, title, [agent_names], sequential)
-_STAGES: list[tuple[int, str, list[str], bool]] = [
+_STAGES: list[Stage] = [
     (1, "Scan & Discover",
      ["project_scanner", "knowledge_analyzer", "infrastructure_analyzer"],
      False),
@@ -58,66 +59,6 @@ _STAGES: list[tuple[int, str, list[str], bool]] = [
 ]
 
 
-async def _send(ws: WebSocket | None, event: dict) -> None:
-    if ws is None:
-        return
-    try:
-        await ws.send_json(event)
-    except Exception:
-        pass
-
-
-def _make_context(
-    intent: str,
-    user_id: str,
-    username: str,
-    role: str,
-    project_id: str | None,
-    session_id: str,
-    version_id: str | None,
-    extra: dict[str, Any],
-    prior_results: dict[str, AgentResult],
-) -> AgentContext:
-    return AgentContext(
-        user_id=user_id,
-        username=username,
-        role=role,
-        intent=intent,
-        project_id=project_id,
-        session_id=session_id,
-        prior_results=prior_results,
-        extra={**extra, "version_id": version_id},
-    )
-
-
-async def _run_agent(
-    agent_name: str,
-    context: AgentContext,
-    ws: WebSocket | None,
-    stage: int,
-) -> AgentResult | None:
-    from src.orchestrator.agent_registry import get_agent  # lazy to avoid circular import
-
-    await _send(ws, {"type": "agent_start", "agent": agent_name, "stage": stage})
-    try:
-        agent = get_agent(agent_name)
-        result = await agent.run(context)
-        await _send(ws, {
-            "type": "agent_done",
-            "agent": agent_name,
-            "stage": stage,
-            "status": result.status,
-            "nodes_added": result.output.get("nodes_added", 0),
-            "rels_added": result.output.get("rels_added", 0),
-        })
-        return result
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Agent %s failed", agent_name)
-        await _send(ws, {"type": "agent_done", "agent": agent_name, "stage": stage,
-                         "status": "failed", "error": str(exc)})
-        return None
-
-
 async def run_dag(
     intent: str,
     user_id: str,
@@ -138,6 +79,7 @@ async def run_dag(
                          that have no overlap). Used by domain/infra/etc. commands.
     """
     extra = extra or {}
+    emit: Emitter = ws_emitter(ws)
     run_id = f"dag-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{session_id[:8]}"
     log.info("DAG run %s starting — intent: %s", run_id, intent[:60])
 
@@ -156,67 +98,31 @@ async def run_dag(
 
     total_stages = len(_STAGES)
     total_agents = sum(len(s[2]) for s in _STAGES)
-    await _send(ws, {"type": "dag_start", "runId": run_id,
-                     "total_stages": total_stages, "total_agents": total_agents,
-                     "version_id": version_id})
+    await emit({"type": "dag_start", "runId": run_id,
+                "total_stages": total_stages, "total_agents": total_agents,
+                "version_id": version_id})
 
-    prior_results: dict[str, AgentResult] = {}
-    total_nodes = 0
-    total_rels = 0
+    def _ctx(prior: dict[str, AgentResult]) -> AgentContext:
+        return make_context(intent, user_id, username, role, project_id,
+                            session_id, version_id, extra, prior)
 
-    for stage_num, title, agent_names, sequential in _STAGES:
-        # Filter agents if override specified
-        if agents_override is not None:
-            active_agents = [a for a in agent_names if a in agents_override]
-            if not active_agents:
-                log.debug("Stage %d skipped — no overlap with agent override", stage_num)
-                continue
-        else:
-            active_agents = agent_names
-
-        t0 = time.monotonic()
-        await _send(ws, {"type": "stage_start", "stage": stage_num,
-                         "title": title, "agents": active_agents})
-        log.info("Stage %d (%s): %s", stage_num, title, active_agents)
-
-        if sequential:
-            for agent_name in active_agents:
-                ctx = _make_context(intent, user_id, username, role, project_id,
-                                    session_id, version_id, extra, prior_results)
-                result = await _run_agent(agent_name, ctx, ws, stage_num)
-                if result:
-                    prior_results[agent_name] = result
-                    total_nodes += result.output.get("nodes_added", 0)
-                    total_rels += result.output.get("rels_added", 0)
-        else:
-            # Run all agents in this stage concurrently
-            ctx = _make_context(intent, user_id, username, role, project_id,
-                                session_id, version_id, extra, prior_results)
-            tasks = [_run_agent(name, ctx, ws, stage_num) for name in active_agents]
-            results = await asyncio.gather(*tasks, return_exceptions=False)
-            for name, result in zip(active_agents, results):
-                if result and not isinstance(result, Exception):
-                    prior_results[name] = result
-                    total_nodes += result.output.get("nodes_added", 0)
-                    total_rels += result.output.get("rels_added", 0)
-
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        await _send(ws, {"type": "stage_done", "stage": stage_num,
-                         "title": title, "elapsed_ms": elapsed_ms})
+    outcome = await run_stages(_STAGES, _ctx, emit, agents_override)
 
     summary = {
         "run_id": run_id,
         "version_id": version_id,
-        "total_nodes_added": total_nodes,
-        "total_rels_added": total_rels,
+        "total_nodes_added": outcome.total_nodes,
+        "total_rels_added": outcome.total_rels,
         "stages_run": total_stages,
         "prior_results": {k: {"status": v.status, "output": v.output}
-                          for k, v in prior_results.items()},
+                          for k, v in outcome.prior_results.items()},
     }
-    await _send(ws, {"type": "dag_done", "runId": run_id,
-                     "total_nodes_added": total_nodes, "total_rels_added": total_rels,
-                     "version_id": version_id})
-    log.info("DAG run %s complete: %d nodes, %d rels", run_id, total_nodes, total_rels)
+    await emit({"type": "dag_done", "runId": run_id,
+                "total_nodes_added": outcome.total_nodes,
+                "total_rels_added": outcome.total_rels,
+                "version_id": version_id})
+    log.info("DAG run %s complete: %d nodes, %d rels",
+             run_id, outcome.total_nodes, outcome.total_rels)
     return summary
 
 
