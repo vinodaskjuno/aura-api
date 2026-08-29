@@ -543,10 +543,15 @@ def build_changelog_entry(
     Lives here rather than in routers/ontology_universe.py so services can write
     history without importing from a router, and so every writer shares one schema.
 
-    `entityId` is the Neo4j elementId because that is what /nodes/{id}/changelog
-    matches on. elementId is not stable across a database rebuild, so `externalId`
-    is carried alongside it — without that, history silently detaches from its node
-    after a reload and cannot be re-keyed.
+    `entityId` is the **externalId** when the caller knows one, falling back to the
+    engine's own node id otherwise.
+
+    It used to be the Neo4j elementId. That does not survive a database rebuild,
+    and — now that a deployment may run Neo4j or Memgraph — it is a different value
+    on each engine, so history written against one store would not resolve against
+    the other. externalId is deterministic and identical everywhere. The engine id
+    is still recorded in `elementId` so a row can be traced back to the node it was
+    written against.
     """
     import json as _json
     import uuid as _uuid
@@ -554,7 +559,9 @@ def build_changelog_entry(
     return {
         "changeId": str(_uuid.uuid4()),
         "timestamp": _dt.now(_tz.utc).isoformat(),
-        "entityId": entity_id,
+        # Portable identity first; the engine id only when there is nothing better.
+        "entityId": external_id or entity_id,
+        "elementId": entity_id,
         "entityType": entity_type,
         "entityLabel": entity_label,
         "entityName": entity_name,

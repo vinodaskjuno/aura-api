@@ -193,6 +193,7 @@ def create_node(
     try:
         dynamo.write_changelog(_build_changelog_entry(
             entity_id=str(entity_id),
+            external_id=node.get("externalId"),
             entity_type="Node",
             entity_label=body.label,
             entity_name=body.name,
@@ -239,6 +240,7 @@ def update_node(
     try:
         dynamo.write_changelog(_build_changelog_entry(
             entity_id=node_id,
+            external_id=existing.get("externalId"),
             entity_type="Node",
             entity_label=entity_label,
             entity_name=entity_name,
@@ -285,6 +287,9 @@ def add_relationship(
     try:
         dynamo.write_changelog(_build_changelog_entry(
             entity_id=node_id,
+            # A relationship has no externalId of its own; key its history to the
+            # source node so it stays with something portable.
+            external_id=from_eid,
             entity_type="Relationship",
             entity_label=body.rel_type,
             entity_name=f"{entity_name} → {body.to_external_id}",
@@ -365,8 +370,34 @@ def get_node_changelog(
     limit: int = 20,
     _: dict = Depends(require_permission("ontology_maintain")),
 ):
-    """Per-node version history from DynamoDB."""
-    return dynamo.get_entity_changelog(entity_id=node_id, limit=limit)
+    """Per-node version history from DynamoDB.
+
+    `node_id` is the engine's own node id, which is what the UI holds. History is
+    keyed by externalId so it survives a rebuild and resolves on whichever engine a
+    deployment runs, so the id is resolved to an externalId first.
+
+    Rows written before that change are keyed by the engine id, so both are queried
+    and merged — otherwise the re-key would appear to erase existing history.
+    """
+    rows: list[dict] = []
+    seen: set[str] = set()
+
+    external_id = ""
+    try:
+        node = neo4j.get_node_by_id(node_id)
+        external_id = (node or {}).get("externalId") or ""
+    except Exception:  # noqa: BLE001 — fall back to the legacy lookup below
+        external_id = ""
+
+    for key in filter(None, (external_id, node_id)):
+        for row in dynamo.get_entity_changelog(entity_id=key, limit=limit):
+            change_id = row.get("changeId")
+            if change_id and change_id not in seen:
+                seen.add(change_id)
+                rows.append(row)
+
+    rows.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+    return rows[:limit]
 
 
 @router.get("/relationships/{rel_id}/changelog")
