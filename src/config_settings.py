@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     neo4j_database: str = "neo4j"
     neo4j_enabled: bool = False                     # set True when Neo4j is running
 
+    # ── Memgraph ──────────────────────────────────────────────────────────────
+    # Bolt-compatible, so the same neo4j driver connects. These are connection
+    # facts and belong here; which backend is ACTIVE does not — get_settings() is
+    # lru_cached, so a value read from here cannot change without a restart, and
+    # the read-source toggle has to be switchable from the UI.
+    memgraph_enabled: bool = False
+    memgraph_uri: str = "bolt://127.0.0.1:7688"
+    memgraph_user: str = ""
+    memgraph_password: str = ""
+
     # ── AI Gateway ───────────────────────────────────────────────────────────────
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"

@@ -13,56 +13,51 @@ from typing import Any, Generator
 
 log = logging.getLogger(__name__)
 
-_driver = None
-_driver_attempted = False   # distinguishes "not yet tried" from "tried and failed"
+# Connection handling and Cypher translation now live in src/graph/backends.py, so
+# this module works against whichever engine a deployment configures. The queries
+# below are still written in the Neo4j 5 dialect — that is the reference dialect,
+# and the active backend translates on the way out.
+#
+# The name of this module is now a misnomer, but 45 modules import it. Keeping the
+# import surface intact is what makes "the same backend code works as-is" true at
+# the call-site level; `src/graph/graph_client.py` is the neutral alias for new code.
+
+
+def active_backend():
+    """The backend reads and writes go to. None when no engine is configured."""
+    from src.graph import backends
+    return backends.get_backend()
+
+
+def dialect():
+    """Capabilities of the active engine — branch on these, never on engine name."""
+    from src.graph.dialects import DIALECTS
+    backend = active_backend()
+    return backend.dialect if backend else DIALECTS["neo4j"]
 
 
 def _get_driver():
-    global _driver, _driver_attempted
-    if _driver is not None:
-        return _driver
-    if _driver_attempted:
-        return None
-    _driver_attempted = True
-    try:
-        from neo4j import GraphDatabase
-        from src.config_settings import get_settings
-        s = get_settings()
-        if not s.neo4j_enabled:
-            return None
-        _driver = GraphDatabase.driver(
-            s.neo4j_uri,
-            auth=(s.neo4j_user, s.neo4j_password),
-        )
-        _driver.verify_connectivity()
-        log.info("Neo4j connected at %s", s.neo4j_uri)
-    except Exception as exc:
-        log.warning("Neo4j unavailable: %s", exc)
-        _driver = None
-    return _driver
+    backend = active_backend()
+    return backend.driver() if backend else None
 
 
 def is_available() -> bool:
-    return _get_driver() is not None
+    backend = active_backend()
+    return bool(backend and backend.is_available())
 
 
 @contextmanager
 def session() -> Generator:
-    driver = _get_driver()
-    if driver is None:
-        raise RuntimeError("Neo4j is not available")
-    from src.config_settings import get_settings
-    db = get_settings().neo4j_database
-    with driver.session(database=db) as s:
+    backend = active_backend()
+    if backend is None:
+        raise RuntimeError("No graph backend is configured")
+    with backend.session() as s:
         yield s
 
 
 def close():
-    global _driver, _driver_attempted
-    if _driver:
-        _driver.close()
-        _driver = None
-    _driver_attempted = False
+    from src.graph import backends
+    backends.reset()
 
 
 # ── Schema bootstrap ──────────────────────────────────────────────────────────
@@ -103,14 +98,11 @@ _CONSTRAINED_LABELS = [
 
 
 def _build_constraints_ddl() -> list[str]:
-    ddl = []
-    for label in _CONSTRAINED_LABELS:
-        slug = label.lower().replace(" ", "_")
-        ddl.append(
-            f"CREATE CONSTRAINT {slug}_eid IF NOT EXISTS "
-            f"FOR (n:{label}) REQUIRE n.externalId IS UNIQUE"
-        )
-    return ddl
+    # Constraint syntax is not portable — Neo4j 5 uses REQUIRE with a named,
+    # IF NOT EXISTS constraint; Memgraph uses ASSERT and has neither. The dialect
+    # owns the difference.
+    d = dialect()
+    return [d.constraint_ddl(label) for label in _CONSTRAINED_LABELS]
 
 
 INDEXES_DDL = [
@@ -144,17 +136,22 @@ FULLTEXT_DDL = [
 
 def ensure_schema():
     if not is_available():
-        log.info("Neo4j schema bootstrap skipped — not available")
+        log.info("Graph schema bootstrap skipped — no backend available")
         return
+    d = dialect()
     constraints = _build_constraints_ddl()
+    # Full-text indexes are Neo4j-only. Skipping them on an engine without the
+    # feature is not a degradation: search_runbooks takes its portable retrieval
+    # path when dialect.supports_fulltext is False.
+    fulltext = FULLTEXT_DDL if d.supports_fulltext else []
     with session() as s:
-        for ddl in constraints + INDEXES_DDL + FULLTEXT_DDL:
+        for ddl in constraints + INDEXES_DDL + fulltext:
             try:
                 s.run(ddl)
             except Exception:
                 pass
-    log.info("Neo4j schema ready (%d constraints, %d indexes, %d fulltext)",
-             len(constraints), len(INDEXES_DDL), len(FULLTEXT_DDL))
+    log.info("Graph schema ready on %s (%d constraints, %d indexes, %d fulltext)",
+             d.name, len(constraints), len(INDEXES_DDL), len(fulltext))
 
 
 # ── Generic MERGE upsert ──────────────────────────────────────────────────────
