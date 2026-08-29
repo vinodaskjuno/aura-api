@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from src.routers.auth import get_current_user
@@ -461,3 +461,189 @@ def discard_pending_change(body: PendingActionRequest,
     if result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+# ── Folder upload (the wizard's "Local Folder" picker) ────────────────────────
+#
+# A browser cannot hand the server a filesystem path: <input webkitdirectory>
+# yields File objects whose only location hint is the relative `webkitRelativePath`,
+# and `value` is deliberately spoofed as "C:\fakepath\...". Typing a path into a
+# text box is worse than useless once the backend runs in Fargate, where the
+# operator's /Users/... simply does not exist.
+#
+# So the client reads the folder in-browser and posts the files here; the server
+# rebuilds the tree under the project's workspace directory. That directory is
+# then `git init`-ed, because _resolve_project_dir gates on `.git` existing —
+# without it DevMate's file tools never attach and QualityMind cannot run tests.
+
+_UPLOAD_MAX_BYTES = 60 * 1024 * 1024
+_UPLOAD_MAX_FILES = 4000
+_UPLOAD_SKIP_DIRS = {
+    "node_modules", ".git", "__pycache__", ".venv", "venv", "env",
+    "dist", "build", ".next", ".nuxt", ".turbo", "target", "vendor",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".idea", ".vscode",
+    "coverage", ".gradle", "bin", "obj",
+}
+_UPLOAD_SKIP_SUFFIXES = {
+    ".pyc", ".pyo", ".so", ".dylib", ".dll", ".class", ".o", ".a",
+    ".exe", ".zip", ".tar", ".gz", ".jar", ".war", ".png", ".jpg",
+    ".jpeg", ".gif", ".ico", ".pdf", ".mp4", ".mov", ".woff", ".woff2",
+}
+
+
+def _safe_label(label: str) -> str:
+    """A single path segment — this becomes a directory name under the project."""
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", (label or "").strip())[:40].strip("_")
+    if not safe:
+        raise HTTPException(status_code=400, detail="label is required (e.g. 'backend')")
+    return safe
+
+
+def _safe_rel(rel: str) -> Path | None:
+    """Validate a browser-supplied relative path, or None if it must be skipped.
+
+    `webkitRelativePath` is attacker-controllable in exactly the way a zip entry
+    is, so this is the zip-slip check: reject anything absolute, anything with a
+    `..` component, and Windows drive letters. Returning None (skip) rather than
+    raising keeps one junk entry from failing an otherwise good upload.
+    """
+    rel = (rel or "").replace("\\", "/").strip()
+    if not rel or rel.startswith("/") or re.match(r"^[a-zA-Z]:", rel):
+        return None
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    if any(p in _UPLOAD_SKIP_DIRS for p in parts[:-1]):
+        return None
+    name = parts[-1]
+    if name in _UPLOAD_SKIP_DIRS or Path(name).suffix.lower() in _UPLOAD_SKIP_SUFFIXES:
+        return None
+    return Path(*parts)
+
+
+def _git_init_workspace(root: Path, message: str) -> None:
+    """Make `root` a git repo so _resolve_project_dir accepts it.
+
+    Committing with -c rather than relying on global config: the container has no
+    ~/.gitconfig, and `git commit` fails outright without an identity.
+    """
+    ident = ["-c", "user.name=Aura", "-c", "user.email=aura@local"]
+    try:
+        if not (root / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)],
+                           capture_output=True, text=True, timeout=30)
+        subprocess.run(["git", "-C", str(root)] + ident + ["add", "-A"],
+                       capture_output=True, text=True, timeout=120)
+        subprocess.run(["git", "-C", str(root)] + ident +
+                       ["commit", "-q", "--allow-empty", "-m", message],
+                       capture_output=True, text=True, timeout=120)
+    except Exception as exc:  # noqa: BLE001 — the files are on disk either way
+        log.warning("git init/commit failed for %s: %s", root, exc)
+
+
+@router.post("/upload-folder", status_code=201)
+async def upload_folder(
+    projectId: str = Form(...),
+    label: str = Form(...),
+    paths: list[str] = Form(...),
+    files: list[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Rebuild an uploaded folder under the project workspace and commit it.
+
+    Re-uploading the same label replaces that subtree only, so `backend` and
+    `frontend` can be uploaded independently and in any order.
+    """
+    safe_label = _safe_label(label)
+    root = _clone_path(projectId)
+    dest = root / safe_label
+
+    if len(paths) != len(files):
+        raise HTTPException(
+            status_code=400,
+            detail=f"paths/files length mismatch ({len(paths)} vs {len(files)})")
+    if len(files) > _UPLOAD_MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files ({len(files)}) — maximum {_UPLOAD_MAX_FILES}. "
+                   "Exclude build output and dependency directories.")
+
+    # Replace rather than merge: a stale file from a previous upload would
+    # otherwise survive and be analysed as if it were still part of the folder.
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    written = skipped = total = 0
+    for rel_raw, upload in zip(paths, files):
+        rel = _safe_rel(rel_raw)
+        if rel is None:
+            skipped += 1
+            continue
+        raw = await upload.read()
+        total += len(raw)
+        if total > _UPLOAD_MAX_BYTES:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Folder exceeds {_UPLOAD_MAX_BYTES // (1024 * 1024)} MB. "
+                       "Exclude build output and dependency directories.")
+        target = dest / rel
+        try:
+            target.relative_to(dest)          # defence in depth after _safe_rel
+        except ValueError:
+            skipped += 1
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        written += 1
+
+    if written == 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"No usable files in '{label}' — all {skipped} entries were "
+                   "build output, binaries, or dependency directories.")
+
+    _git_init_workspace(root, f"Upload folder '{safe_label}' ({written} files)")
+
+    # Archive for audit and re-extraction. EFS already holds the working copy, so
+    # this is best-effort — a missing bucket must not fail the upload.
+    try:
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in sorted(dest.rglob("*")):
+                if f.is_file():
+                    zf.write(f, str(f.relative_to(dest)))
+        from src.storage import s3_client
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        s3_client.put_object(
+            "uploads", f"folders/{projectId}/{safe_label}-{stamp}.zip", buf.getvalue())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Folder archive to S3 skipped for %s/%s: %s", projectId, safe_label, exc)
+
+    # Composite key — the partition key alone is rejected by DynamoDB. This is the
+    # same trap that stopped /clone persisting clonedPath.
+    try:
+        from src.database import dynamo_client as db
+        db.update_item(
+            "projects",
+            {"projectId": projectId, "userId": user["userId"]},
+            {"clonedPath": str(root), "clonedBranch": "main"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not persist clonedPath for %s: %s", projectId, exc)
+
+    return {
+        "success": True,
+        "label": safe_label,
+        "localPath": str(dest),
+        "projectPath": str(root),
+        "fileCount": written,
+        "skippedCount": skipped,
+        "bytes": total,
+        "message": f"Uploaded {written} file(s) to {safe_label}"
+                   + (f", skipped {skipped}" if skipped else ""),
+    }
