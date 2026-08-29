@@ -124,6 +124,82 @@ class Backend:
             self._attempted = False
 
 
+# Statements that change data. A read replayed on every secondary would double the
+# query load for nothing, so the fan-out only mirrors writes.
+_WRITE_KEYWORDS = ("MERGE", "CREATE", "SET ", "DELETE", "REMOVE", "DROP")
+
+
+def is_write(cypher: str) -> bool:
+    upper = (cypher or "").upper()
+    return any(kw in upper for kw in _WRITE_KEYWORDS)
+
+
+class _FanOutSession:
+    """Runs on the primary, mirrors writes to secondaries.
+
+    Mirroring replays the same statement and parameters rather than re-deriving
+    anything, which is why this works with no changes at any of the 102 call sites.
+    It is safe because every value the app computes (timestamps, ids, hashes) is
+    already passed as a parameter, so the replayed statement is deterministic.
+
+    A secondary failure never propagates: the primary has committed, and the write
+    goes to the outbox instead.
+    """
+
+    def __init__(self, primary, secondaries, dialect):
+        self._primary = primary
+        self._secondaries = secondaries
+        self._dialect = dialect
+
+    def run(self, query, parameters=None, **kwargs):
+        result = self._primary.run(self._dialect.adapt(query), parameters, **kwargs)
+        if self._secondaries and is_write(query):
+            # The driver accepts parameters as a dict OR as keyword arguments, and
+            # this codebase uses both — `s.run(cypher, eid=..., props=...)` is the
+            # common form. Forwarding only `parameters` silently mirrored every
+            # write with no parameters at all, which the secondary then rejected.
+            merged = {**(parameters or {}), **kwargs}
+            for backend in self._secondaries:
+                self._mirror(backend, query, merged)
+        return result
+
+    @staticmethod
+    def _mirror(backend, query, parameters):
+        from src.graph import outbox
+        try:
+            with backend.session() as s:
+                s.run(query, parameters)
+        except Exception as exc:  # noqa: BLE001 — never fail the caller for a shadow
+            log.warning("mirror to %s failed, queued: %s", backend.name, exc)
+            outbox.enqueue(backend.name, query, parameters or {}, str(exc))
+
+    def __getattr__(self, item):
+        return getattr(self._primary, item)
+
+
+@contextmanager
+def routed_session() -> Generator:
+    """A session honouring the runtime read-source and write-target config."""
+    from src.graph import graph_config
+    config = graph_config.get_config()
+
+    primary = get_backend(config.read_source or None)
+    if primary is None:
+        raise RuntimeError("No graph backend is configured")
+
+    secondaries = [b for b in (get_backend(name) for name in config.write_targets)
+                   if b is not None and b.name != primary.name]
+
+    driver = primary.driver()
+    if driver is None:
+        raise RuntimeError(f"Graph backend {primary.name!r} is not available")
+    kwargs = primary.dialect.session_kwargs(primary.config.database)
+    with driver.session(**kwargs) as raw:
+        # The primary's own statements are adapted by _FanOutSession; each
+        # secondary adapts independently inside its own session.
+        yield _FanOutSession(raw, secondaries, primary.dialect)
+
+
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 _backends: dict[str, Backend] = {}

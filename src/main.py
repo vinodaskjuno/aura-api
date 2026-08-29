@@ -217,6 +217,8 @@ from .routers import aiops_gateway as aiops_gateway_router
 app.include_router(gateway_router.router, prefix="/gateway")
 app.include_router(gateway_keys_router.router, prefix="/gateway")
 app.include_router(aiops_gateway_router.router)
+from .routers import graph_config as graph_config_router
+app.include_router(graph_config_router.router)
 
 # ── OTLP telemetry receiver (Claude Code usage capture) ───────────────────────
 # Prefix is set on the router itself, so the exported paths are

@@ -60,7 +60,8 @@ def _table(name: str):
 
 # ── Table key schemas (PK only vs PK+SK) ─────────────────────────────────────
 # Tables with a single PK only — get_item needs only one key field
-_PK_ONLY_TABLES = {"users", "roles", "uploads", "ontology-changelog", "budget-config", "user-budgets"}
+_PK_ONLY_TABLES = {"users", "roles", "uploads", "ontology-changelog", "budget-config",
+                   "user-budgets", "graph-config"}
 
 # Tables with composite keys — get_item needs both PK and SK
 _COMPOSITE_TABLES = {
@@ -83,6 +84,7 @@ _COMPOSITE_TABLES = {
     "observability-cases":          ("caseId",          "createdAt"),
     "observability-traces":         ("runId",           "seq"),
     "notification-log":             ("dedupeKey",       "sentAt"),
+    "graph-outbox":                 ("backend",         "outboxId"),
 }
 
 
@@ -421,6 +423,13 @@ TABLE_SCHEMAS = [
         ],
     },
     {"name": "ontology-versions", "pk": "versionId", "sk": None},
+    # Which graph engine is read from, and which are written to. Deliberately NOT
+    # in Settings: get_settings() is lru_cached, so a value read from there cannot
+    # change without a restart, and this has to be switchable from the UI.
+    {"name": "graph-config", "pk": "configId", "sk": None},
+    # Writes that failed on a secondary engine, awaiting retry. Keyed by backend so
+    # a drain is a query rather than a full scan.
+    {"name": "graph-outbox", "pk": "backend", "sk": "outboxId"},
     {"name": "scheduler-state",   "pk": "jobId",     "sk": None},
     {"name": "services",          "pk": "projectId", "sk": "serviceId"},
     # AURA AI Gateway tables

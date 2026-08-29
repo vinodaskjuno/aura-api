@@ -24,9 +24,15 @@ log = logging.getLogger(__name__)
 
 
 def active_backend():
-    """The backend reads and writes go to. None when no engine is configured."""
-    from src.graph import backends
-    return backends.get_backend()
+    """The backend reads go to — the configured read source.
+
+    Writes may additionally be mirrored to other engines; see backends.routed_session.
+    """
+    from src.graph import backends, graph_config
+    try:
+        return backends.get_backend(graph_config.get_config().read_source or None)
+    except Exception:  # noqa: BLE001 — config trouble must not take the graph down
+        return backends.get_backend()
 
 
 def dialect():
@@ -48,10 +54,14 @@ def is_available() -> bool:
 
 @contextmanager
 def session() -> Generator:
-    backend = active_backend()
-    if backend is None:
-        raise RuntimeError("No graph backend is configured")
-    with backend.session() as s:
+    """Reads hit the configured source; writes fan out to every write target.
+
+    Routing lives at this boundary on purpose. There are 102 `.run(...)` call sites
+    across the codebase and none of them need to know whether a deployment runs one
+    engine or two.
+    """
+    from src.graph import backends
+    with backends.routed_session() as s:
         yield s
 
 
