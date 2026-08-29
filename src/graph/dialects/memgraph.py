@@ -12,8 +12,15 @@ Each rewrite below corresponds to something Memgraph rejects outright:
 
 Not expressible as a rewrite, and handled by capability flags instead:
 
-  Full-text     No db.index.fulltext equivalent. search_runbooks falls back to a
-                portable CONTAINS scan (see supports_fulltext).
+  Full-text     No db.index.fulltext equivalent, and CREATE FULLTEXT INDEX is
+                rejected too. search_runbooks falls back to a portable CONTAINS
+                scan (see supports_fulltext).
+
+  Index DDL     Different shape, not just spelling: CREATE INDEX ON :L(p), with no
+                name and no IF NOT EXISTS. Rendered from a spec, not translated.
+
+Verified against Memgraph 2.18.1, where pattern comprehension `[(n)-[:R]->(s) | s.name]`
+DOES work — it was expected to need rewriting and does not.
   APOC          Not present. neo4j_client already carries non-APOC fallbacks for
                 both apoc.path.subgraphNodes call sites.
   database=     Community has no multi-database; passing it is an error.
@@ -33,6 +40,15 @@ class _MemgraphDialect(Dialect):
         # Memgraph has no named constraints and no IF NOT EXISTS; re-running is
         # harmless because ensure_schema already tolerates per-statement failure.
         return f"CREATE CONSTRAINT ON (n:{label}) ASSERT n.{prop} IS UNIQUE"
+
+    def node_index_ddl(self, label: str, prop: str) -> str:
+        # Verified against Memgraph 2.18: the Neo4j form is rejected outright.
+        return f"CREATE INDEX ON :{label}({prop})"
+
+    def edge_index_ddl(self, rel_type: str, prop: str) -> str | None:
+        # Memgraph indexes an edge type but not a property on it, so the
+        # confidence index has no equivalent. Skipped rather than faked.
+        return None
 
 
 MEMGRAPH = _MemgraphDialect(

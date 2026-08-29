@@ -45,6 +45,20 @@ class Dialect:
         return (f"CREATE CONSTRAINT {slug}_eid IF NOT EXISTS "
                 f"FOR (n:{label}) REQUIRE n.{prop} IS UNIQUE")
 
+    def node_index_ddl(self, label: str, prop: str) -> str:
+        name = f"idx_{label.lower()}_{prop.lower()}"
+        return f"CREATE INDEX {name} IF NOT EXISTS FOR (n:{label}) ON (n.{prop})"
+
+    def edge_index_ddl(self, rel_type: str, prop: str) -> str | None:
+        """None means the engine cannot express this index; the caller skips it.
+
+        Index DDL is rendered from a declarative spec rather than translated as a
+        string, because the two engines disagree on shape, not just spelling —
+        Memgraph has no named indexes and no IF NOT EXISTS."""
+        name = f"idx_rel_{rel_type.lower()}_{prop.lower()}"
+        return (f"CREATE INDEX {name} IF NOT EXISTS "
+                f"FOR ()-[r:{rel_type}]-() ON (r.{prop})")
+
     def adapt(self, cypher: str) -> str:
         """Translate a statement written in the reference dialect (Neo4j 5)."""
         for pattern, replacement in self.rewrites:

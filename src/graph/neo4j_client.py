@@ -105,23 +105,41 @@ def _build_constraints_ddl() -> list[str]:
     return [d.constraint_ddl(label) for label in _CONSTRAINED_LABELS]
 
 
-INDEXES_DDL = [
-    "CREATE INDEX node_name_svc IF NOT EXISTS FOR (n:Service) ON (n.name)",
-    "CREATE INDEX node_name_app IF NOT EXISTS FOR (n:Application) ON (n.name)",
-    "CREATE INDEX node_name_repo IF NOT EXISTS FOR (n:Repository) ON (n.name)",
-    "CREATE INDEX node_hostname IF NOT EXISTS FOR (n:Infrastructure) ON (n.hostname)",
-    "CREATE INDEX node_ip IF NOT EXISTS FOR (n:Infrastructure) ON (n.ip)",
-    "CREATE INDEX audit_ts IF NOT EXISTS FOR (n:AuditLog) ON (n.timestamp)",
+# Indexes are declared as (label, property) rather than as DDL strings, because the
+# two engines disagree on the SHAPE of the statement, not merely its spelling:
+# Memgraph has no named indexes and no IF NOT EXISTS. Each dialect renders its own.
+NODE_INDEXES: list[tuple[str, str]] = [
+    ("Service", "name"),
+    ("Application", "name"),
+    ("Repository", "name"),
+    ("Infrastructure", "hostname"),
+    ("Infrastructure", "ip"),
+    ("AuditLog", "timestamp"),
     # Provenance/version queries
-    "CREATE INDEX node_version IF NOT EXISTS FOR (n:Service) ON (n.versionId)",
-    "CREATE INDEX rel_confidence IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.confidence)",
+    ("Service", "versionId"),
     # ── Observability / SRE agents ───────────────────────────────────────────
-    "CREATE INDEX incident_started IF NOT EXISTS FOR (n:Incident) ON (n.startedAt)",
-    "CREATE INDEX incident_service IF NOT EXISTS FOR (n:Incident) ON (n.serviceName)",
-    "CREATE INDEX alert_ts IF NOT EXISTS FOR (n:Alert) ON (n.timestamp)",
-    "CREATE INDEX runbook_origin IF NOT EXISTS FOR (n:Runbook) ON (n.origin)",
-    "CREATE INDEX runbook_status IF NOT EXISTS FOR (n:Runbook) ON (n.status)",
+    ("Incident", "startedAt"),
+    ("Incident", "serviceName"),
+    ("Alert", "timestamp"),
+    ("Runbook", "origin"),
+    ("Runbook", "status"),
 ]
+
+# Property-on-edge indexes. Memgraph cannot express these and returns None, in
+# which case the statement is skipped rather than approximated.
+EDGE_INDEXES: list[tuple[str, str]] = [
+    ("DEPENDS_ON", "confidence"),
+]
+
+
+def _build_indexes_ddl() -> list[str]:
+    d = dialect()
+    ddl = [d.node_index_ddl(label, prop) for label, prop in NODE_INDEXES]
+    for rel, prop in EDGE_INDEXES:
+        stmt = d.edge_index_ddl(rel, prop)
+        if stmt:
+            ddl.append(stmt)
+    return ddl
 
 # Full-text indexes back runbook matching and case retrieval. Deliberately not a
 # vector store: no embedding library exists in requirements.txt, and FTS scoring is
@@ -140,18 +158,19 @@ def ensure_schema():
         return
     d = dialect()
     constraints = _build_constraints_ddl()
+    indexes = _build_indexes_ddl()
     # Full-text indexes are Neo4j-only. Skipping them on an engine without the
     # feature is not a degradation: search_runbooks takes its portable retrieval
     # path when dialect.supports_fulltext is False.
     fulltext = FULLTEXT_DDL if d.supports_fulltext else []
     with session() as s:
-        for ddl in constraints + INDEXES_DDL + fulltext:
+        for ddl in constraints + indexes + fulltext:
             try:
                 s.run(ddl)
             except Exception:
                 pass
     log.info("Graph schema ready on %s (%d constraints, %d indexes, %d fulltext)",
-             d.name, len(constraints), len(INDEXES_DDL), len(fulltext))
+             d.name, len(constraints), len(indexes), len(fulltext))
 
 
 # ── Generic MERGE upsert ──────────────────────────────────────────────────────
@@ -802,6 +821,57 @@ def _fts_escape(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def _search_terms(*parts: str) -> list[str]:
+    """Distinct lowercase terms, for the portable retrieval path."""
+    seen: list[str] = []
+    for part in parts:
+        for token in _fts_escape(part).lower().split():
+            if len(token) > 2 and token not in seen:
+                seen.append(token)
+    return seen
+
+
+def _portable_text_search(
+    label: str, fields: list[str], terms: list[str], limit: int,
+    extra_return: str = "", extra_where: str = "", params: dict | None = None,
+) -> list[dict]:
+    """Candidate retrieval for engines without a full-text index.
+
+    This is not a reimplementation of Lucene and does not need to be.
+    search_runbooks is only the *retrieval* half — `observability/runbooks.py::
+    score_runbooks` does the ranking and normalises `fts_score` against the result
+    set (runbooks.py:47,72). So a term-overlap count in that field preserves the
+    caller's weighting exactly; only the candidate ordering within a tie changes.
+    """
+    if not terms:
+        return []
+    # One CONTAINS per (field, term). Built as a parameterised OR rather than
+    # interpolated text so a runbook title can never inject Cypher.
+    conditions, values = [], {}
+    for t_idx, term in enumerate(terms):
+        key = f"t{t_idx}"
+        values[key] = term
+        for field in fields:
+            conditions.append(f"toLower(coalesce(n.{field}, '')) CONTAINS ${key}")
+    score_expr = " + ".join(
+        f"(CASE WHEN toLower(coalesce(n.{field}, '')) CONTAINS ${k} THEN 1 ELSE 0 END)"
+        for k in values for field in fields
+    )
+    cypher = f"""
+    MATCH (n:{label})
+    WHERE ({' OR '.join(conditions)}){extra_where}
+    WITH n, ({score_expr}) AS fts_score
+    {extra_return}
+    ORDER BY fts_score DESC, n.externalId ASC
+    LIMIT $limit
+    """
+    try:
+        return run_query(cypher, {**values, **(params or {}), "limit": limit})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("portable text search on %s failed: %s", label, exc)
+        return []
+
+
 def search_runbooks(
     service: str = "",
     alert_signature: str = "",
@@ -823,6 +893,21 @@ def search_runbooks(
     ])).strip()
     if not terms:
         terms = "*"
+
+    if not dialect().supports_fulltext:
+        rows = _portable_text_search(
+            "Runbook", ["title", "bodySnippet", "tags", "services"],
+            _search_terms(service, alert_signature, " ".join(labels or [])),
+            limit,
+            extra_return=("OPTIONAL MATCH (n)-[:DOCUMENTS]->(svc) "
+                          "WITH n, fts_score, collect(svc.name) AS documented_services "
+                          "RETURN n, fts_score, documented_services"),
+        )
+        return [{**dict(r["n"]),
+                 "fts_score": float(r.get("fts_score") or 0.0),
+                 "documented_services": r.get("documented_services") or []}
+                for r in rows]
+
     cypher = """
     CALL db.index.fulltext.queryNodes('runbook_fts', $terms)
     YIELD node, score
@@ -855,6 +940,27 @@ def search_incidents(
     ])).strip()
     if not terms:
         return []
+
+    if not dialect().supports_fulltext:
+        rows = _portable_text_search(
+            "Incident",
+            ["title", "rootCauseStatement", "errorSignatures", "serviceName"],
+            _search_terms(service, " ".join(signatures or [])),
+            limit,
+            extra_where=" AND n.externalId <> $exclude",
+            extra_return=("OPTIONAL MATCH (n)-[:HAS_OUTCOME]->(o:IncidentOutcome) "
+                          "WITH n, fts_score, o AS outcome "
+                          "RETURN n, fts_score, outcome"),
+            params={"exclude": exclude_investigation_id or "__none__"},
+        )
+        out = []
+        for r in rows:
+            node = dict(r["n"])
+            node["fts_score"] = float(r.get("fts_score") or 0.0)
+            node["outcome"] = dict(r["outcome"]) if r.get("outcome") else None
+            out.append(node)
+        return out
+
     cypher = """
     CALL db.index.fulltext.queryNodes('incident_fts', $terms)
     YIELD node, score
