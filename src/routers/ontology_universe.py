@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -64,34 +63,9 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _build_changelog_entry(
-    entity_id: str,
-    entity_type: str,
-    entity_label: str,
-    entity_name: str,
-    change_type: str,
-    actor: str,
-    before: Any,
-    after: Any,
-    session_id: str = "api",
-    source: str = "api",
-    notes: str = "",
-) -> dict:
-    return {
-        "changeId": str(uuid.uuid4()),
-        "timestamp": _now(),
-        "entityId": entity_id,
-        "entityType": entity_type,
-        "entityLabel": entity_label,
-        "entityName": entity_name,
-        "changeType": change_type,
-        "actor": actor,
-        "before": json.dumps(before) if before is not None else None,
-        "after": json.dumps(after) if after is not None else None,
-        "sessionId": session_id,
-        "source": source,
-        "notes": notes,
-    }
+# Moved to dynamo_client so services can write history without importing a router.
+# Re-exported under the original name to keep this module's call sites unchanged.
+_build_changelog_entry = dynamo.build_changelog_entry
 
 
 # ── Load endpoint ──────────────────────────────────────────────────────────────

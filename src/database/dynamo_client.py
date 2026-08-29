@@ -524,6 +524,51 @@ def ensure_tables() -> None:
 
 # ── Ontology Changelog helpers ────────────────────────────────────────────────
 
+def build_changelog_entry(
+    entity_id: str,
+    entity_type: str,
+    entity_label: str,
+    entity_name: str,
+    change_type: str,
+    actor: str,
+    before: Any,
+    after: Any,
+    session_id: str = "api",
+    source: str = "api",
+    notes: str = "",
+    external_id: str | None = None,
+) -> dict:
+    """Build one changelog row.
+
+    Lives here rather than in routers/ontology_universe.py so services can write
+    history without importing from a router, and so every writer shares one schema.
+
+    `entityId` is the Neo4j elementId because that is what /nodes/{id}/changelog
+    matches on. elementId is not stable across a database rebuild, so `externalId`
+    is carried alongside it — without that, history silently detaches from its node
+    after a reload and cannot be re-keyed.
+    """
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+    return {
+        "changeId": str(_uuid.uuid4()),
+        "timestamp": _dt.now(_tz.utc).isoformat(),
+        "entityId": entity_id,
+        "entityType": entity_type,
+        "entityLabel": entity_label,
+        "entityName": entity_name,
+        "changeType": change_type,
+        "actor": actor,
+        "before": _json.dumps(before) if before is not None else None,
+        "after": _json.dumps(after) if after is not None else None,
+        "sessionId": session_id,
+        "source": source,
+        "notes": notes,
+        "externalId": external_id,
+    }
+
+
 def write_changelog(change: dict) -> None:
     """Write a single versioning entry to the ontology changelog table."""
     try:

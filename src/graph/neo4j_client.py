@@ -177,6 +177,39 @@ def upsert_node(label: str, external_id: str, props: dict[str, Any]) -> dict:
         return dict(record["n"]) if record else {}
 
 
+def upsert_node_returning_id(
+    label: str, external_id: str, props: dict[str, Any],
+) -> tuple[dict, dict, str, bool]:
+    """MERGE on externalId, returning (before, after, elementId, created).
+
+    `upsert_node` returns properties only, but the audit trail is keyed by
+    elementId — `get_node_by_id` and the /nodes/{id}/changelog endpoint both match
+    on it — so a caller that needs to record history cannot use that function.
+
+    `before` and `created` come from the same transaction as the write, so a
+    concurrent upsert cannot make this report a create as an update.
+    """
+    props_clean = {k: v for k, v in props.items() if v is not None}
+    props_clean["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    if "createdAt" not in props_clean:
+        props_clean["createdAt"] = props_clean["updatedAt"]
+
+    cypher = f"""
+    OPTIONAL MATCH (existing:{label} {{externalId: $eid}})
+    WITH existing IS NULL AS created,
+         CASE WHEN existing IS NULL THEN {{}} ELSE properties(existing) END AS before
+    MERGE (n:{label} {{externalId: $eid}})
+    SET n += $props
+    RETURN before, properties(n) AS after, elementId(n) AS id, created
+    """
+    with session() as s:
+        record = s.run(cypher, eid=external_id, props=props_clean).single()
+        if not record:
+            return {}, {}, "", False
+        return (dict(record["before"]), dict(record["after"]),
+                record["id"], bool(record["created"]))
+
+
 def upsert_node_with_version(
     label: str,
     external_id: str,

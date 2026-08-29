@@ -1,5 +1,6 @@
 """Projects API — DynamoDB-backed project management for Dev Workspace."""
 from __future__ import annotations
+import logging
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends
@@ -8,6 +9,7 @@ from src.routers.auth import get_current_user, require_permission
 from src.database.dynamo_client import put_item, get_item, get_item_by_pk, query_items, update_item, delete_item, scan_items
 from src.storage.s3_client import get_json
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
@@ -396,7 +398,29 @@ async def analyse_project(project_id: str, user: dict = Depends(require_permissi
             pass
 
     update_item("projects", composite_key, final_updates)
+
+    # ── Project the analysed code into Neo4j ────────────────────────────────
+    # Deliberately after the DynamoDB write and wrapped: the graph is a projection
+    # of the analysis, so Neo4j being unreachable must leave the analysis itself
+    # intact rather than failing the request.
+    graph_report: dict = {}
+    try:
+        from src.graph import code_graph
+        connectors = [c for c in scan_items("connectors", limit=500)
+                      if c.get("projectId") == project_id]
+        connectors += [c for c in scan_items("user-connectors", limit=500)
+                       if c.get("projectId") == project_id]
+        graph_report = code_graph.sync_project(
+            {**project, **final_updates, "projectId": project_id},
+            connectors,
+            actor=user["username"],
+        ).as_dict()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Neo4j sync failed for %s: %s", project_id, exc)
+        graph_report = {"errors": [str(exc)]}
+
     return {"project_id": project_id, "results": results,
+            "graph": graph_report,
             "summary": {
                 "services":     len(final_updates["services"]),
                 "techStack":    len(final_updates["techStack"]),
