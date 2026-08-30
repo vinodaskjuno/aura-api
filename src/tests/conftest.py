@@ -53,6 +53,17 @@ def _no_real_llm(monkeypatch):
 
 # ── In-memory DynamoDB ───────────────────────────────────────────────────────
 
+def _key_attrs_for(table: str) -> tuple[str, ...]:
+    """Key attributes for a table, so the double can replace like the real thing."""
+    from src.database.dynamo_client import _COMPOSITE_TABLES, TABLE_SCHEMAS
+    if table in _COMPOSITE_TABLES:
+        return _COMPOSITE_TABLES[table]
+    for schema in TABLE_SCHEMAS:
+        if schema["name"] == table:
+            return tuple(k for k in (schema.get("pk"), schema.get("sk")) if k)
+    return ()
+
+
 def _reject_floats(table: str, value, path: str = "") -> None:
     """Raise on any surviving Python float, the way boto3 does.
 
@@ -94,7 +105,17 @@ class FakeDynamo:
                     f"DynamoDB would reject this write: key attribute "
                     f"'{key_attr}' on table '{table}' is an empty string")
         _reject_floats(table, item)
-        self.tables.setdefault(table, []).append(item)
+        # Real put_item REPLACES the item with the same key; appending instead made
+        # get_item return the stale first write, so any code relying on overwrite
+        # semantics passed here and behaved differently against AWS.
+        rows = self.tables.setdefault(table, [])
+        key_attrs = _key_attrs_for(table)
+        if key_attrs:
+            for i, existing in enumerate(rows):
+                if all(existing.get(k) == item.get(k) for k in key_attrs):
+                    rows[i] = item
+                    return
+        rows.append(item)
 
     def get_item(self, table, key):
         for row in self.tables.get(table, []):

@@ -87,6 +87,9 @@ _COMPOSITE_TABLES = {
     "graph-outbox":                 ("backend",         "outboxId"),
     "ai-traces":                    ("projectId",       "sortKey"),
     "ai-spans":                     ("traceId",         "spanSortKey"),
+    "ai-datasets":                  ("datasetId",       "itemId"),
+    "ai-experiments":               ("experimentId",    "itemKey"),
+    "ai-prompts":                   ("promptId",        "version"),
 }
 
 
@@ -440,6 +443,12 @@ TABLE_SCHEMAS = [
     },
     # Spans live under their trace so a waterfall is one query, not N.
     {"name": "ai-spans", "pk": "traceId", "sk": "spanSortKey"},   # <startTime>#<spanId>
+
+    # Evaluation. Low-volume batch records, which is the shape DynamoDB serves well —
+    # unlike trace search, which is an analytics workload (see aiobs/store.py).
+    {"name": "ai-datasets",    "pk": "datasetId",    "sk": "itemId"},
+    {"name": "ai-experiments", "pk": "experimentId", "sk": "itemKey"},  # __meta__ | <itemId>
+    {"name": "ai-prompts",     "pk": "promptId",     "sk": "version"},
 
     # Which graph engine is read from, and which are written to. Deliberately NOT
     # in Settings: get_settings() is lru_cached, so a value read from there cannot
