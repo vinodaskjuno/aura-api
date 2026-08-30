@@ -85,6 +85,8 @@ _COMPOSITE_TABLES = {
     "observability-traces":         ("runId",           "seq"),
     "notification-log":             ("dedupeKey",       "sentAt"),
     "graph-outbox":                 ("backend",         "outboxId"),
+    "ai-traces":                    ("projectId",       "sortKey"),
+    "ai-spans":                     ("traceId",         "spanSortKey"),
 }
 
 
@@ -423,6 +425,22 @@ TABLE_SCHEMAS = [
         ],
     },
     {"name": "ontology-versions", "pk": "versionId", "sk": None},
+    # ── LLM-application observability (AI Observability surface) ────────────
+    # Traces are keyed by project and sorted by start time so the list view pages
+    # newest-first without a scan. traceId gets its own GSI because a client
+    # following a trace link knows the id but not the project.
+    {
+        "name": "ai-traces",
+        "pk": "projectId",
+        "sk": "sortKey",              # <startTime>#<traceId>
+        "gsis": [
+            {"index": "traceId-index", "pk": "traceId", "sk": None},
+            {"index": "threadId-index", "pk": "threadId", "sk": "sortKey"},
+        ],
+    },
+    # Spans live under their trace so a waterfall is one query, not N.
+    {"name": "ai-spans", "pk": "traceId", "sk": "spanSortKey"},   # <startTime>#<spanId>
+
     # Which graph engine is read from, and which are written to. Deliberately NOT
     # in Settings: get_settings() is lru_cached, so a value read from there cannot
     # change without a restart, and this has to be switchable from the UI.

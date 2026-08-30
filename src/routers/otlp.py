@@ -57,6 +57,52 @@ def _partial(rejected: int, reason: str, kind: str = "dataPoints") -> JSONRespon
     )
 
 
+def _decode_protobuf(body: bytes) -> tuple[dict | None, str]:
+    """Decode an OTLP/protobuf trace export into the same dict shape as OTLP/JSON.
+
+    `preserving_proto_field_name=False` gives camelCase keys (traceId, spanId,
+    startTimeUnixNano), which is exactly what the JSON encoding produces — so one
+    parser serves both wire formats.
+
+    Byte fields (trace and span ids) arrive base64-encoded from MessageToDict; they
+    are converted to hex, because hex is what every OTel UI and the JSON exporter
+    show, and an id that renders differently depending on the wire format is a bug
+    waiting to be filed.
+    """
+    try:
+        from google.protobuf.json_format import MessageToDict
+        from opentelemetry.proto.collector.trace.v1 import trace_service_pb2
+    except ImportError:
+        return None, ("OTLP/protobuf received but opentelemetry-proto is not "
+                      "installed on this server")
+    try:
+        req = trace_service_pb2.ExportTraceServiceRequest()
+        req.ParseFromString(body)
+        decoded = MessageToDict(req, preserving_proto_field_name=False)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"Malformed protobuf payload: {exc}"
+    _hexify_ids(decoded)
+    return decoded, ""
+
+
+def _hexify_ids(payload: dict) -> None:
+    """Rewrite base64 trace/span ids to hex, in place."""
+    import base64
+
+    def to_hex(value: str) -> str:
+        try:
+            return base64.b64decode(value).hex()
+        except Exception:  # noqa: BLE001 — already hex, or unusable; leave as-is
+            return value
+
+    for resource_span in payload.get("resourceSpans", []) or []:
+        for scope_span in resource_span.get("scopeSpans", []) or []:
+            for span in scope_span.get("spans", []) or []:
+                for key in ("traceId", "spanId", "parentSpanId"):
+                    if span.get(key):
+                        span[key] = to_hex(span[key])
+
+
 async def _read_payload(request: Request) -> tuple[dict | None, JSONResponse | None]:
     """Validate size / content type / auth. Returns (payload, error_response)."""
     s = get_settings()
@@ -65,18 +111,24 @@ async def _read_payload(request: Request) -> tuple[dict | None, JSONResponse | N
         return None, _partial(0, "OTLP ingest is disabled on this server")
 
     content_type = request.headers.get("content-type", "")
-    if "protobuf" in content_type:
-        return None, _partial(
-            0,
-            "This receiver speaks OTLP/JSON only — set "
-            "OTEL_EXPORTER_OTLP_PROTOCOL=http/json",
-        )
 
     body = await request.body()
     if len(body) > s.otlp_max_body_bytes:
         return None, _partial(
             0, f"Payload {len(body)} bytes exceeds limit {s.otlp_max_body_bytes}"
         )
+
+    if "protobuf" in content_type:
+        # This receiver was JSON-only, because Claude Code speaks http/json and
+        # avoiding protobuf kept a dependency out of the codebase. That trade no
+        # longer holds: the Python OTLP HTTP exporter has NO JSON mode, so every
+        # Python LLM application — which is most of them — could not send traces
+        # at all. Decoding protobuf here is what keeps clients on a standard OTel
+        # SDK instead of an Aura-specific one.
+        payload, err = _decode_protobuf(body)
+        if err:
+            return None, _partial(0, err)
+        return payload, None
 
     try:
         import json
@@ -202,10 +254,38 @@ async def receive_logs(request: Request):
 
 @router.post("/v1/traces")
 async def receive_traces(request: Request):
-    """Accept and drop traces.
+    """Ingest LLM-application traces from any OpenTelemetry SDK.
 
-    Claude Code only exports traces under CLAUDE_CODE_ENHANCED_TELEMETRY_BETA,
-    which AURA does not enable. The route exists so that a user who turns it on
-    gets a clean 200 instead of a 404 retry loop.
+    This used to accept and drop. It now persists, which is what makes the AI
+    Observability surface possible — and because the wire format is standard OTLP,
+    the same client instrumentation can be repointed at Opik or any other OTel
+    backend without touching the application.
+
+    The always-200 contract is kept deliberately. A non-2xx makes exporters retry
+    in a loop and surfaces telemetry errors inside the caller's own application;
+    an observability tool must never be able to break the thing it observes.
+    Ingest problems are reported through OTLP's partialSuccess field instead.
     """
-    return _accepted()
+    payload, err = await _read_payload(request)
+    if err is not None:
+        return err
+
+    user_id = _resolve_user(request)
+    if not user_id:
+        # Unauthenticated traces are dropped rather than stored against a guessed
+        # tenant: this store holds one client's prompts, and mis-attributing them
+        # is worse than losing them.
+        return _partial(0, "unauthenticated: send a gateway key or JWT", kind="spans")
+
+    try:
+        from src.aiobs import ingest, service
+        parsed = ingest.parse_spans(payload)
+        if not parsed:
+            return _accepted()
+        spans = [span for span, _ in parsed]
+        thread_id = ingest.thread_id_from(spans, payload)
+        stored = service.store_batch(spans, payload, user_id, thread_id)
+        return _accepted(stored=stored)
+    except Exception as exc:  # noqa: BLE001 — never fail the caller's exporter
+        log.exception("trace ingest failed")
+        return _partial(0, f"ingest error: {exc}", kind="spans")
