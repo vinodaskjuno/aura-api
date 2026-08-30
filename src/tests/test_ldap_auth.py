@@ -351,3 +351,46 @@ def test_the_reverse_search_escapes_the_user_dn():
 
     ldap_auth._reverse_group_search(Conn(), FakeSettings, "cn=a*b)(c", "")
     assert "*" not in captured["filter"].replace("(|", "")
+
+
+# ── /auth/me tells the UI who is in charge of access ──────────────────────────
+
+def _me(monkeypatch, enabled):
+    """Call GET /auth/me with the directory switch in a known state."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.routers import auth as auth_router
+    from src.services import auth_config
+
+    monkeypatch.setattr(auth_config, "get_config",
+                        lambda: auth_config.AuthConfig(enabled=enabled, mappings=[]))
+
+    app = FastAPI()
+    app.include_router(auth_router.router)   # the router carries its own /auth prefix
+    app.dependency_overrides[auth_router.get_current_user] = lambda: {
+        "userId": "u1", "username": "admin", "role": "admin", "permissions": ["dashboard"]}
+    return TestClient(app).get("/auth/me").json()
+
+
+def test_me_reports_directory_managed(monkeypatch):
+    """User and Role Management read this to explain their scope; they cannot read
+    the LDAP config endpoint, which needs user_management they may not hold."""
+    assert _me(monkeypatch, True)["directoryManaged"] is True
+    assert _me(monkeypatch, False)["directoryManaged"] is False
+
+
+def test_me_survives_an_unreadable_config(monkeypatch):
+    """A DynamoDB hiccup must not break the identity call the whole UI depends on."""
+    from src.services import auth_config
+    monkeypatch.setattr(auth_config, "get_config",
+                        lambda: (_ for _ in ()).throw(RuntimeError("dynamo down")))
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.routers import auth as auth_router
+
+    app = FastAPI()
+    app.include_router(auth_router.router)   # the router carries its own /auth prefix
+    app.dependency_overrides[auth_router.get_current_user] = lambda: {"username": "admin"}
+    body = TestClient(app).get("/auth/me").json()
+    assert body["directoryManaged"] is False and body["username"] == "admin"

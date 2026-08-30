@@ -108,7 +108,19 @@ def login(req: LoginRequest):
 
 @router.get("/me")
 def me(user: dict = Depends(get_current_user)):
-    return user
+    """The caller's identity, plus whether access is coming from the directory.
+
+    `directoryManaged` is here rather than on the admin-only LDAP endpoints because
+    the pages that need it (User and Role Management) are gated on
+    role_management, which does not imply user_management — they could not read the
+    LDAP config to find out.
+    """
+    from src.services.auth_config import get_config
+    try:
+        managed = get_config().enabled
+    except Exception:  # noqa: BLE001 — a config read must never break sign-in state
+        managed = False
+    return {**user, "directoryManaged": managed}
 
 
 # ── User management (admin+) ──────────────────────────────────────────────────
