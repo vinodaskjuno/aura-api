@@ -394,3 +394,28 @@ def test_me_survives_an_unreadable_config(monkeypatch):
     app.dependency_overrides[auth_router.get_current_user] = lambda: {"username": "admin"}
     body = TestClient(app).get("/auth/me").json()
     assert body["directoryManaged"] is False and body["username"] == "admin"
+
+
+def test_placeholder_bind_password_reports_as_unset(monkeypatch):
+    """Terraform creates the secret holding REPLACE_ME and never sets its value.
+
+    Reporting that as "set" would send an administrator hunting a connection fault
+    that is really an unstored password — the single most likely first-run mistake.
+    """
+    from src.routers import auth as auth_router
+    from src.services import auth_config
+    from src import config_settings
+
+    monkeypatch.setattr(auth_config, "get_config",
+                        lambda refresh=False: auth_config.AuthConfig())
+
+    # Called directly: require_permission() returns a NEW callable each time, so it
+    # cannot be matched by dependency_overrides, and the permission check is not
+    # what is under test here.
+    for stored, expected in (("REPLACE_ME", False), ("", False), ("a-real-pw", True)):
+        class S(FakeSettings):
+            ldap_bind_password = stored
+        monkeypatch.setattr(config_settings, "get_settings", lambda S=S: S)
+        body = auth_router.get_ldap_config.__wrapped__() if hasattr(
+            auth_router.get_ldap_config, "__wrapped__") else auth_router.get_ldap_config({})
+        assert body["connection"]["bindPasswordSet"] is expected, stored

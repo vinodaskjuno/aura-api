@@ -207,7 +207,12 @@ def get_ldap_config(_: dict = Depends(require_permission("user_management"))):
             "bindDn": s.ldap_bind_dn,
             "userFilter": s.ldap_user_filter,
             "allowInsecure": s.ldap_allow_insecure,
-            "bindPasswordSet": bool(s.ldap_bind_password),
+            # Terraform creates the secret holding REPLACE_ME and never sets its
+            # value, so a non-empty string is not the same as a configured one.
+            # Reporting "set" for the placeholder would send an administrator
+            # hunting a connection fault that is really an unstored password.
+            "bindPasswordSet": bool(s.ldap_bind_password)
+                               and s.ldap_bind_password != "REPLACE_ME",
         },
         "availableRoles": sorted(ROLE_PERMISSIONS),
         "availablePermissions": sorted({p for v in ROLE_PERMISSIONS.values() for p in v}),
