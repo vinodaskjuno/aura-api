@@ -17,14 +17,17 @@ log = logging.getLogger(__name__)
 _job_history: dict[str, list[dict]] = {
     "ontology_delta_job": [],
     "correlation_refresh_job": [],
+    "online_eval_job": [],
 }
 _job_status: dict[str, str] = {
     "ontology_delta_job": "idle",
     "correlation_refresh_job": "idle",
+    "online_eval_job": "idle",
 }
 _job_last_run: dict[str, str | None] = {
     "ontology_delta_job": None,
     "correlation_refresh_job": None,
+    "online_eval_job": None,
 }
 
 
@@ -98,6 +101,28 @@ def correlation_refresh_job():
     log.info("[Scheduler] correlation_refresh_job done in %.1fs", duration)
 
 
+def online_eval_job():
+    """Score a sample of recent LLM traces with the configured judges.
+
+    A no-op unless online evaluation has been switched on, and bounded per sweep,
+    because every judged trace is a billable model call. Sampling is deterministic
+    by trace id, so a sweep that reruns does not re-score what it already paid for.
+    """
+    import time
+    log.info("[Scheduler] online_eval_job starting")
+    _job_status["online_eval_job"] = "running"
+    start = time.monotonic()
+    try:
+        from src.aiobs import online_eval
+        result = online_eval.run_sweep()
+    except Exception as exc:
+        log.exception("[Scheduler] online_eval_job failed")
+        result = {"error": str(exc)}
+    duration = time.monotonic() - start
+    _record_run("online_eval_job", result, duration)
+    log.info("[Scheduler] online_eval_job done in %.1fs: %s", duration, result.get("status"))
+
+
 # ── Job metadata (for the scheduler API) ─────────────────────────────────────
 
 JOB_DEFS = [
@@ -116,6 +141,19 @@ JOB_DEFS = [
         "schedule": "0 3 * * *",
         "schedule_human": "Daily at 03:00 UTC",
         "fn": correlation_refresh_job,
+    },
+    {
+        "id": "online_eval_job",
+        "name": "Online LLM Evaluation",
+        "description": ("Scores a sample of recent LLM traces with the configured "
+                        "judges. Disabled by default; each judged trace is a "
+                        "billable model call."),
+        # Hourly rather than daily: online evaluation exists to catch quality
+        # regressions while they are still happening, and a daily sweep would
+        # surface one up to a day late.
+        "schedule": "17 * * * *",
+        "schedule_human": "Hourly at :17",
+        "fn": online_eval_job,
     },
 ]
 

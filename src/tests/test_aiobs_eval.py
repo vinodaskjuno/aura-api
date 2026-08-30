@@ -240,3 +240,42 @@ def test_sample_rate_is_clamped(fake_dynamo):
     unbounded bill."""
     assert online_eval.set_config(True, 9.0, ["relevance"], "p", "a")["sampleRate"] == 1.0
     assert online_eval.set_config(True, -3.0, ["relevance"], "p", "a")["sampleRate"] == 0.0
+
+
+# ── Scheduler wiring ─────────────────────────────────────────────────────────
+
+def test_online_eval_is_registered_as_a_job():
+    from src.scheduler.jobs import JOB_DEFS
+    job = next((j for j in JOB_DEFS if j["id"] == "online_eval_job"), None)
+    assert job is not None
+    # Hourly, not daily: a daily sweep would surface a quality regression up to a
+    # day after it started.
+    assert job["schedule"].split()[1] == "*"
+
+
+def test_the_job_is_a_noop_while_disabled(monkeypatch):
+    """Default-off matters — every judged trace is a billable model call."""
+    from src.scheduler import jobs
+    monkeypatch.setattr(online_eval, "get_config",
+                        lambda: {"enabled": False, "sampleRate": 0.05,
+                                 "judges": ["relevance"], "projectId": "p"})
+    recorded = {}
+    monkeypatch.setattr(jobs, "_record_run",
+                        lambda job_id, result, duration: recorded.update(result))
+    jobs.online_eval_job()
+    assert recorded["status"] == "disabled"
+    assert recorded["scored"] == 0
+
+
+def test_a_failing_sweep_is_recorded_not_raised(monkeypatch):
+    from src.scheduler import jobs
+
+    def boom():
+        raise RuntimeError("judge backend down")
+
+    monkeypatch.setattr(online_eval, "run_sweep", boom)
+    recorded = {}
+    monkeypatch.setattr(jobs, "_record_run",
+                        lambda job_id, result, duration: recorded.update(result))
+    jobs.online_eval_job()            # must not propagate into the scheduler
+    assert "judge backend down" in recorded["error"]
