@@ -107,7 +107,7 @@ def test_backend_is_selectable_by_name(monkeypatch):
 
 def test_a_dead_backend_is_not_retried_on_every_call(monkeypatch):
     """Retrying a downed engine per call would add a connect timeout to every
-    request. `close()` is what clears the latch so it can recover."""
+    request, so failures are held for a cooldown."""
     backends.reset()
     monkeypatch.setattr(backends, "_configs_from_settings", lambda: {
         "neo4j": backends.BackendConfig("neo4j", "bolt://nope", "u", "p")})
@@ -129,7 +129,48 @@ def test_a_dead_backend_is_not_retried_on_every_call(monkeypatch):
 
     backend.close()
     assert backend.is_available() is False
-    assert attempts["n"] == 2      # the latch cleared, so it retried
+    assert attempts["n"] == 2      # close() clears the cooldown, so it retried
+    backends.reset()
+
+
+def test_a_backend_recovers_once_the_cooldown_expires(monkeypatch):
+    """A permanent latch meant an API that started seconds before its graph
+    reported the engine down until someone restarted it by hand — observed in dev,
+    where the API came up at 07:13:30 and neo4j at 07:13:33."""
+    backends.reset()
+    monkeypatch.setattr(backends, "_configs_from_settings", lambda: {
+        "neo4j": backends.BackendConfig("neo4j", "bolt://nope", "u", "p")})
+    backend = backends.get_backend("neo4j")
+
+    calls = {"n": 0}
+    state = {"up": False}
+
+    class Flaky:
+        @staticmethod
+        def driver(*a, **k):
+            calls["n"] += 1
+            if not state["up"]:
+                raise RuntimeError("refused")
+
+            class D:
+                @staticmethod
+                def verify_connectivity(): return None
+            return D()
+
+    monkeypatch.setitem(__import__("sys").modules, "neo4j",
+                        type("M", (), {"GraphDatabase": Flaky}))
+
+    assert backend.is_available() is False
+    assert backend.is_available() is False
+    assert calls["n"] == 1                     # held during the cooldown
+
+    # The engine comes up, and the cooldown lapses.
+    state["up"] = True
+    clock = {"t": backends.time.monotonic() + backends.RETRY_COOLDOWN_SECONDS + 1}
+    monkeypatch.setattr(backends.time, "monotonic", lambda: clock["t"])
+
+    assert backend.is_available() is True      # recovered with no restart
+    assert calls["n"] == 2
     backends.reset()
 
 

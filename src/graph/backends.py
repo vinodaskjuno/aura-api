@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Generator
@@ -22,6 +23,11 @@ from src.graph.dialects import DIALECTS, Dialect
 log = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "neo4j"
+
+# How long to wait before retrying an engine that failed to connect. Long
+# enough that a hard-down engine does not slow every request, short enough
+# that a service which came up moments after this one is picked up on its own.
+RETRY_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -62,9 +68,19 @@ class Backend:
     def __init__(self, config: BackendConfig):
         self.config = config
         self._driver: Any = None
-        # `attempted` distinguishes "not tried yet" from "tried and failed", so a
-        # dead engine is not retried on every single call.
-        self._attempted = False
+        # Timestamp of the last failed connect, or None if never tried / connected.
+        #
+        # This used to be a permanent boolean latch, which meant a backend that
+        # first saw its engine down NEVER reconnected inside that process. Deploys
+        # roll every service at once, so the API can easily start a few seconds
+        # before the graph does — and it would then report the engine as down until
+        # someone restarted it by hand. Observed in dev: the API started at
+        # 07:13:30 and neo4j's task at 07:13:33, and the dashboard read
+        # "Disconnected" from a healthy database.
+        #
+        # A cooldown keeps the original intent — a dead engine must not add a
+        # connect timeout to every single request — while still recovering.
+        self._failed_at: float | None = None
         self._lock = threading.Lock()
 
     @property
@@ -81,9 +97,10 @@ class Backend:
         with self._lock:
             if self._driver is not None:
                 return self._driver
-            if self._attempted:
+            if (self._failed_at is not None
+                    and (time.monotonic() - self._failed_at) < RETRY_COOLDOWN_SECONDS):
                 return None
-            self._attempted = True
+            self._failed_at = time.monotonic()
             try:
                 from neo4j import GraphDatabase
                 driver = GraphDatabase.driver(
@@ -92,6 +109,7 @@ class Backend:
                 )
                 driver.verify_connectivity()
                 self._driver = driver
+                self._failed_at = None
                 log.info("Graph backend %r connected at %s (dialect=%s)",
                          self.name, self.config.uri, self.dialect.name)
             except Exception as exc:  # noqa: BLE001 — the app stays up without a graph
@@ -119,9 +137,8 @@ class Backend:
                 except Exception as exc:  # noqa: BLE001
                     log.debug("closing backend %r: %s", self.name, exc)
             self._driver = None
-            # Reset so the next call retries — this is what lets a backend recover
-            # after the engine comes back without restarting the process.
-            self._attempted = False
+            # Clear the cooldown so the next call retries immediately.
+            self._failed_at = None
 
 
 # Statements that change data. A read replayed on every secondary would double the
