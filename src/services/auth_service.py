@@ -121,10 +121,24 @@ def seed_default_data() -> None:
             "passwordHash": _hash_password("Admin@123"),
             "roleId": "super_admin",
             "status": "active",
+            # Break-glass: still able to sign in when the directory is unreachable.
+            # Without at least one such account, a wrong bind DN locks everyone out —
+            # including out of the screen where the directory is configured.
+            "breakGlass": True,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "lastLogin": None,
         })
         logger.info("Seeded default super_admin user (username: admin, password: Admin@123)")
+
+    else:
+        # An environment seeded before break-glass existed has no marked account, so
+        # enabling LDAP would strand it. Promote the first super_admin once.
+        if not any(u.get("breakGlass") for u in existing_users):
+            for u in existing_users:
+                if u.get("roleId") == "super_admin":
+                    update_item("users", {"userId": u["userId"]}, {"breakGlass": True})
+                    logger.info("Marked %s as a break-glass account", u.get("username"))
+                    break
 
 
 # ── User CRUD ─────────────────────────────────────────────────────────────────
@@ -197,13 +211,75 @@ def update_role_permissions(role_id: str, permissions: list[str]) -> dict | None
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+class DirectoryRefused(Exception):
+    """Authenticated against the directory but holds no mapped group.
+
+    A distinct exception because the caller must say WHICH groups to ask for. A bare
+    "invalid credentials" sends the user to reset a password that was correct.
+    """
+
+
 def authenticate(username: str, password: str) -> dict | None:
+    """Verify credentials and return the user with their permissions.
+
+    Dispatches to the directory when LDAP is enabled, and falls back to local
+    accounts otherwise — or, when the directory is unreachable, to break-glass
+    accounts only. Everything downstream reads `permissions` from the dict this
+    returns, so directory-driven access needs no change anywhere else.
+    """
+    from src.services import auth_config
+
+    config = auth_config.get_config()
+    if not config.enabled:
+        return _authenticate_local(username, password)
+
+    from src.services import ldap_auth
+    try:
+        directory_user = ldap_auth.authenticate(username, password)
+    except ldap_auth.LdapError as exc:
+        # The DIRECTORY failed, not the credentials. Break-glass only: a normal local
+        # account must not become usable just because AD is down, or an outage would
+        # silently widen who can sign in.
+        logger.error("LDAP unavailable (%s) — break-glass accounts only", exc)
+        return _authenticate_local(username, password, break_glass_only=True)
+
+    if directory_user is None:
+        # Wrong password, or no such directory user. Never falls back: that would let
+        # a stale local password outlive the directory account it mirrors.
+        return None
+
+    resolved = auth_config.resolve(directory_user.groups, config)
+    if not resolved["permissions"]:
+        raise DirectoryRefused(
+            f"{username} authenticated but belongs to no AURA group. Ask an "
+            f"administrator to add you to one of: "
+            f"{', '.join(config.group_names) or '(none configured)'}")
+
+    role_id = resolved["roleId"]
+    logger.info("LDAP login %s — groups=%s role=%s", username,
+                resolved["matched"], role_id)
+    return {
+        "userId": directory_user.user_id,
+        "username": directory_user.username,
+        "email": directory_user.email,
+        "role": role_id,
+        "roleLabel": ROLE_LABELS.get(role_id, directory_user.display_name or "Directory User"),
+        "permissions": resolved["permissions"],
+    }
+
+
+def _authenticate_local(username: str, password: str,
+                        break_glass_only: bool = False) -> dict | None:
     user = get_user_by_username(username)
     if not user:
         return None
     if user.get("status") != "active":
         return None
     if not _verify_password(password, user.get("passwordHash", "")):
+        return None
+    if break_glass_only and not user.get("breakGlass"):
+        logger.warning("Local login refused for %r: the directory is unavailable and "
+                       "this account is not marked break-glass", username)
         return None
     # Update last login
     update_item("users", {"userId": user["userId"]},

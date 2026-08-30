@@ -87,6 +87,20 @@ class Settings(BaseSettings):
     # silently arm this.
     allow_graph_wipe: bool = False
 
+    # ── Directory (LDAP / Active Directory) ──────────────────────────────────
+    # Connection facts only. WHETHER directory auth is on, and which groups map to
+    # which permissions, is runtime state in DynamoDB (services/auth_config.py) —
+    # adding an AD group must not need a redeploy.
+    ldap_uri: str = "ldaps://localhost:636"
+    ldap_base_dn: str = ""
+    ldap_bind_dn: str = ""
+    ldap_bind_password: str = ""
+    # {username} is substituted with the ESCAPED login name. sAMAccountName suits AD;
+    # OpenLDAP typically wants (uid={username}).
+    ldap_user_filter: str = "(sAMAccountName={username})"
+    # A simple bind over plaintext sends the password in clear text. Lab use only.
+    ldap_allow_insecure: bool = False
+
     # ── AI Gateway ───────────────────────────────────────────────────────────────
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"

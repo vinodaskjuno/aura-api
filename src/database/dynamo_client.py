@@ -61,7 +61,7 @@ def _table(name: str):
 # ── Table key schemas (PK only vs PK+SK) ─────────────────────────────────────
 # Tables with a single PK only — get_item needs only one key field
 _PK_ONLY_TABLES = {"users", "roles", "uploads", "ontology-changelog", "budget-config",
-                   "user-budgets", "graph-config"}
+                   "user-budgets", "graph-config", "auth-config"}
 
 # Tables with composite keys — get_item needs both PK and SK
 _COMPOSITE_TABLES = {
@@ -454,6 +454,9 @@ TABLE_SCHEMAS = [
     # in Settings: get_settings() is lru_cached, so a value read from there cannot
     # change without a restart, and this has to be switchable from the UI.
     {"name": "graph-config", "pk": "configId", "sk": None},
+    # Directory group -> permission mapping. Runtime-editable so granting access to a
+    # new AD group is a UI change, not a deploy.
+    {"name": "auth-config", "pk": "configId", "sk": None},
     # Writes that failed on a secondary engine, awaiting retry. Keyed by backend so
     # a drain is a query rather than a full scan.
     {"name": "graph-outbox", "pk": "backend", "sk": "outboxId"},

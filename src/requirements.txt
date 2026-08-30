@@ -46,3 +46,7 @@ kubernetes>=29.0.0
 # HTTP exporter has no JSON mode, so without this no Python client can send
 # traces — see routers/otlp.py::_decode_protobuf.
 opentelemetry-proto>=1.27.0
+
+# Directory sign-in (LDAP / Active Directory). Pure Python, so no OpenLDAP C
+# libraries are needed in the container — unlike python-ldap.
+ldap3>=2.9.1
