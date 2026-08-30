@@ -50,6 +50,11 @@ class _MemgraphDialect(Dialect):
         # confidence index has no equivalent. Skipped rather than faked.
         return None
 
+    def bulk_delete_statement(self, match: str) -> str:
+        # No CALL { … } IN TRANSACTIONS in Memgraph. Batching is also unnecessary:
+        # storage is in-memory, so there is no JVM heap to blow the way Neo4j has.
+        return f"{match} DETACH DELETE n"
+
 
 MEMGRAPH = _MemgraphDialect(
     name="memgraph",

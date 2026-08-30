@@ -59,6 +59,22 @@ class Dialect:
         return (f"CREATE INDEX {name} IF NOT EXISTS "
                 f"FOR ()-[r:{rel_type}]-() ON (r.{prop})")
 
+    def bulk_delete_statement(self, match: str) -> str:
+        """Delete every node the `match` clause selects, plus its relationships.
+
+        Batched on Neo4j because the container runs a 1 GB heap
+        (docker/neo4j.Dockerfile) and a single-transaction DETACH DELETE over a few
+        thousand connected nodes OOMs the JVM and takes the task down with it.
+
+        `match` is built from a fixed predicate in graph/wipe.py, never from user
+        input — this interpolates it directly and would be an injection point
+        otherwise.
+        """
+        # `CALL (n) { … }` rather than the older `CALL { WITH n … }`: the latter is
+        # deprecated and warns on every call. Requires Neo4j 5.23+ — verified against
+        # the deployed 5.26.30 and local 2026.07.1.
+        return f"{match} CALL (n) {{ DETACH DELETE n }} IN TRANSACTIONS OF 5000 ROWS"
+
     def adapt(self, cypher: str) -> str:
         """Translate a statement written in the reference dialect (Neo4j 5)."""
         for pattern, replacement in self.rewrites:

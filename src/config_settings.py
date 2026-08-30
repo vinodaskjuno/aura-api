@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     memgraph_user: str = ""
     memgraph_password: str = ""
 
+    # Arms the Settings → Danger Zone graph wipe. Defaults to FALSE, and is set only
+    # in the dev task definition.
+    #
+    # Deliberately its own flag rather than a check on app_env: APP_ENV is hardcoded
+    # to "prod" in infra/ecs.tf for every environment, so the backend cannot tell dev
+    # from prod. An explicit opt-in means a new environment is safe by OMISSION —
+    # nobody has to remember to add a block — and fixing APP_ENV later cannot
+    # silently arm this.
+    allow_graph_wipe: bool = False
+
     # ── AI Gateway ───────────────────────────────────────────────────────────────
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
