@@ -43,10 +43,42 @@ def list_qa_projects(user: dict = Depends(require_permission("qa_workspace"))):
 
 @router.get("/projects/{project_id}/suites")
 def get_test_suites(project_id: str, user: dict = Depends(require_permission("qa_workspace"))):
-    """Return test runs/suites for a project from DynamoDB."""
-    all_runs = scan_items("test-results", limit=500)
-    runs = [r for r in all_runs if r.get("projectId") == project_id]
-    runs.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
+    """Test runs for a project: executed runs from S3, generation runs from DynamoDB.
+
+    The S3 side is authoritative for anything QualityMind executed and is listed by
+    key prefix, so it is neither scanned nor capped. The DynamoDB scan remains only
+    for TestGenerationAgent output, which has no S3 report — `projectId` is the SORT
+    key of `test-results`, so filtering on it needs either a scan or a new GSI.
+    Merging the two means a run past the scan's limit is still listed, which it was
+    not before.
+    """
+    from src.qatest import evidence
+
+    runs: list[dict] = []
+    seen: set[str] = set()
+
+    for run_id in evidence.list_runs(project_id):
+        report = evidence.read_report(project_id, run_id)
+        if not report:
+            continue
+        seen.add(run_id)
+        runs.append({
+            "testRunId": run_id, "projectId": project_id,
+            "type": "qatest", "status": report.get("status"),
+            "totalPassed": report.get("totalPassed", 0),
+            "totalFailed": report.get("totalFailed", 0),
+            "totalSkipped": report.get("totalSkipped", 0),
+            "appUrl": report.get("appUrl", ""),
+            "createdAt": report.get("startedAt", ""),
+            "completedAt": report.get("completedAt", ""),
+            "hasEvidence": True,
+        })
+
+    for row in scan_items("test-results", limit=500):
+        if row.get("projectId") == project_id and row.get("testRunId") not in seen:
+            runs.append(row)
+
+    runs.sort(key=lambda x: str(x.get("createdAt") or ""), reverse=True)
     return runs
 
 
@@ -130,8 +162,7 @@ async def run_tests(req: RunTestsRequest,
 
     # Build mock prior result if run_id given
     if req.run_id:
-        runs = scan_items("test-results", limit=500)
-        matching = next((r for r in runs if r.get("testRunId") == req.run_id), None)
+        matching = get_item_by_pk("test-results", req.run_id)
         if matching:
             mock_gen = AgentResult(agent_name="test_generation_agent")
             mock_gen.artifacts = [
@@ -148,8 +179,10 @@ async def run_tests(req: RunTestsRequest,
 @router.get("/runs/{run_id}")
 def get_run_detail(run_id: str, user: dict = Depends(require_permission("qa_workspace"))):
     """Get full detail of a test run."""
-    all_runs = scan_items("test-results", limit=500)
-    run = next((r for r in all_runs if r.get("testRunId") == run_id), None)
+    # query_items on the partition key, not a table scan: the previous
+    # scan_items(limit=500) both cost a full scan per request and made any run past
+    # the first 500 items unfindable.
+    run = get_item_by_pk("test-results", run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
@@ -158,8 +191,7 @@ def get_run_detail(run_id: str, user: dict = Depends(require_permission("qa_work
 @router.get("/runs/{run_id}/artifacts")
 def get_run_artifacts(run_id: str, user: dict = Depends(require_permission("qa_workspace"))):
     """Return presigned S3 URLs for test artifacts."""
-    all_runs = scan_items("test-results", limit=500)
-    run = next((r for r in all_runs if r.get("testRunId") == run_id), None)
+    run = get_item_by_pk("test-results", run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     result = []
@@ -301,87 +333,107 @@ async def ws_generate(ws: WebSocket):
             pass
 
 
-# ── Container test execution (ECS Fargate + screenshots) ─────────────────────
+# ── Local test execution (podman emulators + Playwright, evidence in S3) ─────
+#
+# Runs execute where podman and a browser are available — a developer machine or CI —
+# not in the deployed task. The deployed API can still SHOW any run, because evidence
+# lives in the shared S3 bucket rather than on whichever machine produced it.
+#
+# What this replaced: an ECS run_task/exec/stop_task cycle per run that dispatched to
+# a Lambda named `aura-test-runner` which was never deployed, so every run from a
+# deployed environment failed.
 
-class ContainerRunRequest(BaseModel):
-    run_id:          str
-    project_id:      str
-    app_url:         str         # URL of the application to test
-    app_description: str = ""
+class LocalRunRequest(BaseModel):
+    project_id: str
+    app_url: str
+    run_id: str | None = None
+    exploratory: bool = False
 
 
-@router.post("/run/container")
-async def run_in_container(req: ContainerRunRequest,
-                            user: dict = Depends(require_permission("qa_workspace"))):
-    """Launch ECS Fargate container, run Playwright with screenshots, scale down."""
-    from src.agents.container_test_runner import ContainerTestRunnerAgent
-    from src.agents.base_agent import AgentContext
+@router.get("/capabilities")
+def qa_capabilities(user: dict = Depends(require_permission("qa_workspace"))):
+    """Whether THIS process can execute a run, and why not when it cannot.
 
-    session_id = str(uuid.uuid4())
-    context = AgentContext(
-        user_id=user["userId"],
-        username=user["username"],
-        role=user["role"],
-        intent=f"Run tests in container against {req.app_url}",
-        project_id=req.project_id,
-        session_id=session_id,
-        extra={
-            "run_id":          req.run_id,
-            "app_url":         req.app_url,
-            "app_description": req.app_description,
-        },
-    )
+    The UI uses this to disable the run button with a reason instead of offering a
+    button that fails — which is what the old ECS path did in every deployed
+    environment.
+    """
+    from src.qatest.emulators import CLOUDS, podman_available
+    from src.qatest.runner import _playwright_available
 
-    agent  = ContainerTestRunnerAgent()
-    result = await agent.run(context)
-
-    if result.status == "failed":
-        raise HTTPException(status_code=500, detail=result.error or "Container test run failed")
-
+    podman = podman_available()
+    browser, browser_why = _playwright_available()
     return {
-        "session_id":        session_id,
-        "run_id":            req.run_id,
-        "status":            result.status,
-        "total_screenshots": result.output.get("total_screenshots", 0),
-        "total_passed":      result.output.get("total_passed", 0),
-        "total_failed":      result.output.get("total_failed", 0),
-        "log":               result.activity_log[-10:],
+        "canRun": podman and browser,
+        "podman": podman,
+        "browser": browser,
+        "reason": ("" if (podman and browser) else
+                   "; ".join(x for x in [
+                       "" if podman else "podman is not available here",
+                       "" if browser else browser_why,
+                   ] if x)),
+        "clouds": [{"name": c.name, "port": c.port, "image": c.image} for c in CLOUDS],
     }
 
 
-@router.get("/run/container/{run_id}/screenshots")
-async def get_container_screenshots(run_id: str,
-                                     user: dict = Depends(require_permission("qa_workspace"))):
-    """Return presigned URLs for all screenshots from a container test run."""
-    all_runs = scan_items("test-results", limit=500)
-    run      = next((r for r in all_runs if r.get("testRunId") == run_id), None)
-    if not run:
-        raise HTTPException(status_code=404, detail="Test run not found")
+@router.post("/run/local")
+async def run_local(req: LocalRunRequest,
+                    user: dict = Depends(require_permission("qa_workspace"))):
+    """Plan from the graph, start only the emulators the project needs, run, store."""
+    from src.qatest.service import execute
 
-    screenshots_uris = run.get("screenshots", [])
-    result = []
-    for uri in screenshots_uris:
-        key = _s3_key(uri)
-        try:
-            url  = presigned_url("test-artifacts", key, expires=3600)
-            name = key.split("/")[-1]
-            result.append({
-                "key":      key,
-                "url":      url,
-                "filename": name,
-                "failed":   "FAIL" in name.upper(),
-            })
-        except Exception:
-            pass
-    return result
+    report = await asyncio.to_thread(
+        execute, req.project_id, req.app_url, req.run_id,
+        user["username"], req.exploratory)
+    return report
 
 
-@router.websocket("/ws/container-run")
-async def ws_container_run(ws: WebSocket):
+@router.get("/results/{project_id}")
+def list_results(project_id: str,
+                 user: dict = Depends(require_permission("qa_workspace"))):
+    """Every stored run for a project, newest first — read from S3, not scanned.
+
+    The endpoints this replaced called scan_items("test-results", limit=500) per
+    request: a full-table scan that also hid every run past the first 500 items.
     """
-    WebSocket streaming for container test execution.
-    Client sends: {"token": "...", "run_id": "...", "project_id": "...", "app_url": "..."}
-    Server streams: scale_up | setup | running | screenshot | upload | scale_down | done | error
+    from src.qatest import evidence
+
+    out = []
+    for run_id in evidence.list_runs(project_id):
+        report = evidence.read_report(project_id, run_id)
+        if report:
+            out.append(report)
+    return out
+
+
+@router.get("/results/{project_id}/{run_id}")
+def get_result(project_id: str, run_id: str,
+               user: dict = Depends(require_permission("qa_workspace"))):
+    """One run in full: summary, every step, and a presigned URL per screenshot."""
+    from src.qatest import evidence
+
+    report = evidence.read_report(project_id, run_id)
+    if not report:
+        raise HTTPException(status_code=404,
+                            detail=f"No stored run {run_id} for project {project_id}")
+    steps = evidence.read_steps(project_id, run_id)
+    urls = evidence.screenshot_urls(project_id, run_id)
+    for step in steps:
+        step["screenshotUrl"] = urls.get(step.get("screenshotKey") or "", "")
+    return {"report": report, "steps": steps}
+
+
+@router.websocket("/ws/local-run")
+async def ws_local_run(ws: WebSocket):
+    """Stream a local run's progress as it happens.
+
+    Client sends: {"token", "project_id", "app_url", "run_id"?, "exploratory"?}
+    Server streams: plan | planned | emulator | running | step | evidence | graph | done | error
+
+    Events are forwarded from the orchestrator's own callback rather than reconstructed
+    by pattern-matching log lines, which is what the container version did — it
+    guessed an event type from substrings like "scaled down" and mislabelled anything
+    whose wording drifted.
     """
     await ws.accept()
     try:
@@ -391,73 +443,52 @@ async def ws_container_run(ws: WebSocket):
         if not user:
             await ws.send_json({"type": "error", "message": "Unauthorized"})
             return
+        if "qa_workspace" not in (user.get("permissions") or []):
+            await ws.send_json({"type": "error", "message": "Forbidden"})
+            return
 
-        run_id     = data.get("run_id", str(uuid.uuid4())[:8])
-        project_id = data.get("project_id", "")
-        app_url    = data.get("app_url", "http://localhost:3000")
+        project_id  = (data.get("project_id") or "").strip()
+        app_url     = (data.get("app_url") or "").strip()
+        if not project_id or not app_url:
+            await ws.send_json({"type": "error",
+                                "message": "project_id and app_url are required"})
+            return
 
-        await ws.send_json({"type": "connected", "message": f"Starting container run for {app_url}"})
+        await ws.send_json({"type": "connected",
+                            "message": f"Starting local run against {app_url}"})
 
-        from src.agents.container_test_runner import ContainerTestRunnerAgent
-        from src.agents.base_agent import AgentContext
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
 
-        context = AgentContext(
-            user_id=user["userId"],
-            username=user["username"],
-            role=user["role"],
-            intent=f"Container test run: {app_url}",
-            project_id=project_id,
-            session_id=str(uuid.uuid4()),
-            extra={"run_id": run_id, "app_url": app_url},
-        )
+        # execute() runs on a worker thread, so events cross back via the loop.
+        def on_event(ev: dict) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, ev)
 
-        agent  = ContainerTestRunnerAgent()
+        from src.qatest.service import execute
+        task = loop.run_in_executor(
+            None, lambda: execute(project_id, app_url, data.get("run_id"),
+                                  user["username"], bool(data.get("exploratory"))))
 
-        # Heartbeat so the client sees activity while the agent runs
-        async def _hb():
-            elapsed = 0
-            while True:
-                await asyncio.sleep(3)
-                elapsed += 3
-                try:
-                    await ws.send_json({"type": "running",
-                                        "message": f"Container running... ({elapsed}s)"})
-                except Exception:
-                    break
+        while True:
+            drain = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait({drain, task},
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if drain in done:
+                await ws.send_json(drain.result())
+                continue
+            drain.cancel()
+            # The run finished; flush anything still queued before closing.
+            while not queue.empty():
+                await ws.send_json(queue.get_nowait())
+            break
 
-        hb_task = asyncio.create_task(_hb())
-        try:
-            result = await agent.run(context)
-        finally:
-            hb_task.cancel()
-
-        # Stream log lines as events
-        for log_line in result.activity_log:
-            lo = log_line.lower()
-            event_type = (
-                "screenshot"  if "screenshot" in lo else
-                "scale_down"  if "scaled down" in lo or "scale-down" in lo else
-                "scale_up"    if "scale-up" in lo or "scaling up" in lo or "running (" in lo else
-                "setup"       if "installing" in lo or "dependencies" in lo else
-                "upload"      if "upload" in lo else
-                "running"
-            )
-            await ws.send_json({"type": event_type, "message": log_line})
-
-        await ws.send_json({
-            "type":              "done",
-            "runId":             run_id,
-            "status":            result.status,
-            "totalScreenshots":  result.output.get("total_screenshots", 0),
-            "totalPassed":       result.output.get("total_passed", 0),
-            "totalFailed":       result.output.get("total_failed", 0),
-        })
+        report = await task
+        await ws.send_json({"type": "report", **report})
 
     except WebSocketDisconnect:
         pass
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         try:
             await ws.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
-

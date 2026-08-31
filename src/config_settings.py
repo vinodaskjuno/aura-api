@@ -45,19 +45,21 @@ class Settings(BaseSettings):
     bedrock_region: str = "us-east-1"
 
     # ── Deployment environment ────────────────────────────────────────────────
-    # "local" → browser-use runs in-process (no Docker, no Lambda)
-    # "ecs"   → FastAPI calls Lambda; Lambda runs browser-use in isolation
     deployment_env: str = "local"                   # "local" | "ecs"
 
-    # ── Test runner (Lambda, used when deployment_env=ecs) ────────────────────
-    test_runner_lambda: str = "aura-test-runner"    # Lambda function name
-
-    # ── Legacy ECS Fargate settings (kept for backward compat) ───────────────
-    test_runner_backend: str = "local"
-    ecs_cluster: str = "aura-test-cluster"
-    ecs_task_definition: str = "aura-playwright-runner"
-    ecs_subnets: str = ""
-    ecs_security_groups: str = ""
+    # ── QualityMind test runner ──────────────────────────────────────────────
+    # Runs execute where podman and a browser exist — a developer machine or CI — and
+    # never in the deployed task. GET /api/qa/capabilities reports what THIS process
+    # can do, so the UI disables the run button with a reason instead of offering one
+    # that fails.
+    #
+    # Removed here, not renamed: test_runner_lambda pointed at `aura-test-runner`,
+    # which was never deployed, and test_runner_backend/ecs_* configured the per-run
+    # Fargate provisioning that src/qatest replaces. Emulator images and ports live in
+    # src/qatest/emulators.py, deliberately not in settings — get_settings() is
+    # lru_cached, and which emulators a run needs is derived from the project's
+    # dependency nodes rather than configured.
+    qatest_emulator_timeout_s: int = 60
     playwright_image: str = "mcr.microsoft.com/playwright:v1.45.0-jammy"
 
     # ── Neo4j (Enterprise Ontology Graph) ────────────────────────────────────
