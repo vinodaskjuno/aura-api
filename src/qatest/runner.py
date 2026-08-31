@@ -37,6 +37,13 @@ class _Recorder:
         self.run_id = run_id
         self.steps: list[Step] = []
         self.console: list[str] = []
+        # Problems seen since the last step closed, so each step owns the errors its
+        # own navigation produced. A page that renders while throwing is not a pass.
+        self.pending: list[str] = []
+
+    def take_pending(self) -> list[str]:
+        out, self.pending = self.pending, []
+        return out
 
     def add(self, action: str, target: str, status: str, started: float,
             error: str = "", png: bytes | None = None, case_id: str = "") -> Step:
@@ -111,13 +118,57 @@ def run_plan(project_id: str, run_id: str, app_url: str, cases: list[Case],
 
         # Console errors and failed requests are evidence too — a page that renders
         # while throwing is a pass that should not be trusted silently.
-        page.on("console", lambda m: rec.console.append(f"[{m.type}] {m.text}")
-                if m.type in ("error", "warning") else None)
-        page.on("requestfailed",
-                lambda r: rec.console.append(f"[requestfailed] {r.method} {r.url}"))
+        def _console(m):
+            if m.type == "error":
+                rec.console.append(f"[console.error] {m.text}")
+                rec.pending.append(f"console.error: {m.text[:200]}")
+            elif m.type == "warning":
+                rec.console.append(f"[console.warning] {m.text}")
+
+        def _failed(r):
+            rec.console.append(f"[requestfailed] {r.method} {r.url}")
+            rec.pending.append(f"request failed: {r.method} {r.url}")
+
+        page.on("console", _console)
+        page.on("requestfailed", _failed)
+        # An uncaught exception is the clearest evidence a page is broken, and it
+        # never shows up in an HTTP status.
+        page.on("pageerror", lambda e: rec.pending.append(f"uncaught: {str(e)[:200]}"))
 
         for case in cases:
             started = time.monotonic()
+
+            if case.case_id == "root-001":
+                # The one case a frontend can be planned from: the graph holds no
+                # SPA routes, because code analysis extracts server-side route
+                # tables and a React app has none.
+                try:
+                    resp = page.goto(app_url, timeout=_STEP_TIMEOUT_MS,
+                                     wait_until="networkidle")
+                    png = page.screenshot(full_page=True)
+                    problems = rec.take_pending()
+                    code = resp.status if resp else 0
+                    if code >= 500:
+                        rec.add("application loads", app_url, "failed", started,
+                                error=f"HTTP {code}", png=png, case_id=case.case_id)
+                    elif problems:
+                        # Loaded, but the page is broken in a way a status code does
+                        # not show — the failure mode a screenshot alone hides.
+                        rec.add("application loads", app_url, "failed", started,
+                                error="loaded with errors:\n" + "\n".join(problems[:8]),
+                                png=png, case_id=case.case_id)
+                    else:
+                        rec.add(f"application loads -> {code}", app_url, "passed",
+                                started, png=png, case_id=case.case_id)
+                except Exception as exc:  # noqa: BLE001
+                    rec.add("application loads", app_url, "failed", started,
+                            error=str(exc), case_id=case.case_id)
+                if on_step:
+                    try:
+                        on_step(rec.steps[-1])
+                    except Exception:  # noqa: BLE001
+                        pass
+                continue
 
             if case.kind == "smoke":
                 # A Service node names a code unit, not an address. Recording it as
@@ -147,7 +198,18 @@ def run_plan(project_id: str, run_id: str, app_url: str, cases: list[Case],
                 resp = page.goto(url, timeout=_STEP_TIMEOUT_MS, wait_until="domcontentloaded")
                 png = page.screenshot(full_page=True)
                 code = resp.status if resp else 0
-                if 200 <= code < 400:
+                ctype = (resp.header_value("content-type") or "") if resp else ""
+                if 200 <= code < 400 and "text/html" in ctype and case.path != "/":
+                    # A single-page app answers 200 with index.html for EVERY path, so
+                    # an API plan aimed at the frontend would report every case as a
+                    # pass. Say what is actually wrong instead.
+                    rec.add(f"GET {case.path} -> {code} (HTML)", url, "failed", started,
+                            error=("expected an API response, got HTML. This URL looks "
+                                   "like the frontend — point the run at the API, or "
+                                   "this route no longer exists and the SPA fallback "
+                                   "answered."),
+                            png=png, case_id=case.case_id)
+                elif 200 <= code < 400:
                     rec.add(f"GET {case.path} -> {code}", url, "passed", started,
                             png=png, case_id=case.case_id)
                 else:

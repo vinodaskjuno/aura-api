@@ -24,11 +24,22 @@ DEMO_SERVICES = [{"eid": "service:p:pricing", "name": "pricing"}]
 
 # ── Planning from the graph ───────────────────────────────────────────────────
 
-def test_one_case_per_api_node_plus_one_per_service():
+def test_one_case_per_api_node_plus_one_per_service_and_a_root_check():
     cases = plan.build_plan("p", {"apis": DEMO_APIS, "services": DEMO_SERVICES,
                                   "dependencies": []})
-    assert len(cases) == len(DEMO_APIS) + len(DEMO_SERVICES)
+    assert len(cases) == len(DEMO_APIS) + len(DEMO_SERVICES) + 1
     assert sum(1 for c in cases if c.kind == "smoke") == 1
+
+
+def test_every_plan_starts_with_the_application_root():
+    """The only case a frontend can be planned from. Code analysis extracts
+    server-side route tables, and a React SPA has none, so without this a frontend
+    has nothing in the graph to test."""
+    for facts in ({"apis": DEMO_APIS, "services": [], "dependencies": []},
+                  {"apis": [], "services": [], "dependencies": []}):
+        cases = plan.build_plan("p", facts)
+        assert cases[0].case_id == "root-001"
+        assert cases[0].kind == "ui" and cases[0].path == "/"
 
 
 def test_only_a_parameterless_get_is_treated_as_browser_reachable():
@@ -39,6 +50,14 @@ def test_only_a_parameterless_get_is_treated_as_browser_reachable():
     assert cases["GET /health"] == "ui"
     assert cases["GET /products/{sku}"] == "api"
     assert cases["POST /quote"] == "api"
+
+
+def test_a_case_with_no_verified_node_is_not_linked_in_the_graph():
+    """write_results must not emit a VERIFIES edge for the root case, which points
+    at nothing — an edge to an empty externalId would match arbitrary nodes."""
+    from src.qatest.types import Case as C
+    root = C(case_id="root-001", kind="ui", name="application loads")
+    assert not root.verifies_eid and not root.verifies_label
 
 
 def test_plan_is_deterministic():
@@ -53,11 +72,15 @@ def test_plan_is_deterministic():
     assert first == second
 
 
-def test_every_case_carries_the_node_it_verifies():
+def test_every_graph_derived_case_carries_the_node_it_verifies():
     """Without this the result cannot be written back as an edge, and impact-based
-    selection has nothing to select on."""
-    for case in plan.build_plan("p", {"apis": DEMO_APIS, "services": DEMO_SERVICES,
-                                      "dependencies": []}):
+    selection has nothing to select on. The root case is exempt: it checks the
+    deployed application, which is not a node."""
+    cases = plan.build_plan("p", {"apis": DEMO_APIS, "services": DEMO_SERVICES,
+                                  "dependencies": []})
+    derived = [c for c in cases if c.case_id != "root-001"]
+    assert len(derived) == len(DEMO_APIS) + len(DEMO_SERVICES)
+    for case in derived:
         assert case.verifies_eid and case.verifies_label in ("API", "Service")
 
 
@@ -135,13 +158,25 @@ class FakeS3:
 
     def __init__(self):
         self.objects: dict[str, bytes] = {}
+        # Modelled because list_runs orders on it. A double omitting last_modified
+        # would pass while the real listing returned runs in an arbitrary order.
+        self.mtimes: dict[str, str] = {}
+        self._clock = 0
+
+    def _stamp(self, key):
+        # Zero-padded fractional seconds so the string sorts monotonically for any
+        # number of writes. A plain seconds counter breaks past 59.
+        self._clock += 1
+        self.mtimes[key] = f"2026-01-01T00:00:00.{self._clock:09d}+00:00"
 
     def put_object(self, bucket, key, body, content_type=None):
         self.objects[key] = body if isinstance(body, bytes) else str(body).encode()
+        self._stamp(key)
         return f"s3://{bucket}/{key}"
 
     def put_json(self, bucket, key, data):
         self.objects[key] = json.dumps(data).encode()
+        self._stamp(key)
         return f"s3://{bucket}/{key}"
 
     def get_object(self, bucket, key):
@@ -152,7 +187,8 @@ class FakeS3:
         return json.loads(raw) if raw else None
 
     def list_objects(self, bucket, prefix=""):
-        return [{"key": k} for k in self.objects if k.startswith(prefix)]
+        return [{"key": k, "last_modified": self.mtimes.get(k, "")}
+                for k in self.objects if k.startswith(prefix)]
 
     def presigned_url(self, bucket, key, expires=3600):
         return f"https://example/{key}"
@@ -204,6 +240,15 @@ def test_runs_are_listed_newest_first_and_uncapped(s3):
     runs = evidence.list_runs("proj")
     assert len(runs) == 600
     assert runs[0] == "0599"
+
+
+def test_newest_first_holds_for_random_run_ids(s3):
+    """Run ids are random hex, so sorting the IDS orders by nothing meaningful — the
+    newest run lands anywhere in the list. Ordering must come from the stored
+    object's time."""
+    for rid in ("ffff1111", "0000aaaa", "7777bbbb"):     # written in this order
+        evidence.write_report(Report(run_id=rid, project_id="proj", app_url="http://x"))
+    assert evidence.list_runs("proj") == ["7777bbbb", "0000aaaa", "ffff1111"]
 
 
 def test_a_truncated_step_line_does_not_lose_the_earlier_steps(s3):

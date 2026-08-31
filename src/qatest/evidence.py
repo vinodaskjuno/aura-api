@@ -121,14 +121,19 @@ def list_runs(project_id: str) -> list[str]:
 
     Derived from the key prefixes rather than a database, so the listing cannot
     disagree with what is actually stored.
+
+    Ordered by the report object's own last-modified time. Sorting the ids instead
+    looks like it works and does not: a run id is random hex, so lexicographic order
+    is unrelated to when the run happened — the newest run turns up anywhere in the
+    list. `report.json` is written last, so its timestamp is the run's finish time.
     """
     from src.storage.s3_client import list_objects
-    run_ids: set[str] = set()
+    seen: dict[str, str] = {}
     for obj in list_objects(BUCKET, f"{project_id}/"):
         parts = str(obj.get("key", "")).split("/")
         if len(parts) >= 3 and parts[2] == REPORT:
-            run_ids.add(parts[1])
-    return sorted(run_ids, reverse=True)
+            seen[parts[1]] = str(obj.get("last_modified") or "")
+    return [rid for rid, _ in sorted(seen.items(), key=lambda kv: kv[1], reverse=True)]
 
 
 def screenshot_urls(project_id: str, run_id: str, expires: int = 3600) -> dict[str, str]:

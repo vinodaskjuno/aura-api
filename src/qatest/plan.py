@@ -93,13 +93,22 @@ def build_plan(project_id: str, facts: dict | None = None) -> list[Case]:
     facts = facts if facts is not None else fetch_facts(project_id)
     cases: list[Case] = []
 
+    # Always check the application ROOT first. Without it a frontend cannot be tested
+    # at all: code analysis extracts server-side route tables, and a React SPA has no
+    # such table, so the graph holds no frontend routes to plan from. This one case
+    # covers what actually matters for a UI — does it load, does it render, does it
+    # throw — and it is the first thing worth knowing about a backend too.
+    cases.append(Case(
+        case_id="root-001", kind="ui", name="application loads",
+        verifies_label="", verifies_eid="", method="GET", path="/"))
+
     for api in sorted(facts.get("apis") or [],
                       key=lambda a: (str(a.get("path") or ""), str(a.get("method") or ""))):
         method = str(api.get("method") or "GET").upper()
         path = str(api.get("path") or "/")
         eid = str(api.get("eid") or "")
         cases.append(Case(
-            case_id=f"api-{len(cases) + 1:03d}",
+            case_id=f"api-{len(cases):03d}",
             kind="ui" if _browser_reachable(method, path) else "api",
             name=f"{method} {path}",
             verifies_label="API", verifies_eid=eid,
@@ -109,7 +118,7 @@ def build_plan(project_id: str, facts: dict | None = None) -> list[Case]:
 
     for svc in sorted(facts.get("services") or [], key=lambda s: str(s.get("name") or "")):
         cases.append(Case(
-            case_id=f"smoke-{len(cases) + 1:03d}",
+            case_id=f"smoke-{len(cases):03d}",
             kind="smoke",
             name=f"service {svc.get('name')} is reachable",
             verifies_label="Service", verifies_eid=str(svc.get("eid") or ""),

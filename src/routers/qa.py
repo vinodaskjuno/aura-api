@@ -459,28 +459,34 @@ async def ws_local_run(ws: WebSocket):
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = "__run_finished__"
 
         # execute() runs on a worker thread, so events cross back via the loop.
         def on_event(ev: dict) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, ev)
 
         from src.qatest.service import execute
-        task = loop.run_in_executor(
-            None, lambda: execute(project_id, app_url, data.get("run_id"),
-                                  user["username"], bool(data.get("exploratory"))))
 
+        def runner():
+            """Always queue the sentinel, so the reader below cannot hang on a raise."""
+            try:
+                return execute(project_id, app_url, data.get("run_id"),
+                               user["username"], bool(data.get("exploratory")),
+                               on_event=on_event)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, {"type": SENTINEL})
+
+        task = loop.run_in_executor(None, runner)
+
+        # A sentinel rather than racing queue.get() against the run: a cancelled
+        # queue.get() can consume an item before the cancellation lands, so the
+        # racing version silently dropped events. Reading until the sentinel also
+        # guarantees every event queued before the run ended is delivered.
         while True:
-            drain = asyncio.create_task(queue.get())
-            done, _ = await asyncio.wait({drain, task},
-                                         return_when=asyncio.FIRST_COMPLETED)
-            if drain in done:
-                await ws.send_json(drain.result())
-                continue
-            drain.cancel()
-            # The run finished; flush anything still queued before closing.
-            while not queue.empty():
-                await ws.send_json(queue.get_nowait())
-            break
+            ev = await queue.get()
+            if ev.get("type") == SENTINEL:
+                break
+            await ws.send_json(ev)
 
         report = await task
         await ws.send_json({"type": "report", **report})
