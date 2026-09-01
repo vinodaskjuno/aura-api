@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     # ── Deployment environment ────────────────────────────────────────────────
     deployment_env: str = "local"                   # "local" | "ecs"
 
+    # Where project working copies live. Declared here so the value in src/.env
+    # actually takes effect: src/services/advisor/tools.py reads AURA_WORKSPACE from
+    # os.environ, which pydantic-settings never populates, so a configured
+    # ./data/workspace was silently ignored and every lookup resolved /workspace.
+    aura_workspace: str = "/workspace"
+
     # ── QualityMind test runner ──────────────────────────────────────────────
     # Runs execute where podman and a browser exist — a developer machine or CI — and
     # never in the deployed task. GET /api/qa/capabilities reports what THIS process

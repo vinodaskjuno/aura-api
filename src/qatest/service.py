@@ -20,6 +20,30 @@ def new_run_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _no_working_copy(project_id: str, checked: list[str]) -> str:
+    """Explain a missing working copy in terms someone can act on.
+
+    Naming the paths is most of it, but one pattern is worth calling out by name: when
+    every candidate is an absolute /workspace path, the project was uploaded or cloned
+    inside a deployed container and its code never existed on this machine. Nothing in
+    a bare "not found" hints at that, and it is the single most likely cause for any
+    project created through the deployed UI.
+    """
+    lines = ["No working copy found for this project, so there is nothing to start."]
+    lines.append("Looked in: " + "; ".join(checked) + ".")
+
+    elsewhere = [c for c in checked[1:] if c.startswith("/workspace/")]
+    if elsewhere:
+        lines.append(
+            "Every recorded path is under /workspace, which is the workspace inside a "
+            "deployed container — so this project's code was uploaded or cloned there, "
+            "not here.")
+    lines.append(
+        "Upload or clone the project on this machine, or give the URL of an "
+        "already-running instance.")
+    return " ".join(lines)
+
+
 @contextlib.contextmanager
 def _maybe_apps(app_url: str, specs: list, env: dict, emit):
     """Start the given applications, unless a URL was supplied.
@@ -92,15 +116,7 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             report = Report(run_id=run_id, project_id=project_id, app_url="",
                             ran_by=ran_by, cases=cases, exploratory=exploratory,
                             status="unavailable",
-                            # Name the paths. A project cloned in a deployed
-                            # environment carries an absolute /workspace path that
-                            # does not exist on a laptop, and without seeing which
-                            # path was missing there is nothing to act on.
-                            reason=("No working copy found for this project, so there "
-                                    "is nothing to start. Looked in: "
-                                    + "; ".join(checked)
-                                    + ". Clone or upload the project first, or give the "
-                                      "URL of an already-running instance."),
+                            reason=_no_working_copy(project_id, checked),
                             completed_at=datetime.now(timezone.utc).isoformat())
             evidence.write_report(report)
             emit("done", status=report.status, reason=report.reason,

@@ -464,3 +464,45 @@ def test_readiness_probes_only_the_address_the_app_was_told_to_bind(monkeypatch)
     assert probed, "the probe never ran"
     assert all("127.0.0.1" in u for u in probed)
     assert not any("[::1]" in u for u in probed)
+
+
+def test_locate_reports_every_place_it_looked(monkeypatch, tmp_path):
+    """"Not found" alone is unactionable — which candidate was missing is the whole
+    diagnosis."""
+    from src.qatest import appserver
+    monkeypatch.setattr(appserver, "_connector_paths",
+                        lambda pid: [tmp_path / "gone" / "backend"])
+    monkeypatch.setattr("src.database.dynamo_client.query_items",
+                        lambda *a, **k: [{"clonedPath": "/workspace/p1"}])
+    root, checked = appserver.locate("p1")
+    assert root is None
+    assert any("/workspace/p1" in c for c in checked)
+    assert any("connector path" in c for c in checked)
+
+
+def test_locate_prefers_the_configured_workspace(monkeypatch, tmp_path):
+    """Read from Settings rather than os.environ: advisor/tools.py reads the raw env
+    var, which pydantic-settings never populates, so a configured ./data/workspace was
+    ignored and every lookup resolved /workspace."""
+    from src.qatest import appserver
+    (tmp_path / "p2").mkdir()
+    monkeypatch.setattr("src.config_settings.get_settings",
+                        lambda: type("S", (), {"aura_workspace": str(tmp_path)})())
+    root, _ = appserver.locate("p2")
+    assert root == (tmp_path / "p2").resolve()
+
+
+def test_paths_under_the_container_workspace_are_explained(monkeypatch):
+    """A project created through the deployed UI records /workspace paths that never
+    existed on a laptop. Nothing in a bare "not found" hints at that."""
+    from src.qatest.service import _no_working_copy
+    msg = _no_working_copy("p", ["/home/me/ws/p", "/workspace/p (recorded on the project)"])
+    assert "deployed container" in msg
+    assert "already-running instance" in msg
+
+
+def test_a_local_miss_is_not_blamed_on_a_deployed_container(monkeypatch):
+    """The explanation must not fire when the paths are ordinary local ones."""
+    from src.qatest.service import _no_working_copy
+    msg = _no_working_copy("p", ["/home/me/ws/p", "/home/me/other/p (recorded on the project)"])
+    assert "deployed container" not in msg

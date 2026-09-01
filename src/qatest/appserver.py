@@ -323,28 +323,75 @@ def locate(project_id: str) -> tuple[Path | None, list[str]]:
     /workspace path recorded that does not exist on a laptop, and the fix depends
     entirely on which path was missing.
     """
-    # Reuse the advisor's resolver rather than re-deriving the path: it already
-    # handles the AURA_WORKSPACE env var, the id sanitising, and the relative-path
-    # trap where a subprocess's cwd changes what "./data/workspace" means.
-    from src.services.advisor.tools import _clone_path
+    import re
 
     checked: list[str] = []
 
-    candidate = _clone_path(project_id)
-    checked.append(str(candidate))
-    if candidate.exists():
-        return candidate, checked
+    def consider(path: Path | None, label: str) -> Path | None:
+        if not path:
+            return None
+        text = f"{path}{label}"
+        if text not in checked:
+            checked.append(text)
+        return path if path.exists() else None
 
+    # 1. The configured workspace. Read from Settings, not os.environ, so the value
+    #    in src/.env takes effect — advisor/tools.py reads the raw env var, which
+    #    pydantic-settings never populates, and therefore always resolved /workspace.
+    try:
+        from src.config_settings import get_settings
+        root = Path(get_settings().aura_workspace or "/workspace").resolve()
+    except Exception:  # noqa: BLE001 — a probe must work without app settings
+        root = Path(os.environ.get("AURA_WORKSPACE", "/workspace")).resolve()
+    safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", project_id)
+    found = consider(root / safe, "")
+    if found:
+        return found, checked
+
+    # 2. The path recorded when the project was cloned or uploaded.
+    recorded = ""
     try:
         from src.database import dynamo_client as db
         rows = db.query_items("projects", "projectId", project_id, limit=1)
-        recorded = rows[0].get("clonedPath") if rows else ""
-        if recorded:
-            path = Path(recorded)
-            checked.append(f"{recorded} (recorded on the project)")
-            if path.exists():
-                return path, checked
+        recorded = str(rows[0].get("clonedPath") or "") if rows else ""
     except Exception as exc:  # noqa: BLE001
         log.debug("qatest: project path lookup failed: %s", exc)
+    if recorded:
+        found = consider(Path(recorded), " (recorded on the project)")
+        if found:
+            return found, checked
+
+    # 3. A local connector's own path, and its PARENT — two connectors for one repo
+    #    typically name backend/ and frontend/ inside a single checkout, which is the
+    #    directory to start from.
+    for path in _connector_paths(project_id):
+        found = consider(path.parent, " (parent of a connector path)")
+        if found:
+            return found, checked
+        found = consider(path, " (a connector path)")
+        if found:
+            return found, checked
 
     return None, checked
+
+
+def _connector_paths(project_id: str) -> list[Path]:
+    """Local paths this project's connectors name.
+
+    Worth checking, and worth REPORTING when missing: a connector pointing at
+    /workspace/<id>/backend with nothing there means the code was uploaded into a
+    different environment, which is otherwise invisible from a failed run.
+    """
+    try:
+        from src.database import dynamo_client as db
+        out = []
+        for c in db.scan_items("connectors", limit=500):
+            if c.get("projectId") != project_id:
+                continue
+            raw = c.get("localPath") or c.get("local_path") or ""
+            if raw:
+                out.append(Path(str(raw)))
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.debug("qatest: connector lookup failed: %s", exc)
+        return []
