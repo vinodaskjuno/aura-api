@@ -311,26 +311,40 @@ class RunningApps:
 
 
 def project_root(project_id: str) -> Path | None:
-    """Where this project's code is checked out, or None.
+    """Where this project's code is checked out, or None."""
+    return locate(project_id)[0]
 
-    Same resolution the advisor's file tools use, so QA Mind tests exactly the
-    working copy DevMate edits.
+
+def locate(project_id: str) -> tuple[Path | None, list[str]]:
+    """(working copy, the places that were checked).
+
+    The paths are returned so a failure can name them. "No working copy found" alone
+    is unactionable — a project cloned in the deployed environment has an absolute
+    /workspace path recorded that does not exist on a laptop, and the fix depends
+    entirely on which path was missing.
     """
     # Reuse the advisor's resolver rather than re-deriving the path: it already
     # handles the AURA_WORKSPACE env var, the id sanitising, and the relative-path
     # trap where a subprocess's cwd changes what "./data/workspace" means.
     from src.services.advisor.tools import _clone_path
 
+    checked: list[str] = []
+
     candidate = _clone_path(project_id)
+    checked.append(str(candidate))
     if candidate.exists():
-        return candidate
+        return candidate, checked
+
     try:
         from src.database import dynamo_client as db
         rows = db.query_items("projects", "projectId", project_id, limit=1)
-        if rows and rows[0].get("clonedPath"):
-            path = Path(rows[0]["clonedPath"])
+        recorded = rows[0].get("clonedPath") if rows else ""
+        if recorded:
+            path = Path(recorded)
+            checked.append(f"{recorded} (recorded on the project)")
             if path.exists():
-                return path
+                return path, checked
     except Exception as exc:  # noqa: BLE001
         log.debug("qatest: project path lookup failed: %s", exc)
-    return None
+
+    return None, checked

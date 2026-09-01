@@ -87,17 +87,24 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
     else:
         from src.qatest import appserver
 
-        root = appserver.project_root(project_id)
+        root, checked = appserver.locate(project_id)
         if not root:
             report = Report(run_id=run_id, project_id=project_id, app_url="",
                             ran_by=ran_by, cases=cases, exploratory=exploratory,
                             status="unavailable",
+                            # Name the paths. A project cloned in a deployed
+                            # environment carries an absolute /workspace path that
+                            # does not exist on a laptop, and without seeing which
+                            # path was missing there is nothing to act on.
                             reason=("No working copy found for this project, so there "
-                                    "is nothing to start. Clone or upload it first, or "
-                                    "give a URL of an already-running instance."),
+                                    "is nothing to start. Looked in: "
+                                    + "; ".join(checked)
+                                    + ". Clone or upload the project first, or give the "
+                                      "URL of an already-running instance."),
                             completed_at=datetime.now(timezone.utc).isoformat())
             evidence.write_report(report)
-            emit("done", status=report.status, reason=report.reason)
+            emit("done", status=report.status, reason=report.reason,
+                 passed=0, failed=0, skipped=0)
             return report.as_dict()
 
         specs = appserver.detect(root)
@@ -121,7 +128,8 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
                                 "Install podman, or run where it is available."),
                         completed_at=datetime.now(timezone.utc).isoformat())
         evidence.write_report(report)
-        emit("done", status=report.status, reason=report.reason)
+        emit("done", status=report.status, reason=report.reason,
+             passed=0, failed=0, skipped=0)
         return report.as_dict()
 
     from src.qatest.runner import run_plan
@@ -150,7 +158,8 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
                                             or "nothing runnable was detected"),
                                     completed_at=datetime.now(timezone.utc).isoformat())
                     evidence.write_report(report)
-                    emit("done", status=report.status, reason=report.reason)
+                    emit("done", status=report.status, reason=report.reason,
+                         passed=0, failed=0, skipped=0)
                     return report.as_dict()
 
             target = ", ".join(f"{k}={v}" for k, v in urls.items())
