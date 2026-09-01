@@ -345,7 +345,9 @@ async def ws_generate(ws: WebSocket):
 
 class LocalRunRequest(BaseModel):
     project_id: str
-    app_url: str
+    # Empty starts the project's own application from its working copy; a value
+    # targets something already running.
+    app_url: str = ""
     run_id: str | None = None
     exploratory: bool = False
 
@@ -448,14 +450,18 @@ async def ws_local_run(ws: WebSocket):
             return
 
         project_id  = (data.get("project_id") or "").strip()
+        # app_url is OPTIONAL: empty means "start this project's own application".
+        # Requiring it here contradicted execute(), which has defaulted to starting
+        # the app since the runner learned how.
         app_url     = (data.get("app_url") or "").strip()
-        if not project_id or not app_url:
-            await ws.send_json({"type": "error",
-                                "message": "project_id and app_url are required"})
+        if not project_id:
+            await ws.send_json({"type": "error", "message": "project_id is required"})
             return
 
         await ws.send_json({"type": "connected",
-                            "message": f"Starting local run against {app_url}"})
+                            "message": (f"Starting run against {app_url}" if app_url
+                                        else "Starting run — the project's own app "
+                                             "will be started")})
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()

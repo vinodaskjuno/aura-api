@@ -198,21 +198,24 @@ def _wait_ready(port: int, timeout: int = READY_TIMEOUT_S,
     """Wait for the app to answer. Any HTTP status counts — a 404 at `/` still means
     the server is up, and requiring 200 would hang on an API with no root route."""
     deadline = time.monotonic() + timeout
-    # Both stacks: a server that binds ::1 is up, and probing only 127.0.0.1 would
-    # report it dead.
-    urls = [f"http://127.0.0.1:{port}/", f"http://[::1]:{port}/"]
+    # ONLY 127.0.0.1 — the address every app here is explicitly told to bind.
+    #
+    # Probing ::1 as well seemed harmless and was not: a DIFFERENT server on the other
+    # stack satisfies the check. AURA's own dev server listens on [::1]:5174, so a
+    # probe for the demo UI on port 5174 was answered by AURA, the app was marked
+    # ready before it had bound, and the run then failed with CONNECTION_REFUSED on
+    # the address it actually tested. A false ready is worse than a slow one.
+    url = f"http://127.0.0.1:{port}/"
     while time.monotonic() < deadline:
         if proc is not None and proc.poll() is not None:
             return False          # it exited; no point waiting out the timeout
-        for url in urls:
-            try:
-                urllib.request.urlopen(url, timeout=2)
-                return True
-            except urllib.error.HTTPError:
-                return True
-            except Exception:  # noqa: BLE001 — not up yet
-                pass
-        time.sleep(0.4)
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            return True
+        except urllib.error.HTTPError:
+            return True
+        except Exception:  # noqa: BLE001 — not up yet
+            time.sleep(0.4)
     return False
 
 

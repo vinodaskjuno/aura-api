@@ -35,7 +35,8 @@ def _maybe_apps(app_url: str, specs: list, env: dict, emit):
 
     with appserver.RunningApps(specs, extra_env=env) as apps:
         for spec in apps.started:
-            emit("app", message=f"{spec.kind} app started on {spec.url}")
+            emit("app", kind=spec.kind, name=spec.name, url=spec.url, started=True,
+                 message=f"{spec.kind} app started on {spec.url}")
         yield apps
 
 
@@ -57,10 +58,13 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
     """
     run_id = run_id or new_run_id()
 
-    def emit(kind: str, **data):
+    def emit(_event: str, **data):
+        # Underscore-prefixed so a payload field can be called anything — `kind` is a
+        # natural name for an application's kind, and a plain `kind` parameter here
+        # collided with it: "emit() got multiple values for argument 'kind'".
         if on_event:
             try:
-                on_event({"type": kind, **data})
+                on_event({"type": _event, **data})
             except Exception:  # noqa: BLE001 — a progress consumer must not fail a run
                 pass
 
@@ -97,9 +101,14 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             return report.as_dict()
 
         specs = appserver.detect(root)
-        emit("app", message=(
-            "Starting " + ", ".join(f"{sp.kind} ({sp.name})" for sp in specs)
-            if specs else f"No runnable application found in {root.name}"))
+        # Structured, not just a sentence: the timeline renders one row per
+        # application with its own state, and parsing that back out of prose would
+        # break the first time the wording changed.
+        emit("app", stage="detect",
+             apps=[{"kind": sp.kind, "name": sp.name, "port": sp.port,
+                    "blocked": sp.blocked} for sp in specs],
+             message=("Starting " + ", ".join(f"{sp.kind} ({sp.name})" for sp in specs)
+                      if specs else f"No runnable application found in {root.name}"))
 
     if needed and not emulators.podman_available():
         # Say which emulators were wanted. "podman not found" alone leaves the reader
@@ -129,7 +138,9 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             if apps is not None:
                 urls = {k: apps.url_for(k) for k in ("api", "ui") if apps.url_for(k)}
                 for spec, why in apps.failures:
-                    emit("app", message=f"{spec.kind} app not started: {why[:200]}")
+                    emit("app", kind=spec.kind, name=spec.name, started=False,
+                         error=why[:400],
+                         message=f"{spec.kind} app not started: {why[:200]}")
                 if not urls:
                     report = Report(run_id=run_id, project_id=project_id, app_url="",
                                     ran_by=ran_by, cases=cases, exploratory=exploratory,
@@ -178,5 +189,6 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
         log.debug("qatest: index row not written: %s", exc)
 
     emit("done", status=report.status, passed=report.total_passed,
-         failed=report.total_failed, skipped=report.total_skipped)
+         failed=report.total_failed, skipped=report.total_skipped,
+         durationMs=report.duration_ms, runId=run_id)
     return report.as_dict()

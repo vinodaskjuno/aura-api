@@ -354,14 +354,30 @@ def test_detects_both_halves_of_a_project(tmp_path):
     assert "app.main:app" in " ".join(specs["api"].command)
 
 
-def test_the_api_is_started_on_the_port_the_ui_proxies_to(tmp_path):
+def test_the_api_is_started_on_the_port_the_ui_proxies_to(tmp_path, monkeypatch):
     """The frontend proxies /api to a fixed port. Starting the API on an arbitrary
     free port leaves the UI unable to reach it: the page loads, every request 500s,
-    and the run reports a failure that is entirely the harness's doing."""
+    and the run reports a failure that is entirely the harness's doing.
+
+    port_free is stubbed because the real one asks the OS: 9100 sits in TIME_WAIT for
+    a while after any actual run, so asserting against live port state makes this pass
+    or fail depending on what the machine did minutes ago."""
     from src.qatest import appserver
+    monkeypatch.setattr(appserver, "port_free", lambda p: True)
     specs = {s.kind: s for s in appserver.detect(_demo_layout(tmp_path))}
     assert specs["api"].port == 9100        # from the vite proxy target
     assert specs["ui"].port == 5174         # from the vite server port
+
+
+def test_a_taken_proxy_port_falls_back_and_says_the_ui_cannot_reach_the_api(tmp_path,
+                                                                            monkeypatch):
+    """Falling back silently would produce the exact failure this feature exists to
+    avoid, so the reason travels with the spec."""
+    from src.qatest import appserver
+    monkeypatch.setattr(appserver, "port_free", lambda p: False)
+    specs = {s.kind: s for s in appserver.detect(_demo_layout(tmp_path))}
+    assert specs["api"].port != 9100
+    assert "9100" in specs["api"].blocked and "UI" in specs["api"].blocked
 
 
 def test_a_frontend_without_node_modules_is_blocked_with_instructions(tmp_path):
@@ -428,3 +444,23 @@ def test_with_only_one_application_everything_targets_it():
     only_api = {"api": "http://127.0.0.1:9100"}
     root = Case(case_id="root-001", kind="ui", name="application loads")
     assert _base_for(only_api, root) == only_api["api"]
+
+
+def test_readiness_probes_only_the_address_the_app_was_told_to_bind(monkeypatch):
+    """Probing ::1 as well seemed harmless and was not: a DIFFERENT server on the
+    other stack satisfies the check. AURA's own dev server on [::1]:5174 answered the
+    probe for an app that had not yet bound 127.0.0.1:5174, so the run was told it was
+    ready and then failed with CONNECTION_REFUSED."""
+    from src.qatest import appserver
+    probed: list[str] = []
+
+    def fake_urlopen(url, timeout=None):
+        probed.append(url)
+        raise OSError("refused")
+
+    monkeypatch.setattr(appserver.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(appserver.time, "sleep", lambda _s: None)
+    assert appserver._wait_ready(5174, timeout=0.05) is False
+    assert probed, "the probe never ran"
+    assert all("127.0.0.1" in u for u in probed)
+    assert not any("[::1]" in u for u in probed)
