@@ -15,7 +15,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m src.qatest",
                                  description="Run QualityMind tests for a project.")
     ap.add_argument("--project", required=True, help="project id, as used in the graph")
-    ap.add_argument("--url", required=True, help="base URL of the running application")
+    ap.add_argument("--url", default="",
+                    help="base URL of an ALREADY-RUNNING instance. Omit to start the "
+                         "project's own application from its working copy.")
     ap.add_argument("--run-id", default=None, help="reuse a run id (default: generated)")
     ap.add_argument("--by", default="cli", help="who to record as having run it")
     ap.add_argument("--exploratory", action="store_true",

@@ -75,11 +75,26 @@ def _playwright_available() -> tuple[bool, str]:
     return True, ""
 
 
-def _url_for(app_url: str, case: Case) -> str:
-    return f"{app_url.rstrip('/')}{case.path or '/'}"
+def _base_for(urls: dict[str, str], case: Case) -> str:
+    """Which running application a case belongs to.
+
+    A project can expose two: an API and a UI. Sending API cases at the UI is the
+    mistake that made an SPA report every route as a pass, so the mapping is explicit
+    rather than "whatever URL was typed".
+    """
+    if case.case_id == "root-001":
+        # The root check is about the thing a person opens — the UI when there is one.
+        return urls.get("ui") or urls.get("api") or ""
+    return urls.get("api") or urls.get("ui") or ""
 
 
-def run_plan(project_id: str, run_id: str, app_url: str, cases: list[Case],
+def _url_for(urls: dict[str, str], case: Case) -> str:
+    base = _base_for(urls, case)
+    return f"{base.rstrip('/')}{case.path or '/'}" if base else ""
+
+
+def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
+             cases: list[Case],
              emulators: list[EmulatorRecord] | None = None,
              env: dict[str, str] | None = None,
              ran_by: str = "", exploratory: bool = False,
@@ -89,6 +104,12 @@ def run_plan(project_id: str, run_id: str, app_url: str, cases: list[Case],
     `on_step` is called with each completed Step so a caller can stream progress; the
     stored evidence is identical either way.
     """
+    # A bare string keeps the CLI's --url and the router's app_url working: it means
+    # "one application, serving everything".
+    if isinstance(urls, str):
+        urls = {"api": urls, "ui": urls}
+    app_url = urls.get("ui") or urls.get("api") or ""
+
     started_wall = time.monotonic()
     report = Report(run_id=run_id, project_id=project_id, app_url=app_url,
                     ran_by=ran_by, exploratory=exploratory,
@@ -142,26 +163,45 @@ def run_plan(project_id: str, run_id: str, app_url: str, cases: list[Case],
                 # The one case a frontend can be planned from: the graph holds no
                 # SPA routes, because code analysis extracts server-side route
                 # tables and a React app has none.
+                root_url = _base_for(urls, case)
+                # Whether the root belongs to a UI decides what a 404 there means: a
+                # missing home page is a defect in a UI and entirely normal for an API,
+                # which usually has no route at "/".
+                is_ui = bool(urls.get("ui")) and root_url == urls.get("ui")
                 try:
-                    resp = page.goto(app_url, timeout=_STEP_TIMEOUT_MS,
+                    resp = page.goto(root_url, timeout=_STEP_TIMEOUT_MS,
                                      wait_until="networkidle")
                     png = page.screenshot(full_page=True)
-                    problems = rec.take_pending()
                     code = resp.status if resp else 0
+                    # Chromium logs "Failed to load resource: ... status of 404" for the
+                    # main document itself. That restates the status already judged
+                    # below, so counting it as a separate problem failed every API whose
+                    # root is a plain 404.
+                    echo = f"status of {code}"
+                    problems = [p for p in rec.take_pending()
+                                if not (code >= 400 and echo in p)]
+
                     if code >= 500:
-                        rec.add("application loads", app_url, "failed", started,
-                                error=f"HTTP {code}", png=png, case_id=case.case_id)
+                        rec.add(f"application loads -> {code}", root_url, "failed",
+                                started, error=f"HTTP {code}", png=png,
+                                case_id=case.case_id)
+                    elif is_ui and code >= 400:
+                        rec.add(f"application loads -> {code}", root_url, "failed",
+                                started, error=f"the UI's root returned HTTP {code}",
+                                png=png, case_id=case.case_id)
                     elif problems:
-                        # Loaded, but the page is broken in a way a status code does
-                        # not show — the failure mode a screenshot alone hides.
-                        rec.add("application loads", app_url, "failed", started,
+                        # Loaded, but broken in a way no status code shows — the
+                        # failure mode a screenshot alone hides.
+                        rec.add(f"application loads -> {code}", root_url, "failed",
+                                started,
                                 error="loaded with errors:\n" + "\n".join(problems[:8]),
                                 png=png, case_id=case.case_id)
                     else:
-                        rec.add(f"application loads -> {code}", app_url, "passed",
-                                started, png=png, case_id=case.case_id)
+                        note = "" if code < 400 else f" (no route at / — expected for an API)"
+                        rec.add(f"application loads -> {code}{note}", root_url,
+                                "passed", started, png=png, case_id=case.case_id)
                 except Exception as exc:  # noqa: BLE001
-                    rec.add("application loads", app_url, "failed", started,
+                    rec.add("application loads", root_url, "failed", started,
                             error=str(exc), case_id=case.case_id)
                 if on_step:
                     try:
@@ -178,7 +218,7 @@ def run_plan(project_id: str, run_id: str, app_url: str, cases: list[Case],
                         case_id=case.case_id)
                 continue
 
-            url = _url_for(app_url, case)
+            url = _url_for(urls, case)
 
             if case.method != "GET":
                 # A blind POST would mutate state with invented data; the request

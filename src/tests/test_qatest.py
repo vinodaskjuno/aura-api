@@ -328,3 +328,103 @@ def test_write_back_survives_an_unreachable_graph(monkeypatch):
         Report(run_id="r", project_id="p", app_url="u",
                cases=[Case(case_id="c1", kind="ui", name="GET /")]))
     assert out["ok"] is False and out["errors"]
+
+
+# ── Starting the application under test ──────────────────────────────────────
+
+def _demo_layout(tmp_path):
+    """The demo shop's shape: a FastAPI backend and a Vite frontend that proxies to it."""
+    (tmp_path / "backend" / "app").mkdir(parents=True)
+    (tmp_path / "backend" / "app" / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n")
+    fe = tmp_path / "frontend"
+    (fe / "node_modules").mkdir(parents=True)
+    (fe / "package.json").write_text(json.dumps({"scripts": {"dev": "vite"}}))
+    (fe / "vite.config.ts").write_text(
+        "export default defineConfig({ server: { port: 5174, proxy: {"
+        " '/api': { target: 'http://localhost:9100' } } } })")
+    return tmp_path
+
+
+def test_detects_both_halves_of_a_project(tmp_path):
+    from src.qatest import appserver
+    specs = {s.kind: s for s in appserver.detect(_demo_layout(tmp_path))}
+    assert set(specs) == {"api", "ui"}
+    assert "uvicorn" in " ".join(specs["api"].command)
+    assert "app.main:app" in " ".join(specs["api"].command)
+
+
+def test_the_api_is_started_on_the_port_the_ui_proxies_to(tmp_path):
+    """The frontend proxies /api to a fixed port. Starting the API on an arbitrary
+    free port leaves the UI unable to reach it: the page loads, every request 500s,
+    and the run reports a failure that is entirely the harness's doing."""
+    from src.qatest import appserver
+    specs = {s.kind: s for s in appserver.detect(_demo_layout(tmp_path))}
+    assert specs["api"].port == 9100        # from the vite proxy target
+    assert specs["ui"].port == 5174         # from the vite server port
+
+
+def test_a_frontend_without_node_modules_is_blocked_with_instructions(tmp_path):
+    from src.qatest import appserver
+    root = _demo_layout(tmp_path)
+    (root / "frontend" / "node_modules").rmdir()
+    ui = next(s for s in appserver.detect(root) if s.kind == "ui")
+    assert ui.blocked and "npm install" in ui.blocked
+
+
+def test_app_urls_use_the_loopback_address_not_the_localhost_name():
+    """A browser resolving "localhost" can reach ::1 first. When something else is
+    listening there on the same port it gets tested instead, silently — a run once
+    reported a pass against AURA's own dev server on [::1]:5174 while the application
+    under test sat on 127.0.0.1:5174."""
+    from src.qatest.appserver import AppSpec
+    from pathlib import Path
+    spec = AppSpec(kind="ui", name="fe", directory=Path("."), command=[],
+                   port=5174, env={})
+    assert spec.url == "http://127.0.0.1:5174"
+    assert "localhost" not in spec.url
+
+
+def test_port_free_does_not_use_reuseaddr(tmp_path):
+    """SO_REUSEADDR makes bind() succeed on macOS while another server is listening,
+    so the check reported a busy port as free."""
+    import socket as _s
+    from src.qatest.appserver import port_free
+    srv = _s.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        assert port_free(srv.getsockname()[1]) is False
+    finally:
+        srv.close()
+
+
+def test_a_blocked_app_is_reported_and_never_started(tmp_path):
+    from pathlib import Path
+    from src.qatest.appserver import AppSpec, RunningApps
+    spec = AppSpec(kind="ui", name="fe", directory=Path("."), command=["false"],
+                   port=1, env={}, blocked="node_modules is missing")
+    with RunningApps([spec]) as apps:
+        assert apps.started == []
+        assert apps.failures and "node_modules" in apps.failures[0][1]
+        assert apps.url_for("ui") == ""
+
+
+# ── Which application a case is aimed at ─────────────────────────────────────
+
+def test_the_root_case_targets_the_ui_and_api_cases_target_the_api():
+    """Aiming API cases at a frontend is the mistake that made an SPA report every
+    route as a pass, so the mapping is explicit."""
+    from src.qatest.runner import _base_for
+    urls = {"api": "http://127.0.0.1:9100", "ui": "http://127.0.0.1:5174"}
+    root = Case(case_id="root-001", kind="ui", name="application loads")
+    api = Case(case_id="api-002", kind="ui", name="GET /health", path="/health")
+    assert _base_for(urls, root) == urls["ui"]
+    assert _base_for(urls, api) == urls["api"]
+
+
+def test_with_only_one_application_everything_targets_it():
+    from src.qatest.runner import _base_for
+    only_api = {"api": "http://127.0.0.1:9100"}
+    root = Case(case_id="root-001", kind="ui", name="application loads")
+    assert _base_for(only_api, root) == only_api["api"]
