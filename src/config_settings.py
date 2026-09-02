@@ -66,7 +66,14 @@ class Settings(BaseSettings):
     # lru_cached, and which emulators a run needs is derived from the project's
     # dependency nodes rather than configured.
     qatest_emulator_timeout_s: int = 60
-    playwright_image: str = "mcr.microsoft.com/playwright:v1.45.0-jammy"
+    # Self-hosted QA runner. Empty disables scoped-credential minting, which is the
+    # correct default: a developer running the backend locally already has their own
+    # AWS credentials, and no other environment should hand any out.
+    qa_runner_role_arn: str = ""
+    # How long a claimed run may go without a heartbeat before the reaper declares it
+    # abandoned. Generous: one navigation can sit quiet for 20s and an emulator image
+    # pull is minutes.
+    qa_run_stale_after_s: int = 900
 
     # ── Neo4j (Enterprise Ontology Graph) ────────────────────────────────────
     neo4j_uri: str = "neo4j://127.0.0.1:7687"

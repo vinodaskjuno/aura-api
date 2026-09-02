@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 
 from src.qatest import emulators, evidence, graph_writeback, plan
-from src.qatest.types import Report
+from src.qatest.types import Case, Report
 
 log = logging.getLogger(__name__)
 
@@ -38,9 +38,14 @@ def _no_working_copy(project_id: str, checked: list[str]) -> str:
             "Every recorded path is under /workspace, which is the workspace inside a "
             "deployed container — so this project's code was uploaded or cloned there, "
             "not here.")
+    # "this machine" is ambiguous now that a run can be executed by a self-hosted
+    # runner: the reader is looking at a browser pointed at a deployed environment,
+    # while the paths above are the RUNNER's. Say which machine is meant.
     lines.append(
-        "Upload or clone the project on this machine, or give the URL of an "
-        "already-running instance.")
+        "Two ways to fix it: clone the project into the workspace of the machine "
+        "running the test — the paths above are that machine's, not the one you are "
+        "reading this on — or start the run with the URL of an already-running "
+        "instance instead.")
     return " ".join(lines)
 
 
@@ -66,7 +71,8 @@ def _maybe_apps(app_url: str, specs: list, env: dict, emit):
 
 def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             ran_by: str = "", exploratory: bool = False,
-            write_graph: bool = True, on_event=None) -> dict:
+            write_graph: bool = True, on_event=None,
+            cases: list | None = None, clouds: list[str] | None = None) -> dict:
     """Run the project's plan and store the evidence.
 
     With no `app_url`, the application is STARTED from the project's own working copy
@@ -79,6 +85,12 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
 
     Emulators and app processes are torn down whatever happens: a leaked one holds its
     port, and the next run then fails for a reason that looks nothing like the cause.
+
+    `cases` and `clouds` let a caller supply the plan instead of reading it from the
+    knowledge graph. That exists for the self-hosted runner: it executes on a developer
+    machine and cannot reach Neo4j, which lives on a private subnet, so the API plans
+    server-side and ships the result with the claim. Left as None — every existing
+    caller — the graph is read exactly as before.
     """
     run_id = run_id or new_run_id()
 
@@ -92,10 +104,18 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             except Exception:  # noqa: BLE001 — a progress consumer must not fail a run
                 pass
 
-    emit("plan", message=f"Reading the knowledge graph for {project_id}")
-    facts = plan.fetch_facts(project_id)
-    cases = plan.build_plan(project_id, facts)
-    needed = emulators.clouds_for(facts.get("dependencies") or [])
+    if cases is None:
+        emit("plan", message=f"Reading the knowledge graph for {project_id}")
+        facts = plan.fetch_facts(project_id)
+        cases = plan.build_plan(project_id, facts)
+        needed = emulators.clouds_for(facts.get("dependencies") or [])
+    else:
+        # Plan supplied by the caller. Case objects may arrive as plain dicts over the
+        # wire, so rebuild them — run_plan reads attributes, not keys.
+        emit("plan", message=f"Using a plan supplied for {project_id}")
+        cases = [c if isinstance(c, Case) else Case(**c) for c in cases]
+        wanted = set(clouds or [])
+        needed = [c for c in emulators.CLOUDS if c.name in wanted]
     emit("planned", cases=len(cases),
          emulators=[c.name for c in needed],
          message=(f"{len(cases)} case(s); "

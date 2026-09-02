@@ -123,6 +123,30 @@ def online_eval_job():
     log.info("[Scheduler] online_eval_job done in %.1fs: %s", duration, result.get("status"))
 
 
+def qa_reaper_job():
+    """Mark QA runs whose self-hosted runner stopped reporting as `abandoned`.
+
+    Without this the Results tab lies: a laptop that sleeps mid-run leaves the row at
+    `running` for ever, while the S3 prefix it left behind has no `report.json` and is
+    therefore invisible to every reader. Enabled by default because it only ever
+    corrects state that is already wrong — unlike the graph-loading jobs, it writes no
+    content.
+    """
+    start = time.monotonic()
+    try:
+        from src.config_settings import get_settings
+        from src.qatest import queue
+        reaped = queue.reap(getattr(get_settings(), "qa_run_stale_after_s", 900))
+        result = {"status": "ok", "reaped": reaped}
+    except Exception as exc:                                  # noqa: BLE001
+        result = {"error": str(exc)}
+    duration = time.monotonic() - start
+    _record_run("qa_reaper_job", result, duration)
+    if result.get("reaped"):
+        log.info("[Scheduler] qa_reaper_job marked %s run(s) abandoned",
+                 result["reaped"])
+
+
 # ── Job metadata (for the scheduler API) ─────────────────────────────────────
 
 JOB_DEFS = [
@@ -150,6 +174,17 @@ JOB_DEFS = [
         "schedule_human": "Daily at 03:00 UTC",
         "default_enabled": False,
         "fn": correlation_refresh_job,
+    },
+    {
+        "id": "qa_reaper_job",
+        "name": "QA Run Reaper",
+        "description": ("Marks QualityMind runs whose self-hosted runner stopped "
+                        "reporting as abandoned, so the Results tab stops showing a "
+                        "run that will never finish. Corrects state only; writes no "
+                        "content."),
+        "schedule": "*/5 * * * *",
+        "schedule_human": "Every 5 minutes",
+        "fn": qa_reaper_job,
     },
     {
         "id": "online_eval_job",
@@ -195,14 +230,40 @@ def get_job_history(job_id: str) -> list[dict]:
 
 
 def _compute_next_run(cron: str) -> str | None:
-    """Very simple next-run estimate — returns tomorrow's scheduled time."""
+    """Next-run estimate for the shapes this file actually uses.
+
+    Handles `M H * * *` (daily) and `*/N * * * *` (every N minutes). The second case
+    used to fall into the except and return None, which meant a job that really was
+    scheduled reported no next run — the mirror image of the bug where a DISABLED job
+    advertised one.
+    """
+    from datetime import timedelta
+
     try:
         parts = cron.split()
-        minute, hour = int(parts[0]), int(parts[1])
         now = datetime.now(timezone.utc)
-        next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        if parts[0].startswith("*/"):
+            step = int(parts[0][2:])
+            if step <= 0:
+                return None
+            minute = ((now.minute // step) + 1) * step
+            base = now.replace(second=0, microsecond=0)
+            return (base.replace(minute=0) + timedelta(minutes=minute)).isoformat()
+
+        minute = int(parts[0])
+
+        if parts[1] == "*":
+            # Hourly at a fixed minute, e.g. online_eval_job's "17 * * * *". This also
+            # used to return None, so a job running every hour claimed no next run.
+            next_run = now.replace(minute=minute, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += timedelta(hours=1)
+            return next_run.isoformat()
+
+        next_run = now.replace(hour=int(parts[1]), minute=minute,
+                               second=0, microsecond=0)
         if next_run <= now:
-            from datetime import timedelta
             next_run = next_run + timedelta(days=1)
         return next_run.isoformat()
     except Exception:

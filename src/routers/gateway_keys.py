@@ -43,6 +43,10 @@ _VALID_TOOL_LABELS = {
     # key for an agent fails with "Unknown tool_label" and the agent silently falls
     # back to synthetic spans.
     "demo-rag", "demo-tools", "demo-chat", "demo-flaky", "demo-traces",
+    # Self-hosted QualityMind runner (src/qatest/agent.py). Same reason as the demo
+    # labels: this allowlist is what get_or_create_tool_key validates against, so
+    # without an entry the runner cannot be given a key at all.
+    "qa-runner",
 }
 
 

@@ -1,7 +1,10 @@
 """BrowserUseRunnerAgent — AI-driven browser testing via browser-use + Claude Bedrock.
 
 Used when DEPLOYMENT_ENV=local: runs Playwright Chromium in-process.
-Also mirrored in lambda/test_runner/handler.py for DEPLOYMENT_ENV=ecs.
+The claim that this was "mirrored in lambda/test_runner/handler.py for
+DEPLOYMENT_ENV=ecs" was stale: that Lambda was never deployed, and nothing
+reads deployment_env for QA any more. Browser runs execute on a self-hosted
+runner — src/qatest/agent.py.
 """
 from __future__ import annotations
 import asyncio

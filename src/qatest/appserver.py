@@ -128,6 +128,12 @@ def _asgi_target(directory: Path) -> str | None:
     return None
 
 
+def _interpreter(directory: Path) -> str:
+    """The project's own interpreter if it has one, else the one running AURA."""
+    candidate = directory / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.is_file() else sys.executable
+
+
 def detect(root: Path) -> list[AppSpec]:
     """Find the applications in a repository. Deepest-first is not needed: a repo
     holds at most one backend and one frontend in the shapes handled here."""
@@ -159,9 +165,15 @@ def detect(root: Path) -> list[AppSpec]:
                            f"Free it, or the UI cannot reach the API.")
             found.append(AppSpec(
                 kind="api", name=directory.name or "api", directory=directory,
-                # sys.executable, not a bare "python": the interpreter running AURA
-                # already has fastapi and uvicorn, and a project venv may not exist.
-                command=[sys.executable, "-m", "uvicorn", target,
+                # A project venv if one exists, else sys.executable. The fallback is
+                # the original behaviour and still right for a local run: the
+                # interpreter running AURA already has fastapi and uvicorn.
+                #
+                # The venv matters on a self-hosted runner, where qatest/provision.py
+                # creates one and pip-installs the project's requirements into it.
+                # Without this the app would start on AURA's interpreter and fail at
+                # import on any dependency AURA happens not to have.
+                command=[_interpreter(directory), "-m", "uvicorn", target,
                          "--port", str(port), "--host", "127.0.0.1"],
                 port=port, env={}, blocked=blocked))
 
@@ -176,10 +188,13 @@ def detect(root: Path) -> list[AppSpec]:
                 port = ui_port if (ui_port and port_free(ui_port)) else free_port()
                 blocked = ""
                 if not (directory / "node_modules").exists():
-                    # Say so rather than running npm install: that can take minutes,
-                    # and a run that appears to hang is worse than one that explains.
+                    # Still not installed HERE: that can take minutes, and a run that
+                    # appears to hang is worse than one that explains. A self-hosted
+                    # runner installs it beforehand (qatest/provision.py), so reaching
+                    # this message there means the install failed and said why.
                     blocked = (f"node_modules is missing. Run `npm install` in "
-                               f"{directory.name}/ first.")
+                               f"{directory.name}/ first, or start the run from a "
+                               f"runner, which installs it.")
                 found.append(AppSpec(
                     kind="ui", name=directory.name or "ui", directory=directory,
                     # --host 127.0.0.1 explicitly: vite's default host is "localhost",

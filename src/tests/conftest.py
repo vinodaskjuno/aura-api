@@ -163,13 +163,32 @@ class FakeDynamo:
         self.put_item(table, item)
         return True
 
+    def update_item_if(self, table, key, updates, expect):
+        """Mirror the real conditional update: None when the condition does not hold.
+
+        The distinction matters — the QA run queue treats None as "someone else
+        claimed it", so a double that ignored `expect` would make a claim race
+        untestable and pass a broken implementation.
+        """
+        from src.database.dynamo_client import _decimalize
+        updates = {k: _decimalize(v) for k, v in updates.items()}
+        _reject_floats(table, updates)
+        for row in self.tables.get(table, []):
+            if all(row.get(k) == v for k, v in key.items()):
+                if not all(row.get(k) == _decimalize(v) for k, v in expect.items()):
+                    return None
+                row.update(updates)
+                return row
+        return None
+
 
 @pytest.fixture
 def fake_dynamo(monkeypatch):
     fake = FakeDynamo()
     import src.database.dynamo_client as dc
     for name in ("put_item", "get_item", "query_items", "query_range", "scan_items",
-                 "update_item", "delete_item", "atomic_add", "put_item_if_absent"):
+                 "update_item", "update_item_if", "delete_item", "atomic_add",
+                 "put_item_if_absent"):
         monkeypatch.setattr(dc, name, getattr(fake, name), raising=False)
     # The store and dispatcher import these by name at call time.
     import src.observability.store as store

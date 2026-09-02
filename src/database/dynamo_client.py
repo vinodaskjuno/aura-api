@@ -180,6 +180,51 @@ def put_item_if_absent(table_name: str, item: dict, key_fields: tuple[str, ...])
         raise
 
 
+def update_item_if(table_name: str, key: dict, updates: dict,
+                   expect: dict) -> dict | None:
+    """Update an item only while the fields in `expect` still hold their given values.
+
+    Returns the new item, or **None if the condition failed** — which is a normal
+    outcome, not an error. `update_item` above cannot express this: it builds only a
+    SET expression, so a read-then-write is the alternative and that races.
+
+    The QA run queue needs it: two runners polling for work would otherwise both read a
+    row as `queued` and both claim it, and the same test run would execute twice.
+    """
+    updates = {k: _decimalize(v) for k, v in updates.items()
+               if not (v == "" and k in _gsi_key_attrs(table_name))}
+    if not updates:
+        return None
+
+    expr_parts, expr_names, expr_values = [], {}, {}
+    for i, (k, v) in enumerate(updates.items()):
+        expr_parts.append(f"#f{i} = :v{i}")
+        expr_names[f"#f{i}"] = k
+        expr_values[f":v{i}"] = v
+
+    cond_parts = []
+    for i, (k, v) in enumerate(expect.items()):
+        expr_names[f"#c{i}"] = k
+        expr_values[f":c{i}"] = _decimalize(v)
+        cond_parts.append(f"#c{i} = :c{i}")
+
+    try:
+        resp = _table(table_name).update_item(
+            Key=key,
+            UpdateExpression="SET " + ", ".join(expr_parts),
+            ConditionExpression=" AND ".join(cond_parts),
+            ExpressionAttributeNames=expr_names,
+            ExpressionAttributeValues=expr_values,
+            ReturnValues="ALL_NEW",
+        )
+        return resp.get("Attributes")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return None
+        logger.error("DynamoDB update_item_if failed [%s]: %s", table_name, e)
+        raise
+
+
 def get_item(table_name: str, key: dict) -> dict | None:
     """Get a single item by its full key. Pass all key fields."""
     try:

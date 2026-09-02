@@ -127,3 +127,41 @@ class Report:
             "covered": self.covered,
             "exploratory": self.exploratory,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Report":
+        """Rebuild a Report from what as_dict() produced.
+
+        The inverse exists because a report now crosses a network boundary: a
+        self-hosted runner executes the run and POSTs `as_dict()` back, and the API then
+        writes it to the knowledge graph. `graph_writeback.write_results` reads
+        ATTRIBUTES — `report.project_id`, `report.cases[].case_id` — so a plain dict
+        fails with "'dict' object has no attribute 'project_id'" after the run has
+        already succeeded and its evidence has been stored. Found exactly that way.
+
+        Tolerant of missing keys on purpose: an older runner should degrade to a
+        partial graph write, not crash the endpoint.
+        """
+        cases = [c if isinstance(c, Case) else Case(**c)
+                 for c in (data.get("cases") or [])]
+        emulators = [e if isinstance(e, EmulatorRecord) else EmulatorRecord(**e)
+                     for e in (data.get("emulators") or [])]
+        return cls(
+            run_id=data.get("runId", ""),
+            project_id=data.get("projectId", ""),
+            app_url=data.get("appUrl", ""),
+            status=data.get("status", "passed"),
+            reason=data.get("reason", ""),
+            started_at=data.get("startedAt", "") or _now(),
+            completed_at=data.get("completedAt", ""),
+            ran_by=data.get("ranBy", ""),
+            total_passed=int(data.get("totalPassed") or 0),
+            total_failed=int(data.get("totalFailed") or 0),
+            total_skipped=int(data.get("totalSkipped") or 0),
+            total_unemulated=int(data.get("totalUnemulated") or 0),
+            duration_ms=int(data.get("durationMs") or 0),
+            cases=cases,
+            emulators=emulators,
+            covered=data.get("covered") or [],
+            exploratory=bool(data.get("exploratory")),
+        )
