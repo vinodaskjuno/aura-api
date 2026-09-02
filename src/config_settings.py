@@ -123,6 +123,46 @@ class Settings(BaseSettings):
     otlp_max_body_bytes: int = 8 * 1024 * 1024   # reject absurd payloads
     usage_rollup_table: str = "usage-daily"
 
+    # ── Opik (self-hosted LLM observability engine) ───────────────────────────
+    # Opik replaces DynamoDB as the trace/span engine behind src/aiobs/. It is
+    # reached over its REST API; nothing here talks to ClickHouse directly.
+    #
+    # Two independent switches, deliberately:
+    #   opik_enabled  -> may Aura WRITE spans for its own agents?
+    #   aiobs_store   -> which engine does the READ path use?
+    # Keeping them apart is what makes the migration reversible: dual-write with
+    # `opik_enabled=true, aiobs_store=dynamodb`, verify, then flip the reader.
+    opik_enabled: bool = False
+    opik_url: str = "http://opik-frontend:5173/api/"
+    opik_workspace: str = "default"          # OSS Opik has exactly one workspace
+    opik_api_key: str = ""                   # unused while AUTH_ENABLED=false
+    opik_timeout_seconds: float = 10.0
+
+    # Where a BROWSER reaches the Opik UI. Served on its own port rather than a
+    # sub-path of Aura: Comet's published frontend image is built with Vite base=/,
+    # so its assets are absolute and a sub-path deployment makes the browser fetch
+    # them from Aura's origin — which returns Aura's own SPA.
+    #
+    # Sent to the UI from /capabilities rather than baked into the bundle. The
+    # frontend deliberately never reads import.meta.env for addresses (see
+    # aura-ui/frontend/src/api/wsUrl.ts): it is inlined at build time and would pin
+    # one image to one environment. Empty means "same host, opik_ui_port".
+    opik_ui_url: str = ""
+    opik_ui_port: int = 8081
+
+    # The externally reachable base URL, used to render onboarding snippets. NOT
+    # derived from the request: Aura sits behind an ALB and nginx, so request.base_url
+    # is usually the internal address, and a confidently wrong endpoint in a
+    # copy-paste snippet is worse than an obvious placeholder.
+    public_base_url: str = ""
+
+    # "dynamodb" | "opik". The one line the TraceStore protocol exists to make
+    # swappable (src/aiobs/service.py::get_store).
+    aiobs_store: str = "dynamodb"
+    # Forward inbound OTLP to Opik as well as storing locally. Independent of
+    # aiobs_store so a deployment can backfill Opik before trusting it to read.
+    aiobs_forward_otlp: bool = False
+
     # ── App ───────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     app_env: str = "development"                    # development | staging | production

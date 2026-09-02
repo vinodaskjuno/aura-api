@@ -5,7 +5,6 @@ a structured, step-by-step SOP document specific to that project.
 Falls back to template steps when Bedrock is unavailable.
 """
 from __future__ import annotations
-import json
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -112,11 +111,10 @@ class SOPAgent(BaseAgent):
 
     async def _generate_with_bedrock(self, stage: str, project_name: str,
                                       kg: dict, result: AgentResult) -> dict | None:
-        import boto3
-        from src.config_settings import get_settings
-        import asyncio
-
-        s = get_settings()
+        # Via the shared LLM seam, not an inline boto3 client — see the note in
+        # observability/llm.py. invoke_masked is already async, so the
+        # run_in_executor dance this method used to do is gone.
+        from src.observability.llm import invoke_masked, parse_json_block
 
         user_prompt = f"""Generate a {STAGE_META[stage]['label']} SOP for the project: {project_name}
 
@@ -130,31 +128,17 @@ Key Relationships: {len(kg['correlations'])} service correlations mapped
 Stage: {stage}
 Generate a precise, project-specific SOP for this stage."""
 
-        body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 2048,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": user_prompt}],
-        }
-
-        client = boto3.client("bedrock-runtime", region_name=s.bedrock_region)
-        resp = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: client.invoke_model(
-                modelId=s.bedrock_model_id,
-                body=json.dumps(body),
-                contentType="application/json",
-                accept="application/json",
-            ),
-        )
-        text = json.loads(resp["body"].read())["content"][0]["text"].strip()
-
-        # Extract JSON
-        start = text.find("{")
-        end   = text.rfind("}") + 1
-        if start < 0 or end <= start:
+        text, record = await invoke_masked(
+            system=SYSTEM_PROMPT, user=user_prompt,
+            investigation_id="", agent=self.name, max_tokens=2048)
+        result.opik_trace_id = record.opik_trace_id or result.opik_trace_id
+        if record.error:
+            result.log(f"SOP generation unavailable: {record.error[:100]}")
             return None
-        data = json.loads(text[start:end])
+
+        data = parse_json_block(text)
+        if not isinstance(data, dict):
+            return None
         result.log(f"Bedrock generated {len(data.get('steps', []))} steps")
         return data
 

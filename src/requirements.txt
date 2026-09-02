@@ -47,6 +47,30 @@ kubernetes>=29.0.0
 # traces — see routers/otlp.py::_decode_protobuf.
 opentelemetry-proto>=1.27.0
 
+# Opik SDK — emits spans for Aura's own agents into the self-hosted Opik backend
+# (src/aiobs/opik_client.py). Verified against every pin above: pip check is clean
+# and nothing else changes version.
+#
+# litellm is capped deliberately. opik requires litellm>=1.79.2 with no upper bound,
+# but litellm 1.96+ requires boto3>=1.43.1 and pydantic-settings>=2.14.1 — both of
+# which break the exact pins this file sets. Without this cap a rebuild either fails
+# or silently upgrades boto3, and there is no lockfile or CI to catch it. Same class
+# of bug as the mcp<2 cap documented in docker/backend.Dockerfile.
+# Revisit when boto3 and pydantic-settings here move forward.
+#
+# KNOWN metadata conflict, LOCAL DEV ONLY: litellm requires openai>=2.20, while
+# browser-use (line 19) pulls langchain-openai, which declares openai<2.0.0. Two
+# reasons this is accepted rather than solved:
+#   * docker/backend.Dockerfile STRIPS browser-use and langchain-aws from the image,
+#     so the deployed container never installs langchain-openai and has no conflict.
+#   * In a full local venv the conflict is metadata-only — browser_use still imports
+#     and runs against openai 2.x; `pip check` complains, nothing breaks.
+# If that ever becomes a real failure, the browser path already degrades cleanly
+# (browser_use_runner_agent.py lazily imports with an ImportError fallback) and
+# delegates to Lambda under DEPLOYMENT_ENV=ecs.
+opik>=2.2.0
+litellm<1.96
+
 # Directory sign-in (LDAP / Active Directory). Pure Python, so no OpenLDAP C
 # libraries are needed in the container — unlike python-ldap.
 ldap3>=2.9.1

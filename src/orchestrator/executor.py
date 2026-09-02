@@ -63,6 +63,8 @@ async def run_orchestration_headless(
         intent=user_message,
         project_id=project_id,
         session_id=session_id,
+        # session_id groups a conversation into one thread in the traces view.
+        opik_thread_id=session_id or "",
     )
 
     # ── Step 3: Run agents sequentially (passing prior results forward) ───────
@@ -86,6 +88,12 @@ async def run_orchestration_headless(
 
         all_results[agent_name] = result
 
+        # The first agent that actually calls an LLM creates the Opik trace; every
+        # later agent in this run joins it. Without this a 5-agent run renders as 5
+        # unrelated traces and the point of tracing a DAG is lost.
+        if not context.opik_trace_id and result.opik_trace_id:
+            context.opik_trace_id = result.opik_trace_id
+
         await emit({
             "type": "agent_done",
             "agent": agent_name,
@@ -93,6 +101,7 @@ async def run_orchestration_headless(
             "summary": result.activity_log[-1] if result.activity_log else "",
             "artifactCount": len(result.artifacts),
             "kgUpdates": len(result.kg_updates),
+            "opikTraceId": result.opik_trace_id or context.opik_trace_id or "",
         })
 
         # Persist activity log to DynamoDB

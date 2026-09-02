@@ -71,6 +71,51 @@ class BedrockClient:
         log.info("Bedrock runtime client created (region=%s)", region)
         return self._client
 
+    def _trace_stream_usage(self, usage: dict, system_text: str,
+                            stop_reason: str, token_count: int) -> None:
+        """Mirror a completed stream into Opik as one span.
+
+        Payloads are deliberately NOT sent. This client is not behind the masking
+        seam, so its prompts have never been through src/observability/masking.py —
+        shipping them to a span would route around the guarantee rather than honour
+        it. Tokens, cost, latency and stop reason are the parts that are safe and
+        are also what the cost dashboards want. A prompt hash is included so two
+        identical prompts can still be correlated without either being readable.
+
+        Never raises: an advisor chat must not fail because tracing did.
+        """
+        try:
+            import hashlib
+
+            from src.aiobs import opik_client
+            if not opik_client.enabled():
+                return
+
+            inp = int(usage.get("inputTokens") or 0)
+            out = int(usage.get("outputTokens") or 0)
+            try:
+                from src.config_settings import calculate_cost_v2
+                cost = calculate_cost_v2(self.model_id, input_tokens=inp, output_tokens=out)
+            except Exception:  # noqa: BLE001
+                cost = 0.0
+
+            opik_client.emit_llm_span(
+                project="aura-advisor", agent="advisor", model=self.model_id,
+                provider="bedrock",
+                masked_input="<payload not traced: advisor is outside the masking seam>",
+                masked_output="",
+                input_tokens=inp, output_tokens=out, total_tokens=inp + out,
+                cost_usd=cost,
+                metadata={"stopReason": stop_reason,
+                          "tokensStreamed": token_count,
+                          "streaming": True,
+                          "payloadTraced": False,
+                          "systemPromptHash": hashlib.sha256(
+                              (system_text or "").encode("utf-8")).hexdigest()[:16]},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("advisor span not emitted: %s", exc)
+
     def converse_stream(
         self,
         messages: list[dict],
@@ -161,6 +206,13 @@ class BedrockClient:
                     "Token usage | input=%s output=%s",
                     usage.get("inputTokens"), usage.get("outputTokens"),
                 )
+                # Traced HERE rather than by routing this client through
+                # observability.llm.invoke_masked. That seam is non-streaming by
+                # design — unmasking a token split across SSE deltas is the hard
+                # problem its docstring defers — and this is the streaming advisor.
+                # Bedrock's own metadata event carries the authoritative token
+                # counts, so it is both the correct and the cheapest place to record.
+                self._trace_stream_usage(usage, system_text, stop_reason, token_count)
                 yield {"type": "usage", "input": usage.get("inputTokens"),
                        "output": usage.get("outputTokens")}
 

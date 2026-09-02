@@ -8,10 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import boto3
 
 from .base_agent import AgentContext, AgentResult, BaseAgent
-from src.config_settings import settings as s
 from src.graph import neo4j_client as neo4j
 
 
@@ -61,20 +59,20 @@ class RemediationAgent(BaseAgent):
 
         prompt = _build_prompt(target_id, related_ctx, rca_ctx, context.intent)
         try:
-            client = boto3.client("bedrock-runtime", region_name=s.bedrock_region)
-            body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 3000,
-                "messages": [{"role": "user", "content": prompt}],
-            })
-            resp = client.invoke_model(
-                modelId=s.bedrock_model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=body,
-            )
-            raw = json.loads(resp["body"].read())
-            remediation = json.loads(raw["content"][0]["text"])
+            # Shared LLM seam — see observability/llm.py. This agent consumes RCA
+            # output, so it is the one most likely to be read straight after an
+            # investigation; having both in the same traces view is the point.
+            from src.observability.llm import invoke_masked, parse_json_block
+            text, record = await invoke_masked(
+                system="You are an SRE producing safe, reviewable remediation plans.",
+                user=prompt, investigation_id="", agent=self.name, max_tokens=3000,
+                user_id=context.user_id, **self.llm_kwargs(context))
+            result.opik_trace_id = record.opik_trace_id or result.opik_trace_id
+            if record.error:
+                raise RuntimeError(record.error)
+            remediation = parse_json_block(text)
+            if not isinstance(remediation, dict):
+                raise ValueError("remediation response was not a JSON object")
         except Exception as exc:  # noqa: BLE001
             result.log(f"LLM failed: {exc}")
             remediation = {"steps": [], "pr_suggestions": [], "runbook_updates": []}

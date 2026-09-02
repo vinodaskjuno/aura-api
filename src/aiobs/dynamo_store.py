@@ -15,6 +15,9 @@ log = logging.getLogger(__name__)
 
 TRACES = "ai-traces"
 SPANS = "ai-spans"
+# How far list_projects will scan. Past this the project list is incomplete —
+# a limitation of this store, reported honestly by capabilities().
+SCAN_LIMIT = 2000
 _S3_BUCKET = "analysis"          # reuses the existing analysis bucket
 
 
@@ -69,7 +72,13 @@ class DynamoTraceStore:
         return sorted(rows or [], key=lambda r: r.get("spanSortKey", ""))
 
     def list_traces(self, project_id: str, limit: int = 50,
-                    status: str = "", thread_id: str = "") -> list[dict]:
+                    status: str = "", thread_id: str = "",
+                    search: str = "", tenant_id: str = "") -> list[dict]:
+        # `search` and `tenant_id` are accepted and IGNORED. DynamoDB has no index
+        # for either, and honouring them here would mean a table scan. capabilities()
+        # reports fullTextSearch=False so the UI never offers the search box, and the
+        # router refuses a tenant-scoped read against this store rather than
+        # returning unfiltered rows that look filtered.
         from src.database import dynamo_client as db
         try:
             if thread_id:
@@ -113,6 +122,64 @@ class DynamoTraceStore:
                 t["lastInput"] = row.get("inputPreview", "")
         return sorted(threads.values(), key=lambda t: t["lastSeen"], reverse=True)[:limit]
 
+    def list_projects(self, tenant_id: str = "") -> list[dict]:
+        """Derived from the trace table, because DynamoDB has no project entity.
+
+        Bounded scan, and that bound is a real limitation rather than a tuning knob:
+        beyond SCAN_LIMIT traces the project list is INCOMPLETE, which is why
+        capabilities() reports aggregations=False. `tenant_id` is applied in Python
+        for the same reason — there is no tenant index — so this narrows a page, it
+        does not search. The Opik store answers the same question properly.
+        """
+        from src.database import dynamo_client as db
+        try:
+            rows = db.scan_items(TRACES, limit=SCAN_LIMIT) or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("list_projects scan failed: %s", exc)
+            return []
+
+        seen: dict[str, dict] = {}
+        for row in rows:
+            pid = row.get("projectId", "")
+            if not pid:
+                continue
+            # The predicate the router was missing. Without it any caller holding
+            # dev_workspace enumerated every tenant's project names.
+            if tenant_id and row.get("tenantId") not in ("", None, tenant_id):
+                continue
+            entry = seen.setdefault(pid, {"projectId": pid, "traceCount": 0,
+                                          "costUsd": 0.0, "lastSeen": ""})
+            entry["traceCount"] += 1
+            entry["costUsd"] = round(entry["costUsd"] + float(row.get("costUsd") or 0), 6)
+            start = row.get("startTime", "")
+            if start > entry["lastSeen"]:
+                entry["lastSeen"] = start
+        return sorted(seen.values(), key=lambda p: p["lastSeen"], reverse=True)
+
+    def record_scores(self, project_id: str, trace: dict, scores: list) -> bool:
+        """Stamp scores onto the trace row.
+
+        Denormalised onto the row rather than stored separately so the list view can
+        show quality inline without a second query, and so a rerun does not re-bill
+        a trace that was already judged.
+        """
+        from src.database import dynamo_client as db
+        sort_key = trace.get("sortKey", "")
+        if not sort_key:
+            return False
+        from datetime import datetime, timezone
+        try:
+            db.update_item(
+                TRACES, {"projectId": project_id, "sortKey": sort_key},
+                {"onlineScores": [s.as_item() if hasattr(s, "as_item") else dict(s)
+                                  for s in scores],
+                 "onlineScoredAt": datetime.now(timezone.utc).isoformat()})
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not persist online scores for %s: %s",
+                      trace.get("traceId"), exc)
+            return False
+
     def capabilities(self) -> dict:
         return {
             "store": self.name,
@@ -121,6 +188,8 @@ class DynamoTraceStore:
             "fullTextSearch": False,
             "tagFilter": False,
             "aggregations": False,
+            "feedbackScores": False,     # scores are a JSON blob, not queryable
+            "degraded": False,
             "note": ("DynamoDB indexes fixed access patterns. Free-text search over "
                      "inputs/outputs and ad-hoc tag filtering need an analytics store; "
                      "add one behind TraceStore rather than scanning this table."),

@@ -98,6 +98,7 @@ def make_context(
     version_id: str | None,
     extra: dict[str, Any],
     prior_results: dict[str, AgentResult],
+    opik_trace_id: str = "",
 ) -> AgentContext:
     return AgentContext(
         user_id=user_id,
@@ -108,6 +109,10 @@ def make_context(
         session_id=session_id,
         prior_results=prior_results,
         extra={**extra, "version_id": version_id},
+        opik_trace_id=opik_trace_id,
+        # session_id doubles as the thread, so a whole conversation groups in the
+        # traces view instead of appearing as N unrelated runs.
+        opik_thread_id=session_id or "",
     )
 
 

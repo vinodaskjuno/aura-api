@@ -31,6 +31,10 @@ _VALID_TOOL_LABELS = {
     "aura-plugin", "claude-ext", "claude-cli", "codex-cli", "gemini-cli", "unknown",
     # Emitted by the OTLP receiver from Claude Code's app.entrypoint
     "claude-code-cli", "claude-code-ext", "claude-code-sdk",
+    # AI Observability onboarding: a team instrumenting its own agent asks for one
+    # of these and gets a key it can paste into the Opik SDK or a raw OTel exporter.
+    # Separate labels so usage can be attributed per integration style.
+    "opik-sdk", "otel-sdk",
 }
 
 

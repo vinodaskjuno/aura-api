@@ -108,27 +108,24 @@ def _parse_verdict(text: str) -> tuple[float, str]:
 def _invoke(system: str, user: str, agent: str, run_id: str = "") -> tuple[str, Any]:
     """Bridge to the async LLM seam.
 
-    invoke_masked is async and keyed by investigation_id, which is how masking
-    sessions and cost are attributed. Evaluation runs are not investigations, so
-    the experiment/run id is passed in that slot — same scoping semantics, and the
-    mask session stays per-run rather than leaking between runs.
+    invoke_masked is keyed by investigation_id, which is how masking sessions and
+    cost are attributed. Evaluation runs are not investigations, so the
+    experiment/run id is passed in that slot — same scoping semantics, and the mask
+    session stays per-run rather than leaking between runs.
+
+    The sync/async bridge itself used to live here; it moved to
+    observability.llm.invoke_masked_sync so intent_classifier could share it.
     """
-    import asyncio
+    from src.observability.llm import invoke_masked_sync
 
-    from src.observability.llm import invoke_masked
-
-    coro = invoke_masked(system=system, user=user,
-                         investigation_id=run_id or f"eval-{agent}",
-                         agent=agent, stage=0)
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)          # normal synchronous caller
-    # Called from inside a running loop (a FastAPI request). asyncio.run would
-    # raise, so the coroutine is handed to a worker thread with its own loop.
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+    return invoke_masked_sync(system=system, user=user,
+                              investigation_id=run_id or f"eval-{agent}",
+                              agent=agent, stage=0,
+                              # Judge calls are traces in their own right: a judge
+                              # that scores low for a bad reason is a thing you need
+                              # to be able to open and read.
+                              opik_project="aura-evaluations",
+                              opik_thread_id=run_id)
 
 
 def run_judge(name: str, *, output: str, input_text: str = "", expected: str = "",

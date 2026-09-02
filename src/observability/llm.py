@@ -57,6 +57,11 @@ class LLMCallRecord:
     unmask_incomplete: bool = False
     error: str | None = None
     captured_prompt: str | None = None   # only when capture_prompts / development
+    # Ids of the Opik trace/span this call produced, empty when Opik is off. Returned
+    # on the record rather than in the tuple so adding tracing did not change the
+    # signature every obs_* agent already calls.
+    opik_trace_id: str = ""
+    opik_span_id: str = ""
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -284,6 +289,10 @@ async def invoke_masked(
     max_tokens: int = 4096,
     model_id: str | None = None,
     capture_prompt: bool = False,
+    opik_project: str = "",
+    opik_trace_id: str = "",
+    opik_parent_span_id: str = "",
+    opik_thread_id: str = "",
 ) -> tuple[str, LLMCallRecord]:
     """Mask -> invoke -> unmask -> meter. Returns (text, record).
 
@@ -336,6 +345,12 @@ async def invoke_masked(
         record.latency_ms = int((time.monotonic() - t0) * 1000)
         record.error = str(exc)
         log.warning("LLM call failed (%s/%s): %s", agent, backend, exc)
+        # Trace the failure too — a provider outage is exactly what someone will
+        # come to the traces view looking for.
+        _emit_opik_span(record, system_out, user_out, "", backend,
+                        project=opik_project, trace_id=opik_trace_id,
+                        parent_span_id=opik_parent_span_id, thread_id=opik_thread_id,
+                        stage=stage)
         return "", record
 
     record.latency_ms = int((time.monotonic() - t0) * 1000)
@@ -343,6 +358,11 @@ async def invoke_masked(
     record.output_tokens = usage.get("output_tokens", 0)
     record.cache_read_tokens = usage.get("cache_read_tokens", 0)
     record.stop_reason = usage.get("stop_reason", "")
+
+    # Snapshot BEFORE unmasking. This is the whole reason the span emission lives
+    # here and not in the caller: after the next three lines `text` holds real
+    # identifiers again, and a span must never carry those.
+    masked_output = text
 
     # ── Unmask: fail open ────────────────────────────────────────────────────
     if ms is not None:
@@ -370,7 +390,101 @@ async def invoke_masked(
         except Exception as exc:  # noqa: BLE001
             log.debug("usage rollup skipped: %s", exc)
 
+    _emit_opik_span(record, system_out, user_out, masked_output, backend,
+                    project=opik_project, trace_id=opik_trace_id,
+                    parent_span_id=opik_parent_span_id, thread_id=opik_thread_id,
+                    stage=stage)
+
     return text, record
+
+
+def invoke_masked_sync(**kwargs) -> tuple[str, LLMCallRecord]:
+    """Synchronous wrapper around `invoke_masked`, for callers that are not async.
+
+    Some call sites genuinely cannot be async: `orchestrator.intent_classifier.classify`
+    is called from sync request paths, and `aiobs.judges` runs inside experiment loops.
+    Making them async would ripple through their callers for no benefit.
+
+    The two-branch shape is load-bearing. `asyncio.run` raises if a loop is already
+    running, which is exactly the case inside a FastAPI request handler — so when a
+    loop is detected the coroutine is handed to a worker thread with a loop of its
+    own. This was duplicated in aiobs/judges.py; it lives here now because it belongs
+    with the seam it wraps.
+    """
+    import asyncio
+
+    coro = invoke_masked(**kwargs)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)          # no loop: normal synchronous caller
+
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def _emit_opik_span(record: LLMCallRecord, system_masked: str, user_masked: str,
+                    masked_output: str, backend: str, *, project: str,
+                    trace_id: str, parent_span_id: str, thread_id: str,
+                    stage: int) -> None:
+    """Mirror one metered LLM call into Opik, and never let that fail the call.
+
+    Wrapped in its own try even though opik_client already swallows everything: an
+    import error or a settings lookup here would otherwise surface as a failed
+    investigation, which is precisely the outcome the whole seam exists to prevent.
+    """
+    try:
+        from src.aiobs import opik_client
+        if not opik_client.enabled():
+            return
+        ids = opik_client.emit_llm_span(
+            project=project or _opik_project_for(record.agent),
+            agent=record.agent,
+            model=record.model_id,
+            provider=backend,
+            # Both halves of the prompt, in the order the model saw them.
+            masked_input=(system_masked + "\n\n---\n\n" + user_masked).strip(),
+            masked_output=masked_output,
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+            total_tokens=record.input_tokens + record.output_tokens,
+            cost_usd=record.cost_usd,
+            latency_ms=record.latency_ms,
+            error=record.error or "",
+            trace_id=trace_id,
+            parent_span_id=parent_span_id,
+            thread_id=thread_id,
+            metadata={"stage": stage,
+                      "promptHash": record.prompt_hash,
+                      "masked": record.masked,
+                      "maskSessionId": record.mask_session_id,
+                      "unmaskIncomplete": record.unmask_incomplete,
+                      "stopReason": record.stop_reason,
+                      "cacheReadTokens": record.cache_read_tokens,
+                      "callId": record.call_id},
+        )
+        if ids:
+            record.opik_trace_id = ids.get("traceId", "")
+            record.opik_span_id = ids.get("spanId", "")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("opik span not emitted for %s: %s", record.agent, exc)
+
+
+def _opik_project_for(agent: str) -> str:
+    """Which Opik project an agent's spans land in.
+
+    One project per Aura workspace rather than one per agent: a project is the unit
+    the traces view filters by, and someone debugging an investigation wants every
+    agent in that run together. Aura's own traffic is prefixed so it can never be
+    confused with a customer project derived from their `service.name`.
+    """
+    name = (agent or "").lower()
+    if name.startswith("obs_") or name.startswith("judge_"):
+        return "aura-observability"
+    if name.startswith("qa_") or "test" in name:
+        return "aura-qualitymind"
+    return "aura-agents"
 
 
 def parse_json_block(text: str) -> Any:

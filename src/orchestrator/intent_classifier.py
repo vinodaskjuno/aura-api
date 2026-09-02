@@ -1,9 +1,6 @@
 """Intent classifier — maps user intent to a list of agent names to invoke."""
 from __future__ import annotations
 import logging
-import json
-import boto3
-from src.config_settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -60,22 +57,27 @@ def classify(user_message: str) -> dict:
 
 
 def _bedrock_classify(user_message: str) -> dict:
-    s = get_settings()
-    client = boto3.client("bedrock-runtime", region_name=s.bedrock_region)
-    body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 512,
-        "system": CLASSIFICATION_PROMPT,
-        "messages": [{"role": "user", "content": user_message}],
-    }
-    resp = client.invoke_model(
-        modelId=s.bedrock_model_id,
-        body=json.dumps(body),
-        contentType="application/json",
-        accept="application/json",
-    )
-    text = json.loads(resp["body"].read())["content"][0]["text"]
-    return json.loads(text)
+    """Classify via the shared LLM seam.
+
+    Sync on purpose — `classify` is called from sync request paths — so it goes
+    through invoke_masked_sync rather than making every caller async. Moving off the
+    inline boto3 client means classification spend is now metered and the call shows
+    up in the traces view, which matters because it runs on every routed message.
+    """
+    from src.observability.llm import invoke_masked_sync, parse_json_block
+
+    text, record = invoke_masked_sync(
+        system=CLASSIFICATION_PROMPT, user=user_message,
+        investigation_id="", agent="intent_classifier", max_tokens=512,
+        opik_project="aura-agents")
+    if record.error:
+        # Raised so `classify` falls through to _keyword_classify, which is the
+        # behaviour this function already had on any provider failure.
+        raise RuntimeError(record.error)
+    data = parse_json_block(text)
+    if not isinstance(data, dict):
+        raise ValueError("classifier response was not a JSON object")
+    return data
 
 
 def _keyword_classify(user_message: str) -> dict:

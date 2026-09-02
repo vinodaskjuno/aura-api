@@ -1,5 +1,4 @@
 from __future__ import annotations
-import json
 import uuid
 from datetime import datetime, timezone
 from src.agents.base_agent import BaseAgent, AgentContext, AgentResult, S3Ref
@@ -26,10 +25,12 @@ class RCAAgent(BaseAgent):
 
         rca_reports = []
         try:
-            import boto3
-            from src.config_settings import get_settings
-            s = get_settings()
-            client = boto3.client("bedrock-runtime", region_name=s.bedrock_region)
+            # Routed through the shared LLM seam rather than an inline
+            # boto3.client("bedrock-runtime"). That seam is where cost metering,
+            # Opik span emission and the test override all live — this agent used to
+            # bypass all three, so its spend was invisible and the suite could bill
+            # a real call.
+            from src.observability.llm import invoke_masked, parse_json_block
 
             for alarm in active_alarms[:3]:  # top 3
                 # Fetch recent logs for this service from DynamoDB
@@ -51,15 +52,23 @@ Analyse likely root causes and provide:
 
 Return JSON: {{"rca": {{"alarm": "...", "service": "...", "root_cause": "...", "contributing_factors": [], "affected_services": [], "immediate_actions": [], "long_term_fix": "...", "confidence": 0.0}}}}"""
 
-                body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 2048,
-                        "messages": [{"role": "user", "content": prompt}]}
-                resp = client.invoke_model(modelId=s.bedrock_model_id, body=json.dumps(body),
-                                           contentType="application/json", accept="application/json")
-                text = json.loads(resp["body"].read())["content"][0]["text"]
-                start = text.find("{")
-                end = text.rfind("}") + 1
-                if start >= 0 and end > start:
-                    data = json.loads(text[start:end])
+                text, record = await invoke_masked(
+                    system="You are a site-reliability engineer performing root cause analysis.",
+                    user=prompt,
+                    # Not an investigation, so masking stays off exactly as it was
+                    # before this call was moved; the slot scopes cost and the Opik
+                    # thread instead. Passing a real investigation id here would
+                    # switch masking on — deliberate future change, not a silent one.
+                    investigation_id="",
+                    agent=self.name, max_tokens=2048,
+                    user_id=context.user_id,
+                    **self.llm_kwargs(context))
+                result.opik_trace_id = record.opik_trace_id or result.opik_trace_id
+                if record.error:
+                    result.log(f"  RCA for {service} unavailable: {record.error[:80]}")
+                    continue
+                data = parse_json_block(text)
+                if isinstance(data, dict):
                     rca = data.get("rca", {})
                     rca_reports.append(rca)
                     result.log(f"  RCA for {service}: {rca.get('root_cause', '')[:80]}")

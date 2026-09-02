@@ -121,14 +121,20 @@ def run_sweep(limit: int = MAX_PER_RUN) -> dict:
 
 
 def _mark_scored(project_id: str, trace: dict, scores: list[metrics.Score]) -> None:
-    """Write scores back onto the trace so the list view can show quality inline
-    and a rerun does not re-bill the same trace."""
-    from src.database import dynamo_client as db
+    """Write scores back so the list view shows quality inline and a rerun does not
+    re-bill the same trace.
+
+    Delegated to the store rather than writing to DynamoDB here. It used to call
+    `db.update_item("ai-traces", ...)` directly, which meant that the moment the read
+    path moved to Opik this sweep would have kept spending money on judges and
+    writing the results into a table nobody was reading — and `onlineScoredAt` would
+    never come back, so every sweep would re-score the same traces forever.
+    """
+    from src.aiobs import service
+    store = service.get_store()
     try:
-        db.update_item("ai-traces",
-                       {"projectId": project_id, "sortKey": trace.get("sortKey", "")},
-                       {"onlineScores": [s.as_item() for s in scores],
-                        "onlineScoredAt": _now()})
+        if not store.record_scores(project_id, trace, list(scores)):
+            log.debug("scores not persisted for %s", trace.get("traceId"))
     except Exception as exc:  # noqa: BLE001
         log.debug("could not persist online scores for %s: %s",
                   trace.get("traceId"), exc)

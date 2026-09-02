@@ -1,5 +1,4 @@
 from __future__ import annotations
-import json
 from src.agents.base_agent import BaseAgent, AgentContext, AgentResult, S3Ref, Triple
 
 
@@ -23,10 +22,7 @@ class SecurityAgent(BaseAgent):
 
         # Use Bedrock to identify security issues
         try:
-            import boto3
-            from src.config_settings import get_settings
-            s = get_settings()
-            client = boto3.client("bedrock-runtime", region_name=s.bedrock_region)
+            from src.observability.llm import invoke_masked, parse_json_block
             prompt = f"""Perform security analysis for this project.
 Tech stack: {', '.join(tech_stack)}
 Dependencies: {', '.join(dependencies[:30])}
@@ -34,15 +30,15 @@ Context: {context.intent}
 
 Return JSON: {{"findings": [{{"id": "VULN-001", "severity": "high|medium|low|info", "title": "...", "description": "...", "cve": "CVE-...", "affected": "...", "recommendation": "..."}}]}}"""
 
-            body = {"anthropic_version": "bedrock-2023-05-31", "max_tokens": 4096,
-                    "messages": [{"role": "user", "content": prompt}]}
-            resp = client.invoke_model(modelId=s.bedrock_model_id, body=json.dumps(body),
-                                       contentType="application/json", accept="application/json")
-            text = json.loads(resp["body"].read())["content"][0]["text"]
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                data = json.loads(text[start:end])
+            text, record = await invoke_masked(
+                system="You are an application security engineer.", user=prompt,
+                investigation_id="", agent=self.name, max_tokens=4096,
+                user_id=context.user_id, **self.llm_kwargs(context))
+            result.opik_trace_id = record.opik_trace_id or result.opik_trace_id
+            if record.error:
+                raise RuntimeError(record.error)
+            data = parse_json_block(text)
+            if isinstance(data, dict):
                 findings = data.get("findings", [])
         except Exception as exc:
             result.log(f"Bedrock security scan warning: {exc}")

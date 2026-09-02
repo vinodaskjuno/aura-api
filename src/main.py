@@ -229,6 +229,14 @@ app.include_router(ai_observability_router.router)
 from .routers import otlp as otlp_router
 app.include_router(otlp_router.router)
 
+# ── Opik auth gate + agent onboarding ────────────────────────────────────────
+# Open-source Opik ships with NO authentication (its AuthModule returns a no-op
+# service when AUTH_ENABLED=false), so nginx gates /opik/ with an auth_request
+# against this router. It also renders the "instrument your agent" snippets, for
+# which the key-provisioning primitive already existed but no surface did.
+from .routers import opik_gateway as opik_gateway_router
+app.include_router(opik_gateway_router.router)
+
 # ── VS Code plugin browser-based login flow ──────────────────────────────────
 _LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
