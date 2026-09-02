@@ -248,6 +248,35 @@ async def run_advisor(
             except FileNotFoundError:
                 pass  # no cloned repo — don't add git tools
 
+        # Inject the user's MCP tools, exactly as the git block above injects its own:
+        # per-request, never mutating the module-level TOOLS_DEF/_TOOL_DISPATCH.
+        #
+        # Fail-closed on user_id. MCP servers are per-user connector rows, so a missing
+        # identity means no MCP tools rather than someone else's.
+        mcp_names: list[str] = []
+        if user_id:
+            try:
+                from src.mcp_client import bundle_for_user
+                reserved = {t["name"] for t in effective_tools_def}
+                bundle = await bundle_for_user(user_id, reserved)
+                if bundle.defs:
+                    effective_tools_def = effective_tools_def + bundle.defs
+                    effective_tool_dispatch.update(bundle.dispatch)
+                    mcp_names = [s.name for s in bundle.servers.values()]
+                    system_prompt += (
+                        "\n\nYou also have tools from the user's connected MCP servers "
+                        f"({', '.join(mcp_names)}). Their names all begin with `mcp__`. "
+                        "Use them whenever the question concerns data those systems hold, "
+                        "and say which server an answer came from."
+                    )
+                if bundle.degraded:
+                    logger.warning("MCP servers unreachable for %s: %s",
+                                   user_id, ", ".join(bundle.degraded))
+            except Exception as exc:
+                # Discovery must never be able to break a chat turn. Worst case the
+                # user gets the built-in tools and nothing else.
+                logger.warning("MCP tool discovery skipped: %s", exc)
+
         for iteration in range(MAX_ITERATIONS):
             if use_anthropic:
                 events = list(

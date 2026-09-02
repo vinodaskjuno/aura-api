@@ -41,11 +41,12 @@ COPY src/requirements.txt /tmp/requirements.txt
 # at import time. Resolved together, pip either finds a consistent set or fails
 # loudly at build time, which is what you want.
 #
-# mcp is capped below 2.0 for exactly that reason. Revisit when fastapi is
-# upgraded past the starlette 1.x boundary.
+# `mcp` and `starlette` now live in src/requirements.txt (one source of truth) and
+# arrive via req.slim.txt below, still inside this single invocation. The cap alone
+# turned out NOT to be enough: mcp 1.29 also accepts starlette 1.x, so requirements.txt
+# pins starlette==0.41.3 explicitly. Read the note there before changing either.
 RUN grep -viE '^(browser-use|langchain-aws)' /tmp/requirements.txt > /tmp/req.slim.txt \
  && pip install -r /tmp/req.slim.txt \
-      "mcp>=1.0,<2" \
       "PyYAML>=6.0" \
       "pypdf>=5.0.0" \
       "kubernetes>=31.0.0" \

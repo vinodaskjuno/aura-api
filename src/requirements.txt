@@ -10,6 +10,23 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.12
 
+# Pinned EXPLICITLY, not left to fastapi's range, because `mcp` also depends on it.
+# fastapi 0.115.6 wants starlette<0.42; mcp 1.29.1 accepts a much wider range, so
+# `pip install mcp` on its own happily upgrades starlette to 1.6.0 and breaks fastapi
+# with "Router.__init__() got an unexpected keyword argument 'on_startup'" at import.
+# Reproduced in a local venv while adding the MCP client, exactly as the comment in
+# docker/backend.Dockerfile predicted — except the trigger was mcp 1.x, not 2.x, so
+# the `<2` cap alone is NOT sufficient protection. This pin is what actually holds it.
+starlette==0.41.3
+
+# === MCP client (outbound JSON-RPC to registered MCP servers) ===
+# Floor is 1.9, not 1.0: mcp.client.streamable_http.streamablehttp_client landed in
+# 1.8.0, and `mcp>=1.0` only reaches it because there is no lockfile and pip resolves
+# to the newest 1.x. Pin the floor so streamable-HTTP is a guarantee, not an accident.
+#
+# Cap is load-bearing — see the starlette note above and docker/backend.Dockerfile.
+mcp>=1.9,<2
+
 # === AWS / AI ===
 boto3==1.35.81
 anthropic>=0.40.0

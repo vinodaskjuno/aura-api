@@ -31,9 +31,16 @@ router = APIRouter(prefix="/api/ontology", tags=["ontology-loader"])
 # ── Request/response models ────────────────────────────────────────────────────
 
 class McpLoadRequest(BaseModel):
-    sources: list[str]      # e.g. ["git", "servicenow", "wiz"]
+    # Connector ids of the caller's registered MCP servers. Named `sources` for
+    # backwards compatibility with the existing UI payload — it used to carry eight
+    # hardcoded strings ("git", "servicenow", ...) which were never read.
+    sources: list[str] = []
     delta_since: str | None = None
     notes: str = ""
+    # Escape hatch, off by default: run the old synthetic generator instead of talking
+    # to real servers. Kept because it is the only way to populate a graph with no
+    # connectors configured, and because removing it would break the demo fixtures.
+    synthetic: bool = False
 
 
 class ApiLoadRequest(BaseModel):
@@ -76,8 +83,32 @@ async def load_via_mcp(
     version_id = version["versionId"]
 
     try:
-        from src.connectors.ingestion_service import run_full_load
-        result = run_full_load(delta_since=body.delta_since)
+        if body.synthetic or not body.sources:
+            # The old path. `run_full_load` reads from connectors/mock_mcp, a
+            # random.seed() generator — nothing here ever touched a real MCP server,
+            # and `sources` was accepted and then never passed on.
+            from src.connectors.ingestion_service import run_full_load
+            result = run_full_load(delta_since=body.delta_since)
+            extra = {}
+        else:
+            import asyncio
+
+            from src.mcp_client.ingest import ingest_from_mcp
+
+            # In an executor, NOT inline. This route is `async def`, so there is a
+            # running event loop, and ingest_from_mcp drives the async MCP client with
+            # asyncio.run() — which raises "cannot be called from a running event
+            # loop". A thread is also where the blocking Neo4j writes belong.
+            uid = user.get("userId", "")
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: ingest_from_mcp(uid, body.sources))
+            extra = {
+                # What the loader could not map, reported rather than swallowed.
+                "skipped": result.get("skipped", 0),
+                "sources": result.get("sources", []),
+                "errors": result.get("errors", []),
+            }
+
         stats = {
             "nodesAdded": result.get("nodes_added", 0),
             "nodesUpdated": result.get("nodes_updated", 0),
@@ -85,7 +116,8 @@ async def load_via_mcp(
             "totalNodes": result.get("total_nodes", 0),
         }
         finish_version_record(version_id, "success", stats)
-        return {"versionId": version_id, "versionNumber": version["versionNumber"], **stats}
+        return {"versionId": version_id, "versionNumber": version["versionNumber"],
+                **stats, **extra}
     except Exception as exc:
         finish_version_record(version_id, "failed", {"nodesAdded": 0, "nodesUpdated": 0, "relsAdded": 0, "totalNodes": 0})
         log.exception("MCP load failed")

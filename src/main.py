@@ -222,6 +222,10 @@ app.include_router(graph_config_router.router)
 from .routers import ai_observability as ai_observability_router
 app.include_router(ai_observability_router.router)
 
+# MCP connectors: what a user has registered, what tools it exposes, try one.
+from .routers import mcp as mcp_router
+app.include_router(mcp_router.router)
+
 # ── OTLP telemetry receiver (Claude Code usage capture) ───────────────────────
 # Prefix is set on the router itself, so the exported paths are
 # /otlp/v1/metrics and /otlp/v1/logs — what OTLP/HTTP derives from

@@ -129,17 +129,26 @@ JOB_DEFS = [
     {
         "id": "ontology_delta_job",
         "name": "Ontology Delta Ingestion",
-        "description": "Ingests new/updated entities from all MCP connectors since last run",
+        "description": ("Loads entities into the knowledge graph. DISABLED by default: "
+                        "its data source is the synthetic generator in "
+                        "connectors/mock_mcp, so leaving it on quietly refills an "
+                        "emptied graph with ~700 fake nodes overnight. Enable it "
+                        "deliberately from Data Loader, or load from a real MCP "
+                        "connector instead."),
         "schedule": "0 2 * * *",
         "schedule_human": "Daily at 02:00 UTC",
+        "default_enabled": False,
         "fn": ontology_delta_job,
     },
     {
         "id": "correlation_refresh_job",
         "name": "Correlation Engine Refresh",
-        "description": "Re-runs the two-pass correlation engine on recently modified nodes",
+        "description": ("Re-links recently modified nodes. DISABLED by default for the "
+                        "same reason as ontology_delta_job — it exists to re-correlate "
+                        "what that job writes, so on its own it has nothing to do."),
         "schedule": "0 3 * * *",
         "schedule_human": "Daily at 03:00 UTC",
+        "default_enabled": False,
         "fn": correlation_refresh_job,
     },
     {
@@ -161,15 +170,22 @@ JOB_DEFS = [
 def get_job_list() -> list[dict]:
     result = []
     for j in JOB_DEFS:
+        # `next_run` is computed from the cron string, not read from APScheduler, so it
+        # would happily advertise "tomorrow at 02:00" for a job that is not scheduled
+        # at all. That is the same lie the enabled flag itself used to tell, and it
+        # matters most for exactly the jobs now disabled by default: the screen would
+        # promise a graph load that will never happen.
+        enabled = job_is_enabled(j)
         result.append({
             "id": j["id"],
             "name": j["name"],
             "description": j["description"],
             "schedule": j["schedule"],
-            "schedule_human": j["schedule_human"],
+            "schedule_human": j["schedule_human"] if enabled else "Disabled",
+            "enabled": enabled,
             "status": _job_status.get(j["id"], "idle"),
             "last_run": _job_last_run.get(j["id"]),
-            "next_run": _compute_next_run(j["schedule"]),
+            "next_run": _compute_next_run(j["schedule"]) if enabled else None,
         })
     return result
 
@@ -193,6 +209,31 @@ def _compute_next_run(cron: str) -> str | None:
         return None
 
 
+def job_is_enabled(job: dict) -> bool:
+    """Whether a job should actually be scheduled.
+
+    This function is why `POST /api/ontology/schedule` now means something. It persisted
+    `{cron, enabled}` via save_scheduler_config, but load_scheduler_config had ZERO
+    callers — setup_scheduler read only `lastRun`. So turning a job off in the UI worked
+    until the next task restart, and then silently stopped working.
+
+    Combined with `default_enabled`, this is also what keeps a deployed backend from
+    seeding the knowledge graph: the two graph-writing jobs default to off, and nothing
+    schedules a graph write unless someone turned it on deliberately.
+    """
+    default = bool(job.get("default_enabled", True))
+    try:
+        from src.services.ontology_version_service import load_scheduler_config
+        config = load_scheduler_config(job["id"]) or {}
+    except Exception as exc:                              # noqa: BLE001
+        log.warning("Scheduler: could not read config for %s (%s); using default %s",
+                    job["id"], exc, default)
+        return default
+    if "enabled" not in config:
+        return default
+    return bool(config.get("enabled"))
+
+
 def setup_scheduler(app=None):
     """Wire APScheduler into the FastAPI lifespan.  Non-fatal if APScheduler not installed."""
     # Restore lastRun from DynamoDB so delta_since works across restarts
@@ -206,6 +247,9 @@ def setup_scheduler(app=None):
         from apscheduler.schedulers.background import BackgroundScheduler
         scheduler = BackgroundScheduler(timezone="UTC")
         for job in JOB_DEFS:
+            if not job_is_enabled(job):
+                log.info("Scheduler: %s is disabled — not scheduled", job["id"])
+                continue
             parts = job["schedule"].split()
             scheduler.add_job(
                 job["fn"],

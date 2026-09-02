@@ -102,6 +102,21 @@ def list_connectors(user: dict = Depends(get_current_user)):
         return []
 
 
+def _invalidate_mcp(user_id: str) -> None:
+    """Drop this user's cached MCP tool discovery.
+
+    Without it, a server added or re-pointed here stays invisible to chat for up to the
+    cache TTL — which reads as "the connector does not work" to whoever just added it.
+    Import is local and guarded so the connectors API keeps working even where the
+    optional `mcp` package is absent.
+    """
+    try:
+        from src.mcp_client import invalidate
+        invalidate(user_id)
+    except Exception as exc:                              # noqa: BLE001
+        log.debug("MCP cache invalidate skipped: %s", exc)
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 def create_connector(body: ConnectorCreate, user: dict = Depends(get_current_user)):
@@ -131,7 +146,16 @@ def create_connector(body: ConnectorCreate, user: dict = Depends(get_current_use
         "testStatus": "untested",
         "lastTested": None,
     }
+    if body.type == "mcp":
+        # Allocated once, at registration, and stored. Tool names are built from this
+        # rather than from connectorId, which is a uuid and therefore both too long and
+        # illegal (hyphens) for model tool names — see src/mcp_client/naming.py.
+        from src.mcp_client.naming import slug_for
+        item["mcpSlug"] = slug_for(body.name, connector_id)
+
     db.put_item("user-connectors", item)
+    if body.type == "mcp":
+        _invalidate_mcp(user_id)
     return dict(item, config=_safe_config(item["config"]))
 
 
@@ -163,6 +187,8 @@ def update_connector(connector_id: str, body: ConnectorUpdate, user: dict = Depe
         merged.update(body.config)
         updates["config"] = merged
     updated = db.update_item("user-connectors", {"userId": user_id, "connectorId": connector_id}, updates)
+    if item.get("type") == "mcp":
+        _invalidate_mcp(user_id)
     if updated:
         return dict(updated, config=_safe_config(updated.get("config", {})))
     return {**item, **updates, "config": _safe_config({**item.get("config", {}), **updates.get("config", {})})}
@@ -175,6 +201,8 @@ def delete_connector(connector_id: str, user: dict = Depends(get_current_user)):
     if not item:
         raise HTTPException(status_code=404, detail=f"Connector {connector_id!r} not found")
     db.delete_item("user-connectors", {"userId": user_id, "connectorId": connector_id})
+    if item.get("type") == "mcp":
+        _invalidate_mcp(user_id)
 
 
 @router.post("/{connector_id}/test")
@@ -210,6 +238,19 @@ def test_connector(connector_id: str, user: dict = Depends(get_current_user)):
             s3.head_bucket(Bucket=config.get("bucket", ""))
             success = True
             message = "S3 bucket accessible"
+        elif conn_type == "mcp":
+            # Was falling through to the generic branch below, which reads
+            # baseUrl/instanceUrl — while everything else that touches MCP reads
+            # config["endpoint"]. So this ALWAYS returned "No URL configured", however
+            # the connector was filled in.
+            #
+            # And a liveness ping was never the right test anyway: it proves a web
+            # server exists, not that it speaks MCP. This does a real initialize +
+            # tools/list and reports the tool count, which is what the operator
+            # actually needs to know.
+            from src.mcp_client import health_check
+            success, message = health_check(item)
+
         else:
             # Generic HTTP ping for API / ITSM / project_mgmt connectors
             import urllib.request
@@ -229,6 +270,8 @@ def test_connector(connector_id: str, user: dict = Depends(get_current_user)):
     status = "connected" if success else "failed"
     db.update_item("user-connectors", {"userId": user_id, "connectorId": connector_id},
                    {"testStatus": status, "lastTested": now})
+    if conn_type == "mcp":
+        _invalidate_mcp(user_id)
     return {"success": success, "message": message, "latencyMs": latency_ms}
 
 
