@@ -93,7 +93,12 @@ def capabilities(_: dict = Depends(_READ)):
     # instead of a broken frame.
     return {**service.get_store().capabilities(),
             "opikEnabled": bool(s.opik_enabled),
-            "opikUiUrl": s.opik_ui_url}
+            "opikUiUrl": s.opik_ui_url,
+            # Same reasoning as opikUiUrl: only the infrastructure knows whether the
+            # demo service was actually deployed, so the UI is told rather than
+            # guessing. False hides the trigger button instead of offering one that
+            # would 503.
+            "demoAgentsEnabled": bool(s.demo_agents_url)}
 
 
 @router.get("/traces")
@@ -506,3 +511,77 @@ def set_online_config(body: OnlineConfigRequest, user: dict = Depends(_WRITE)):
 @router.post("/online-eval/run")
 def run_online_sweep(limit: int = 50, _: dict = Depends(_WRITE)):
     return online_eval.run_sweep(limit=limit)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Demo agents
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEMO_AGENTS = ["rag", "tools", "chat", "flaky"]
+
+
+@router.post("/demo/run")
+def run_demo_agents(agent: str = Query("all"), count: int = Query(1, ge=1, le=5),
+                    _: dict = Depends(_WRITE)):
+    """Make the demo agents produce traces now.
+
+    A thin forwarder to the demo service over Service Connect, and thin on purpose:
+    it adds NO new nginx route, NO new listener and NO new gate. The demo container is
+    reachable only from the backend's security group, so this endpoint — already behind
+    Aura's own auth and `dev_workspace` — is the single way in.
+
+    Returns 503 rather than 500 when the service is absent, because "the demo agents
+    are not deployed here" is a configuration answer, not a fault.
+    """
+    from src.config_settings import get_settings
+    import httpx
+
+    base = (get_settings().demo_agents_url or "").rstrip("/")
+    if not base:
+        raise HTTPException(status_code=503,
+                            detail="Demo agents are not deployed in this environment")
+    if agent != "all" and agent not in DEMO_AGENTS:
+        raise HTTPException(status_code=400,
+                            detail=f"Unknown agent {agent!r}; valid: {DEMO_AGENTS} or 'all'")
+
+    # Generous timeout: a burst of five rounds across four agents is twenty real model
+    # calls, and the endpoint deliberately waits for the SDK flush so the caller can
+    # refresh immediately and actually see the rows.
+    #
+    # This only works because ECS Service Connect's per-request timeout is disabled for
+    # these services (infra/ecs.tf). Its 15s DEFAULT cut the call off with a 504 from a
+    # hop that appears in no application log.
+    try:
+        response = httpx.post(f"{base}/run/{agent}", params={"count": count}, timeout=280.0)
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as exc:
+        log.warning("demo trigger rejected by the agent service: %s", exc)
+        raise HTTPException(status_code=exc.response.status_code,
+                            detail=exc.response.text[:300]) from exc
+    except Exception as exc:                       # noqa: BLE001
+        log.warning("demo trigger failed: %s", exc)
+        raise HTTPException(status_code=502,
+                            detail=f"Could not reach the demo agents: {exc}") from exc
+
+
+@router.get("/demo/status")
+def demo_agents_status(_: dict = Depends(_READ)):
+    """What each demo agent has done, for the pre-demo health check.
+
+    Never raises: this is the endpoint someone opens when they suspect the demo is
+    broken, and it answering with a 500 would tell them nothing.
+    """
+    from src.config_settings import get_settings
+    import httpx
+
+    base = (get_settings().demo_agents_url or "").rstrip("/")
+    if not base:
+        return {"deployed": False, "agents": {}}
+    try:
+        response = httpx.get(f"{base}/status", timeout=10.0)
+        response.raise_for_status()
+        return {"deployed": True, **response.json()}
+    except Exception as exc:                       # noqa: BLE001
+        return {"deployed": True, "reachable": False, "error": str(exc)[:200],
+                "agents": {}}

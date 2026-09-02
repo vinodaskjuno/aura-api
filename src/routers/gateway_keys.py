@@ -35,6 +35,14 @@ _VALID_TOOL_LABELS = {
     # of these and gets a key it can paste into the Opik SDK or a raw OTel exporter.
     # Separate labels so usage can be attributed per integration style.
     "opik-sdk", "otel-sdk",
+    # Demo agents (aura-infra/demo-agents). One label per agent, plus one for the
+    # shared trace export, so that revoking a single agent's key is a one-agent event
+    # rather than taking the whole demo down — which is a failure drill in
+    # DEMO_AGENTS.md, not just a claim. They are listed here because this allowlist is
+    # what get_or_create_tool_key validates against: without an entry, provisioning a
+    # key for an agent fails with "Unknown tool_label" and the agent silently falls
+    # back to synthetic spans.
+    "demo-rag", "demo-tools", "demo-chat", "demo-flaky", "demo-traces",
 }
 
 

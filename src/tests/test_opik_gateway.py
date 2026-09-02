@@ -137,6 +137,81 @@ def test_closing_the_session_clears_the_cookie():
     assert "path=/" in header
 
 
+# ── The gate, for SDKs and CI ─────────────────────────────────────────────────
+# A browser can only present a cookie; a navigation cannot carry an Authorization
+# header. An SDK is the mirror image — it has no cookie and presents a key. The
+# Onboard tab GENERATES snippets that do exactly that, so if these fail, the
+# documented onboarding path is broken for every customer who follows it.
+
+def _key_for(style: str = "opik-sdk", project: str = "demo") -> str:
+    res = client.post("/api/ai-observability/onboarding",
+                      json={"style": style, "projectName": project})
+    assert res.status_code == 200, res.text
+    key = res.json()["apiKey"]
+    assert key.startswith("gw-"), f"expected a plaintext key on creation, got {key!r}"
+    return key
+
+
+def test_authz_accepts_a_gateway_key_via_bearer(fake_dynamo):
+    """The regression this fix exists for: a key minted by the Onboard tab,
+    presented the way its own snippet says to, used to come back 401."""
+    _as(DEV)
+    key = _key_for()
+    res = client.get(AUTHZ, headers={"Authorization": f"Bearer {key}"})
+    assert res.status_code == 204
+    assert res.headers["Comet-Workspace"] == "default"
+
+
+def test_authz_accepts_a_gateway_key_via_x_api_key(fake_dynamo):
+    """The `anthropic` SDK sends x-api-key, not Authorization."""
+    _as(DEV)
+    key = _key_for()
+    assert client.get(AUTHZ, headers={"x-api-key": key}).status_code == 204
+
+
+def test_authz_accepts_a_bare_authorization_token(fake_dynamo):
+    """The Opik SDK sends `Authorization: <key>` with NO Bearer scheme. Unusual
+    enough that it is worth pinning — this is the header the demo agents send."""
+    _as(DEV)
+    key = _key_for()
+    assert client.get(AUTHZ, headers={"Authorization": key}).status_code == 204
+
+
+def test_authz_denies_a_revoked_key(fake_dynamo):
+    """Revocation has to actually close the door: a key is a long-lived credential
+    for an unauthenticated Opik, and deactivating it is the only way to withdraw it."""
+    _as(DEV)
+    key = _key_for()
+    assert client.get(AUTHZ, headers={"x-api-key": key}).status_code == 204
+    from src.config_settings import get_settings
+    for row in fake_dynamo.tables[get_settings().gateway_keys_table]:
+        row["active"] = False
+    assert client.get(AUTHZ, headers={"x-api-key": key}).status_code == 401
+
+
+def test_authz_denies_a_key_whose_role_lacks_dev_workspace(fake_dynamo):
+    """A key must never be a WIDER grant than a browser session. The cookie is
+    only minted for dev_workspace holders, so the key path checks the same thing."""
+    _as(DEV)
+    key = _key_for()
+    # resolve_credential reads the role off the users table, not off the key —
+    # so demoting the user is what withdraws the key's access.
+    fake_dynamo.put_item("users", {"userId": "u-dev", "username": "dev",
+                                   "roleId": "user_ops"})
+    assert client.get(AUTHZ, headers={"x-api-key": key}).status_code == 401
+
+
+def test_authz_denies_a_made_up_key(fake_dynamo):
+    _as(DEV)
+    assert client.get(AUTHZ, headers={"x-api-key": "gw-nope"}).status_code == 401
+
+
+def test_authz_still_denies_when_nothing_is_presented(fake_dynamo):
+    """Guard against the fallback turning the gate into a no-op."""
+    _as(DEV)
+    assert client.get(AUTHZ).status_code == 401
+
+
 # ── Onboarding ────────────────────────────────────────────────────────────────
 
 def test_onboarding_provisions_a_key_and_returns_a_snippet(fake_dynamo):
@@ -218,3 +293,16 @@ def test_snippets_never_leak_a_placeholder_when_a_real_key_exists(fake_dynamo):
     if body["isNewKey"]:
         assert body["apiKey"] in configure["code"]
         assert "<your key>" not in configure["code"]
+
+
+def test_the_demo_agents_labels_are_provisionable(fake_dynamo):
+    """Each demo agent needs its OWN key, which means its own tool label.
+
+    The labels are an allowlist, so an agent whose label is missing cannot be
+    provisioned at all — it fails with "Unknown tool_label" and then runs on synthetic
+    spans, which looks like a working demo producing cheap traces. Pinned here because
+    that failure is quiet and the demo is exactly where quiet failures hurt.
+    """
+    from src.routers.gateway_keys import _VALID_TOOL_LABELS
+    for label in ("demo-rag", "demo-tools", "demo-chat", "demo-flaky", "demo-traces"):
+        assert label in _VALID_TOOL_LABELS, f"{label} cannot be provisioned"

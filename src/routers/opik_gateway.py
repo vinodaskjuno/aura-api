@@ -114,29 +114,66 @@ def close_opik_session() -> Response:
     return response
 
 
+def _allow(username: str) -> Response:
+    """204, plus the context Opik wants.
+
+    OSS Opik has a single workspace, but it does read these headers — and echoing the
+    real Aura user makes its created_by/last_updated_by columns meaningful instead of
+    always saying "admin".
+    """
+    return Response(status_code=204, headers={
+        "Comet-Workspace": "default",
+        "X-Aura-User": (username or "")[:120],
+    })
+
+
 @router.get("/opik-authz")
 def opik_authz(request: Request) -> Response:
     """nginx `auth_request` target. 204 to allow, 401 to deny.
 
-    Returns no body on purpose: nginx discards it, and anything written here would
-    just be latency on every single asset request for the embedded UI.
+    TWO kinds of caller, and both have to work:
+
+      1. A BROWSER loading the embedded UI. It can only present a cookie, because a
+         navigation cannot carry an Authorization header.
+      2. An SDK or CI job. It has no cookie and presents a `gw-` key or an Aura JWT —
+         which is exactly what the Onboard tab's generated snippets tell people to do.
+
+    Only (1) used to be handled, which meant the DOCUMENTED onboarding path was broken:
+    every customer following the generated `opik-sdk` snippet got 401s, with no clue
+    why. Verified against dev before the fix: no credential, `Authorization: Bearer gw-…`
+    and `x-api-key: gw-…` all returned 401.
+
+    Returns no body either way: nginx discards it, and this endpoint is hit once per
+    asset of the embedded UI, so anything written here is pure latency.
     """
     # Reached as an nginx `auth_request` subrequest, which inherits the original
-    # request's headers — Cookie included. Also callable directly by the SPA to check
-    # whether a session is still live.
+    # request's headers — Cookie, Authorization and x-api-key alike. Also callable
+    # directly by the SPA to check whether a session is still live.
     token = request.cookies.get(COOKIE_NAME, "")
     claims = _verify(token) if token else None
-    if not claims:
-        # Not logged as a warning: an expired cookie is the normal path, and this
-        # endpoint is hit once per asset.
+    if claims:
+        return _allow(str(claims.get("sub", "")))
+
+    # ── SDK / CI path ────────────────────────────────────────────────────────
+    # Reuses the same credential resolution the gateway and the OTLP receiver use, so
+    # a key means the same thing everywhere and there is only one place to revoke it.
+    try:
+        from src.services.gateway_service import extract_credential, resolve_credential
+        user = resolve_credential(extract_credential(request))
+    except Exception:
+        # Both helpers RAISE HTTPException(401) rather than returning falsy, and a
+        # missing header raises too. Swallowed deliberately: an absent or expired
+        # credential is the normal path here, not an incident.
         return Response(status_code=401)
-    return Response(status_code=204, headers={
-        # Handed to Opik as its workspace/user context. OSS Opik has one workspace,
-        # but it does read these headers, and echoing the Aura user makes its
-        # created_by/last_updated_by columns meaningful instead of always "admin".
-        "Comet-Workspace": "default",
-        "X-Aura-User": str(claims.get("sub", ""))[:120],
-    })
+
+    # A key must never be a WIDER grant than a browser session. The cookie is only
+    # minted for callers holding dev_workspace (see open_opik_session), so the key
+    # path checks the same permission rather than trusting the key alone.
+    if "dev_workspace" not in (user.permissions or []):
+        log.warning("opik-authz: %r resolved but lacks dev_workspace", user.username)
+        return Response(status_code=401)
+
+    return _allow(user.username)
 
 
 # ── Onboarding ────────────────────────────────────────────────────────────────

@@ -292,3 +292,101 @@ def test_no_opik_url_when_the_stack_is_disabled(store, monkeypatch):
     body = client.get(f"{BASE}/capabilities").json()
     assert body["opikEnabled"] is False
     assert body["opikUiUrl"] == ""
+
+
+# ── Demo agents ───────────────────────────────────────────────────────────────
+# The trigger is a forwarder to a service that only exists in a demo environment.
+# What matters is that it is inert and honest everywhere else, rather than 500ing.
+
+class _StubResponse:
+    def __init__(self, payload): self._payload = payload
+    def raise_for_status(self): pass
+    def json(self): return self._payload
+
+
+def test_demo_run_is_503_when_no_demo_service_is_configured(monkeypatch):
+    """Not deployed is a CONFIGURATION answer, not a fault. 503 tells the UI to hide
+    the button; a 500 would send someone hunting for a bug that does not exist."""
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "", raising=False)
+    _as(ALICE)
+    res = client.post(f"{BASE}/demo/run")
+    assert res.status_code == 503
+    assert "not deployed" in res.json()["detail"].lower()
+
+
+def test_demo_run_forwards_agent_and_count(monkeypatch):
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "http://demo-agents:8080",
+                        raising=False)
+    seen = {}
+
+    def fake_post(url, params=None, timeout=None):
+        seen.update(url=url, params=params)
+        return _StubResponse({"triggered": ["rag"], "count": 3})
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    _as(ALICE)
+    res = client.post(f"{BASE}/demo/run", params={"agent": "rag", "count": 3})
+    assert res.status_code == 200
+    assert seen["url"] == "http://demo-agents:8080/run/rag"
+    assert seen["params"] == {"count": 3}
+
+
+def test_demo_run_rejects_an_unknown_agent(monkeypatch):
+    """Caught here rather than forwarded, so a typo is a 400 with the valid list
+    instead of a 404 from a service the caller cannot see."""
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "http://demo-agents:8080",
+                        raising=False)
+    _as(ALICE)
+    res = client.post(f"{BASE}/demo/run", params={"agent": "nope"})
+    assert res.status_code == 400
+    assert "rag" in res.json()["detail"]
+
+
+def test_demo_run_caps_the_burst_size(monkeypatch):
+    """A button that can be clicked forty times is a button that will be."""
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "http://demo-agents:8080",
+                        raising=False)
+    _as(ALICE)
+    assert client.post(f"{BASE}/demo/run", params={"count": 99}).status_code == 422
+
+
+def test_demo_run_reports_an_unreachable_service_as_502(monkeypatch):
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "http://demo-agents:8080",
+                        raising=False)
+
+    def boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("httpx.post", boom)
+    _as(ALICE)
+    res = client.post(f"{BASE}/demo/run")
+    assert res.status_code == 502
+    assert "connection refused" in res.json()["detail"]
+
+
+def test_demo_status_never_raises_when_the_service_is_down(monkeypatch):
+    """This is the endpoint someone opens BECAUSE they think the demo is broken.
+    Answering with a 500 would tell them nothing."""
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "http://demo-agents:8080",
+                        raising=False)
+
+    def boom(*a, **k):
+        raise RuntimeError("timed out")
+
+    monkeypatch.setattr("httpx.get", boom)
+    _as(ALICE)
+    body = client.get(f"{BASE}/demo/status").json()
+    assert body["deployed"] is True and body["reachable"] is False
+
+
+def test_capabilities_reports_demo_agents_off_by_default(monkeypatch):
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "demo_agents_url", "", raising=False)
+    _as(ALICE)
+    assert client.get(f"{BASE}/capabilities").json()["demoAgentsEnabled"] is False

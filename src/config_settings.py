@@ -163,6 +163,16 @@ class Settings(BaseSettings):
     # aiobs_store so a deployment can backfill Opik before trusting it to read.
     aiobs_forward_otlp: bool = False
 
+    # Demo agents (aura-infra/demo-agents): four standalone agents producing continuous
+    # traffic so the observability screens are never empty. Reached over ECS Service
+    # Connect, which is why this is a plain internal address and not an ALB path —
+    # exposing a demo trigger on the public listener would mean another target group,
+    # another listener rule and another auth surface, for a button.
+    #
+    # Empty disables the forwarder, which is the correct default: no environment should
+    # have a demo trigger it did not ask for.
+    demo_agents_url: str = ""
+
     # ── App ───────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
     app_env: str = "development"                    # development | staging | production
