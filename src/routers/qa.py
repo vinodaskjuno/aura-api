@@ -18,21 +18,6 @@ log = logging.getLogger(__name__)
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
-class GenerateTestsRequest(BaseModel):
-    project_id: str
-    test_types: list[str] = ["playwright_ui", "api", "integration", "regression", "negative", "boundary"]
-    coverage_target: int = 80
-    focus_areas: list[str] = []
-
-
-class RunTestsRequest(BaseModel):
-    run_id: str | None = None
-    # Without this the run is stored under projectId "default" and never appears in
-    # the project's suites list — the results simply vanish.
-    project_id: str | None = None
-    test_types: list[str] = []
-
-
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/projects")
@@ -86,49 +71,16 @@ def get_test_suites(project_id: str, user: dict = Depends(require_permission("qa
     return runs
 
 
-@router.post("/generate")
-async def generate_tests(req: GenerateTestsRequest,
-                          user: dict = Depends(require_permission("qa_workspace"))):
-    """Trigger TestGenerationAgent for a project."""
-    from src.agents.base_agent import AgentContext
-    from src.agents.test_generation_agent import TestGenerationAgent
-    from src.agents.code_analysis_agent import CodeAnalysisAgent
-
-    project = get_item_by_pk("projects", req.project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    session_id = str(uuid.uuid4())
-    context = AgentContext(
-        user_id=user["userId"],
-        username=user["username"],
-        role=user["role"],
-        intent=f"Generate tests: {', '.join(req.test_types)} for project {req.project_id}",
-        project_id=req.project_id,
-        session_id=session_id,
-        extra={"test_types": req.test_types, "coverage_target": req.coverage_target,
-               "focus_areas": req.focus_areas},
-    )
-
-    # Load prior code analysis if available
-    kg = get_json("analysis", f"{req.project_id}/code_analysis.json")
-    if kg:
-        from src.agents.base_agent import AgentResult
-        mock_analysis = AgentResult(agent_name="code_analysis_agent")
-        mock_analysis.output = kg
-        context.prior_results["code_analysis_agent"] = mock_analysis
-
-    agent = TestGenerationAgent()
-    result = await agent.run(context)
-
-    return {
-        "run_id": result.output.get("run_id"),
-        "suites": result.output.get("suites", 0),
-        "total_tests": result.output.get("total_tests", 0),
-        "artifacts": result.output.get("artifacts", []),
-        "status": result.status,
-        "log": result.activity_log,
-    }
+@router.get("/runs/{run_id}")
+def get_run_detail(run_id: str, user: dict = Depends(require_permission("qa_workspace"))):
+    """Get full detail of a test run."""
+    # query_items on the partition key, not a table scan: the previous
+    # scan_items(limit=500) both cost a full scan per request and made any run past
+    # the first 500 items unfindable.
+    run = get_item_by_pk("test-results", run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 def _s3_key(uri: str) -> str:
@@ -144,52 +96,6 @@ def _s3_key(uri: str) -> str:
     rest = uri[len("s3://"):]
     bucket, _, key = rest.partition("/")
     return key or rest
-
-
-@router.post("/run")
-async def run_tests(req: RunTestsRequest,
-                     user: dict = Depends(require_permission("qa_workspace"))):
-    """Execute tests for a given run_id (artifacts from TestGenerationAgent)."""
-    from src.agents.base_agent import AgentContext, AgentResult, S3Ref
-    from src.agents.test_execution_agent import TestExecutionAgent
-
-    # project_id was omitted, so every re-run was written under projectId "default"
-    # and never appeared in GET /projects/{id}/suites — the results were invisible.
-    context = AgentContext(
-        user_id=user["userId"],
-        username=user["username"],
-        role=user["role"],
-        intent="Execute test suite",
-        project_id=req.project_id,
-        session_id=str(uuid.uuid4()),
-    )
-
-    # Build mock prior result if run_id given
-    if req.run_id:
-        matching = get_item_by_pk("test-results", req.run_id)
-        if matching:
-            mock_gen = AgentResult(agent_name="test_generation_agent")
-            mock_gen.artifacts = [
-                S3Ref(bucket="test-artifacts", key=_s3_key(a), uri=a)
-                for a in matching.get("artifacts", [])
-            ]
-            context.prior_results["test_generation_agent"] = mock_gen
-
-    agent = TestExecutionAgent()
-    result = await agent.run(context)
-    return result.output
-
-
-@router.get("/runs/{run_id}")
-def get_run_detail(run_id: str, user: dict = Depends(require_permission("qa_workspace"))):
-    """Get full detail of a test run."""
-    # query_items on the partition key, not a table scan: the previous
-    # scan_items(limit=500) both cost a full scan per request and made any run past
-    # the first 500 items unfindable.
-    run = get_item_by_pk("test-results", run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return run
 
 
 @router.get("/runs/{run_id}/artifacts")
@@ -250,130 +156,22 @@ def get_run_artifacts(run_id: str, user: dict = Depends(require_permission("qa_w
 
 @router.get("/activity")
 def get_qa_activity(user: dict = Depends(require_permission("qa_workspace"))):
-    """Return QA-related activity for this user."""
+    """QA activity for this user.
+
+    `test_generation_agent` and `test_execution_agent` are kept in the filter for
+    HISTORY only: the LLM test-generation flow that drove them has been removed, so
+    nothing writes new rows under those names. They stay because deleting them would
+    hide runs a user really did make, and re-adding a name later is worse than
+    carrying two dead strings with a comment saying so.
+    """
     all_activity = scan_items("activity", limit=500)
-    qa_agents = {"test_generation_agent", "test_execution_agent"}
+    qa_agents = {"test_generation_agent", "test_execution_agent", "qatest"}
     relevant = [
         a for a in all_activity
         if a.get("userId") == user["userId"] and a.get("agent") in qa_agents
     ]
     relevant.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return relevant[:100]
-
-
-# ── WebSocket: live test generation progress ──────────────────────────────────
-
-@router.websocket("/ws/generate")
-async def ws_generate(ws: WebSocket):
-    """
-    WebSocket for real-time test generation progress.
-    Client sends: {"token": "...", "project_id": "...", "test_types": [...]}
-    Server streams: progress | artifact | done | error events
-    """
-    await ws.accept()
-    try:
-        data = await ws.receive_json()
-        from src.services.auth_service import verify_token
-        user = verify_token(data.get("token", ""))
-        if not user:
-            await ws.send_json({"type": "error", "message": "Unauthorized"})
-            return
-
-        project_id = data.get("project_id", "")
-        test_types = data.get("test_types", ["playwright_ui", "api", "integration"])
-
-        await ws.send_json({"type": "status", "message": "Loading project knowledge graph..."})
-
-        from src.agents.base_agent import AgentContext, AgentResult
-        from src.agents.test_generation_agent import TestGenerationAgent
-
-        context = AgentContext(
-            user_id=user["userId"],
-            username=user["username"],
-            role=user["role"],
-            intent=f"Generate {', '.join(test_types)} tests",
-            project_id=project_id,
-            session_id=str(uuid.uuid4()),
-            extra={"test_types": test_types},
-        )
-
-        # Load analysis context — non-blocking S3 fetch
-        loop = asyncio.get_running_loop()
-        kg = await loop.run_in_executor(
-            None, lambda: get_json("analysis", f"{project_id}/code_analysis.json")
-        )
-        if kg:
-            mock = AgentResult(agent_name="code_analysis_agent")
-            mock.output = kg
-            context.prior_results["code_analysis_agent"] = mock
-            tech_count = len(kg.get("tech_stack", []))
-            await ws.send_json({"type": "status",
-                                "message": f"Knowledge graph loaded — {tech_count} tech stack items found"})
-        else:
-            await ws.send_json({"type": "status",
-                                "message": "No prior analysis found — generating tests from project metadata"})
-
-        await ws.send_json({"type": "status",
-                            "message": f"Starting AI generation for {len(test_types)} test suite type(s)..."})
-
-        # Run agent with heartbeat every 5 s + hard 180 s timeout
-        agent = TestGenerationAgent()
-
-        async def _heartbeat():
-            elapsed = 0
-            while True:
-                await asyncio.sleep(5)
-                elapsed += 5
-                try:
-                    await ws.send_json({"type": "progress",
-                                        "message": f"Generating tests... ({elapsed}s elapsed)"})
-                except Exception:
-                    break
-
-        heartbeat_task = asyncio.create_task(_heartbeat())
-        try:
-            result = await asyncio.wait_for(agent.run(context), timeout=180.0)
-        except asyncio.TimeoutError:
-            heartbeat_task.cancel()
-            await ws.send_json({
-                "type": "error",
-                "message": (
-                    "Test generation timed out after 3 minutes. "
-                    "Bedrock may be slow or unavailable. "
-                    "Template tests were not saved — please retry."
-                ),
-            })
-            return
-        finally:
-            heartbeat_task.cancel()
-
-        # Stream activity log as progress
-        for log_line in result.activity_log:
-            await ws.send_json({"type": "progress", "message": log_line})
-
-        # Stream artifacts
-        for artifact in result.artifacts:
-            await ws.send_json({
-                "type": "artifact",
-                "uri": artifact.uri,
-                "filename": artifact.key.split("/")[-1],
-            })
-
-        await ws.send_json({
-            "type": "done",
-            "runId": result.output.get("run_id"),
-            "suites": result.output.get("suites", 0),
-            "totalTests": result.output.get("total_tests", 0),
-            "status": result.status,
-        })
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        try:
-            await ws.send_json({"type": "error", "message": str(exc)})
-        except Exception:
-            pass
 
 
 # ── Local test execution (podman emulators + Playwright, evidence in S3) ─────

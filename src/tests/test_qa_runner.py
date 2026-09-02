@@ -792,3 +792,43 @@ def test_a_countless_heartbeat_does_not_zero_real_counts(fake_dynamo):
     assert stored["totalPassed"] == 4, "real counts must survive a countless heartbeat"
     assert stored["totalCases"] == 12
     assert stored["phase"] == "evidence", "the phase must still advance"
+
+
+# ── The generation flow is gone ───────────────────────────────────────────────
+# Removed, not hidden. It wrote test-case FILES with an LLM and then ran pytest in the
+# container — a second, unrelated test suite that shared the word "execute" with the
+# run button and was routinely mistaken for it.
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/generate"),
+    ("post", "/run"),
+])
+def test_generation_endpoints_are_gone(method, path):
+    from src.main import app
+
+    routes = {(r.path, m) for r in app.routes
+              for m in getattr(r, "methods", set()) or set()}
+    assert (f"/api/qa{path}", method.upper()) not in routes
+
+
+def test_the_generation_websocket_is_gone():
+    from src.main import app
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/api/qa/ws/generate" not in paths
+
+
+def test_the_local_run_websocket_survives():
+    """Removing the generation flow must not take the local synchronous run with it —
+    it is still the right experience when the backend and the runner are one machine."""
+    from src.main import app
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/api/qa/ws/local-run" in paths
+
+
+def test_s3_key_helper_survived_the_removal():
+    """It lived inside the removed block but the artifacts endpoint still uses it —
+    deleting it broke test collection with an ImportError."""
+    from src.routers.qa import _s3_key
+
+    assert _s3_key("s3://aura-123-test-artifacts/p1/r1/a.png") == "p1/r1/a.png"
+    assert _s3_key("p1/r1/a.png") == "p1/r1/a.png"
