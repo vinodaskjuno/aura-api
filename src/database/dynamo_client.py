@@ -470,9 +470,22 @@ TABLE_SCHEMAS = [
         "gsis": [
             {"index": "entityId-timestamp-index", "pk": "entityId", "sk": "timestamp"},
             {"index": "actor-timestamp-index",    "pk": "actor",    "sk": "timestamp"},
+            # "what did this run change?" — the Run Inspector's entity list. Without
+            # it that answer is a full scan filtered client-side.
+            {"index": "runId-timestamp-index",    "pk": "runId",    "sk": "timestamp"},
         ],
     },
-    {"name": "ontology-versions", "pk": "versionId", "sk": None},
+    {
+        # Ingestion runs. `feed` is a constant ("all") carried on every row purely
+        # so the newest-first listing is a query against one partition rather than a
+        # scan — DynamoDB has no other way to order a whole table.
+        "name": "ontology-versions",
+        "pk": "versionId",
+        "sk": None,
+        "gsis": [
+            {"index": "feed-startedAt-index", "pk": "feed", "sk": "startedAt"},
+        ],
+    },
     # ── LLM-application observability (AI Observability surface) ────────────
     # Traces are keyed by project and sorted by start time so the list view pages
     # newest-first without a scan. traceId gets its own GSI because a client
@@ -621,6 +634,7 @@ def build_changelog_entry(
     source: str = "api",
     notes: str = "",
     external_id: str | None = None,
+    entity_kind: str = "node",
 ) -> dict:
     """Build one changelog row.
 
@@ -636,10 +650,17 @@ def build_changelog_entry(
     the other. externalId is deterministic and identical everywhere. The engine id
     is still recorded in `elementId` so a row can be traced back to the node it was
     written against.
+
+    Run attribution (`runId`, `pipeline`, `trigger`, `sourceDetail`, `writtenBy`) is
+    read from the ambient trace context rather than taken as parameters, so every
+    existing caller starts writing it without being edited — the same reason
+    `graph/provenance.py` uses a ContextVar in the first place.
     """
     import json as _json
     import uuid as _uuid
     from datetime import datetime as _dt, timezone as _tz
+    from src.graph import provenance
+    ctx = provenance.current()
     return {
         "changeId": str(_uuid.uuid4()),
         "timestamp": _dt.now(_tz.utc).isoformat(),
@@ -657,6 +678,13 @@ def build_changelog_entry(
         "source": source,
         "notes": notes,
         "externalId": external_id,
+        "entityKind": entity_kind,
+        # Attribution, from the ambient trace context.
+        "runId": ctx.runId,
+        "pipeline": ctx.pipeline,
+        "trigger": ctx.trigger,
+        "sourceDetail": ctx.sourceDetail,
+        "writtenBy": ctx.writtenBy,
     }
 
 

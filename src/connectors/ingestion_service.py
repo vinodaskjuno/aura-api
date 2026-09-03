@@ -243,36 +243,65 @@ def _link_finding_by_hostname(finding_id: str, hostname: str):
 # ── Full load orchestrator ────────────────────────────────────────────────────
 
 def run_full_load(delta_since: str | None = None) -> dict:
-    """Run ingestion from all mock MCP sources sequentially."""
+    """Run ingestion from all mock MCP sources sequentially.
+
+    `ensure_run` rather than `trace_run`: the loader route already opens a run and
+    should own these writes, but the scheduled delta job and the demo seeder call
+    this directly, and those must not write unattributed.
+    """
     if not neo4j.is_available():
         return {"error": "Neo4j is not available. Set neo4j_enabled=true in .env and ensure Neo4j is running."}
+
+    from src.graph import provenance
 
     neo4j.ensure_schema()
     started_at = datetime.now(timezone.utc).isoformat()
     results: dict[str, Any] = {"started_at": started_at}
 
-    try:
-        results["git"] = ingest_git()
-    except Exception as exc:
-        log.exception("Git ingestion failed")
-        results["git"] = {"error": str(exc)}
+    with provenance.ensure_run(
+        provenance.PIPELINE_MCP,
+        trigger=provenance.TRIGGER_SYSTEM,
+        source="mock_mcp",
+        sourceDetail="synthetic generator (git, servicenow, wiz)",
+        writtenBy="connectors.ingestion_service.run_full_load",
+    ):
+        # Each source names itself, so a node keeps the specific origin
+        # ("servicenow_cmdb") while the run says which load produced it.
+        try:
+            results["git"] = ingest_git()
+        except Exception as exc:
+            log.exception("Git ingestion failed")
+            results["git"] = {"error": str(exc)}
+            provenance.note_error(f"git: {exc}")
 
-    try:
-        results["servicenow"] = ingest_servicenow(delta_since=delta_since)
-    except Exception as exc:
-        log.exception("ServiceNow ingestion failed")
-        results["servicenow"] = {"error": str(exc)}
+        try:
+            results["servicenow"] = ingest_servicenow(delta_since=delta_since)
+        except Exception as exc:
+            log.exception("ServiceNow ingestion failed")
+            results["servicenow"] = {"error": str(exc)}
+            provenance.note_error(f"servicenow: {exc}")
 
-    try:
-        results["wiz"] = ingest_wiz()
-    except Exception as exc:
-        log.exception("Wiz ingestion failed")
-        results["wiz"] = {"error": str(exc)}
+        try:
+            results["wiz"] = ingest_wiz()
+        except Exception as exc:
+            log.exception("Wiz ingestion failed")
+            results["wiz"] = {"error": str(exc)}
+            provenance.note_error(f"wiz: {exc}")
 
-    # Run correlation after all data is loaded
+    # Run correlation after all data is loaded. Nested so the inferred IS_SAME_AS /
+    # CORRELATES_WITH edges are attributed to correlation rather than to whichever
+    # connector happened to load last — they are derived, not observed.
     try:
         from src.connectors.correlation_engine import run_correlation
-        results["correlation"] = run_correlation()
+        from src.graph import provenance
+        with provenance.trace_run(
+            provenance.PIPELINE_CORRELATION,
+            trigger=provenance.TRIGGER_AUTOMATIC,
+            source="correlation",
+            writtenBy="connectors.correlation_engine",
+            notes="Post-load entity correlation",
+        ):
+            results["correlation"] = run_correlation()
     except Exception as exc:
         log.exception("Correlation failed")
         results["correlation"] = {"error": str(exc)}

@@ -206,14 +206,35 @@ def ingest_service_endpoint(
     job_id = str(uuid.uuid4())
     _JOBS[job_id] = {"status": "running", "log": [], "result": None, "startedAt": datetime.now(timezone.utc).isoformat()}
 
+    # Captured now, used on the worker thread. The request's identity does not
+    # travel there on its own, and without it every node this writes would be
+    # attributed to nobody.
+    actor = user.get("username", "")
+    actor_id = user.get("userId", "")
+    repo_urls = ", ".join(r.get("url", "") for r in repos if r.get("url"))
+
     def run():
+        from src.graph import provenance
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            from src.services.repo_ingestion_service import ingest_service
-            result = loop.run_until_complete(
-                ingest_service(project_id, service_id, item["name"], repos)
-            )
+            # The run is opened INSIDE the thread, not around the spawn: the
+            # endpoint returns immediately, so a block wrapping the spawn would
+            # close the run record before the ingestion had written anything.
+            with provenance.trace_run(
+                provenance.PIPELINE_GIT,
+                trigger=provenance.TRIGGER_MANUAL,
+                actor=actor, actorId=actor_id,
+                source="git-repo-loader",
+                sourceDetail=repo_urls or item["name"],
+                projectId=project_id,
+                writtenBy="repo_ingestion_service.ingest_service",
+                notes=f"Service ingest: {item['name']}",
+            ):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                from src.services.repo_ingestion_service import ingest_service
+                result = loop.run_until_complete(
+                    ingest_service(project_id, service_id, item["name"], repos)
+                )
             _JOBS[job_id]["status"] = "done"
             _JOBS[job_id]["result"] = result
             _JOBS[job_id]["log"] = result.get("log", [])
@@ -263,24 +284,46 @@ def ingest_all_services(
     job_id = str(uuid.uuid4())
     _JOBS[job_id] = {"status": "running", "log": [], "result": None, "startedAt": datetime.now(timezone.utc).isoformat()}
 
-    def run_all():
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            from src.services.repo_ingestion_service import ingest_service, correlate_services
-            all_stats: list[dict] = []
-            for svc in services:
-                repos = svc.get("repos", [])
-                if not repos:
-                    continue
-                result = loop.run_until_complete(
-                    ingest_service(project_id, svc["serviceId"], svc["name"], repos)
-                )
-                all_stats.append(result)
-                _JOBS[job_id]["log"].extend(result.get("log", []))
+    actor = user.get("username", "")
+    actor_id = user.get("userId", "")
 
-            # Cross-service correlation
-            corr = correlate_services(project_id)
+    def run_all():
+        from src.graph import provenance
+        try:
+            with provenance.trace_run(
+                provenance.PIPELINE_GIT,
+                trigger=provenance.TRIGGER_MANUAL,
+                actor=actor, actorId=actor_id,
+                source="git-repo-loader",
+                sourceDetail=f"{len(services)} services in {project_id}",
+                projectId=project_id,
+                writtenBy="repo_ingestion_service.ingest_all",
+                notes="Ingest all services + cross-service correlation",
+            ):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                from src.services.repo_ingestion_service import ingest_service, correlate_services
+                all_stats: list[dict] = []
+                for svc in services:
+                    repos = svc.get("repos", [])
+                    if not repos:
+                        continue
+                    result = loop.run_until_complete(
+                        ingest_service(project_id, svc["serviceId"], svc["name"], repos)
+                    )
+                    all_stats.append(result)
+                    _JOBS[job_id]["log"].extend(result.get("log", []))
+
+                # Cross-service correlation. Nested so it is a distinguishable
+                # child run — it infers edges rather than reading a repo, and the
+                # trace should say so.
+                with provenance.trace_run(
+                    provenance.PIPELINE_CORRELATION,
+                    trigger=provenance.TRIGGER_AUTOMATIC,
+                    source="correlation",
+                    writtenBy="repo_ingestion_service.correlate_services",
+                ):
+                    corr = correlate_services(project_id)
             _JOBS[job_id]["log"].append(f"Correlation: {corr.get('rels_added', 0)} cross-service relationships added")
             _JOBS[job_id]["status"] = "done"
             _JOBS[job_id]["result"] = {"services": all_stats, "correlation": corr}

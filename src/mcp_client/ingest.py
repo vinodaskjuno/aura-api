@@ -130,6 +130,32 @@ def ingest_from_mcp(
         return {"nodes_added": 0, "rels_added": 0, "skipped": 0,
                 "sources": [], "errors": ["no MCP servers selected"]}
 
+    from src.graph import provenance
+
+    # ensure_run: the Data Loader route already opens a run and should own these
+    # writes; anything calling this directly must still be attributed.
+    server_names = ", ".join(sv.name for sv in servers)
+    with provenance.ensure_run(
+        provenance.PIPELINE_MCP,
+        trigger=provenance.TRIGGER_MANUAL,
+        source="mcp",
+        sourceDetail=server_names,
+        connectorIds=[sv.connector_id for sv in servers],
+        writtenBy="mcp_client.ingest",
+    ):
+        return _ingest_servers(servers, known, emit_target=progress)
+
+
+def _ingest_servers(servers, known, emit_target=None) -> dict:
+    """The load itself. Split out so `ingest_from_mcp` is just guards + the run."""
+    import asyncio
+    import re
+
+    from src.graph import neo4j_client as neo4j
+    from src.graph import provenance
+    from src.mcp_client import client
+    progress = emit_target
+
     nodes = rels = skipped = 0
     sources: list[dict] = []
     errors: list[str] = []
@@ -143,84 +169,92 @@ def ingest_from_mcp(
                 pass
 
     for server in servers:
-        emit({"server": server.name, "phase": "discovering"})
-        try:
-            tools = asyncio.run(
-                asyncio.wait_for(client.list_tools(server), client.LIST_TIMEOUT))
-        except Exception as exc:                          # noqa: BLE001
-            errors.append(f"{server.name}: {type(exc).__name__}: {str(exc)[:160]}")
-            sources.append({"server": server.name, "nodes": 0, "skipped": 0,
-                            "error": str(exc)[:160]})
-            continue
-
-        server_nodes = server_skipped = 0
-
-        for tool in tools:
-            remote = tool.get("name") or ""
-            inferred = infer_label(remote, known)
-            # Only tools that take no required arguments are safe to call blind.
-            required = (tool.get("inputSchema") or {}).get("required") or []
-            if required:
-                continue
-            if not inferred and not _LISTER.match(remote):
-                continue
-
-            emit({"server": server.name, "phase": "reading", "tool": remote})
+        # refine, not a nested run: the servers are one load, and giving each its
+        # own runId would break "show me everything this run wrote". The node still
+        # records which server it came from.
+        with provenance.refine(source=f"mcp:{server.slug}",
+                               sourceDetail=server.name,
+                               sourceRecordId=server.connector_id):
+            emit({"server": server.name, "phase": "discovering"})
             try:
-                result = asyncio.run(
-                    asyncio.wait_for(client.call_tool(server, remote, {}),
-                                     client.CALL_TIMEOUT))
-            except Exception as exc:                      # noqa: BLE001
-                errors.append(f"{server.name}/{remote}: {str(exc)[:120]}")
-                continue
-            if not result.get("ok"):
-                continue
-
-            records = _parse(result.get("blocks") or [result.get("text", "")])
-            if records is None:
+                tools = asyncio.run(
+                    asyncio.wait_for(client.list_tools(server), client.LIST_TIMEOUT))
+            except Exception as exc:                          # noqa: BLE001
+                errors.append(f"{server.name}: {type(exc).__name__}: {str(exc)[:160]}")
+                sources.append({"server": server.name, "nodes": 0, "skipped": 0,
+                                "error": str(exc)[:160]})
                 continue
 
-            for record in records:
-                if not isinstance(record, dict):
-                    server_skipped += 1
+            server_nodes = server_skipped = 0
+
+            for tool in tools:
+                remote = tool.get("name") or ""
+                inferred = infer_label(remote, known)
+                # Only tools that take no required arguments are safe to call blind.
+                required = (tool.get("inputSchema") or {}).get("required") or []
+                if required:
                     continue
-                label = record.get("_label") or inferred
-                if not label or label not in known:
-                    server_skipped += 1
-                    continue
-                eid = _external_id(record, label)
-                if not eid:
-                    server_skipped += 1
+                if not inferred and not _LISTER.match(remote):
                     continue
 
-                props = _props(record)
-                props["name"] = props.get("name") or props.get("id") or eid
-                # Tagged so a later wipe can find exactly what MCP put here, the same
-                # way the synthetic loader tags its own nodes with `source`.
-                props["source"] = f"mcp:{server.slug}"
-                props["mcpServer"] = server.name
+                emit({"server": server.name, "phase": "reading", "tool": remote})
                 try:
-                    neo4j.upsert_node(label, eid, props)
-                    nodes += 1
-                    server_nodes += 1
-                except Exception as exc:                  # noqa: BLE001
-                    errors.append(f"{label} {eid}: {str(exc)[:120]}")
+                    result = asyncio.run(
+                        asyncio.wait_for(client.call_tool(server, remote, {}),
+                                         client.CALL_TIMEOUT))
+                except Exception as exc:                      # noqa: BLE001
+                    errors.append(f"{server.name}/{remote}: {str(exc)[:120]}")
+                    continue
+                if not result.get("ok"):
                     continue
 
-                for link in (record.get("_links") or []):
-                    target_label = link.get("to_label", "")
-                    target = link.get("to", "")
-                    rel = re.sub(r"[^A-Z_]", "", (link.get("type") or "").upper())
-                    if target_label and target and rel:
-                        pending_links.append(
-                            (eid, f"{target_label.lower()}:{target}", rel))
+                records = _parse(result.get("blocks") or [result.get("text", "")])
+                if records is None:
+                    continue
 
-            emit({"server": server.name, "phase": "wrote", "tool": remote,
-                  "nodes": server_nodes})
+                for record in records:
+                    if not isinstance(record, dict):
+                        server_skipped += 1
+                        continue
+                    label = record.get("_label") or inferred
+                    if not label or label not in known:
+                        server_skipped += 1
+                        continue
+                    eid = _external_id(record, label)
+                    if not eid:
+                        server_skipped += 1
+                        continue
 
-        skipped += server_skipped
-        sources.append({"server": server.name, "nodes": server_nodes,
-                        "skipped": server_skipped})
+                    props = _props(record)
+                    props["name"] = props.get("name") or props.get("id") or eid
+                    # Tagged so a later wipe can find exactly what MCP put here, the same
+                    # way the synthetic loader tags its own nodes with `source`.
+                    props["source"] = f"mcp:{server.slug}"
+                    props["mcpServer"] = server.name
+                    try:
+                        # traced_upsert so an MCP-loaded node gets a CREATE entry
+                        # in its timeline, not just a lineage ribbon.
+                        provenance.traced_upsert(label, eid, props)
+                        nodes += 1
+                        server_nodes += 1
+                    except Exception as exc:                  # noqa: BLE001
+                        errors.append(f"{label} {eid}: {str(exc)[:120]}")
+                        continue
+
+                    for link in (record.get("_links") or []):
+                        target_label = link.get("to_label", "")
+                        target = link.get("to", "")
+                        rel = re.sub(r"[^A-Z_]", "", (link.get("type") or "").upper())
+                        if target_label and target and rel:
+                            pending_links.append(
+                                (eid, f"{target_label.lower()}:{target}", rel))
+
+                emit({"server": server.name, "phase": "wrote", "tool": remote,
+                      "nodes": server_nodes})
+
+            skipped += server_skipped
+            sources.append({"server": server.name, "nodes": server_nodes,
+                            "skipped": server_skipped})
 
     # Relationships last: a link can point at a node another tool has not written yet,
     # and MATCH on both ends only succeeds once both exist.

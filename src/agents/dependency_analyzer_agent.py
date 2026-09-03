@@ -85,11 +85,11 @@ class DependencyAnalyzerAgent(BaseAgent):
             nodes_added += 1
 
             if dep.get("used_by"):
-                neo4j.upsert_relationship(
-                    source_external_id=dep["used_by"],
-                    target_external_id=dep_id,
+                neo4j.link_nodes_by_eid(
+                    from_eid=dep["used_by"],
+                    to_eid=dep_id,
                     rel_type="DEPENDS_ON",
-                    provenance={"source": "dependency_manifest", "discoveredBy": self.name,
+                    provenance_props={"source": "dependency_manifest", "discoveredBy": self.name,
                                 "confidence": 0.99, "factType": "known"},
                 )
                 rels_added += 1

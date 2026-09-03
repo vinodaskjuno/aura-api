@@ -211,7 +211,7 @@ class ObsRootCauseAgent(BaseAgent):
                 "factType": "hypothesis",
             }
             graph.upsert_relationship("Service", f"service:{service}",
-                                      "Incident", inc_eid, "HAS_INCIDENT", provenance=prov)
+                                      "Incident", inc_eid, "HAS_INCIDENT", provenance_props=prov)
             result.kg_updates.append(Triple(inc_eid, "AFFECTS", f"service:{service}"))
 
             for i, ev in enumerate(collected.get("evidence_index") or []):
@@ -226,7 +226,7 @@ class ObsRootCauseAgent(BaseAgent):
                     "source": ev.get("provider", "observability"),
                 })
                 graph.upsert_relationship("Incident", inc_eid, "Alert", alert_eid,
-                                          "TRIGGERED_BY", provenance=prov)
+                                          "TRIGGERED_BY", provenance_props=prov)
                 result.kg_updates.append(Triple(inc_eid, "TRIGGERED_BY", alert_eid))
                 if i > 20:
                     break
@@ -243,7 +243,7 @@ class ObsRootCauseAgent(BaseAgent):
                     "source": "observability",
                 })
                 graph.upsert_relationship("Incident", inc_eid, "ChangeRequest", cr_eid,
-                                          "CAUSED_BY", provenance=prov)
+                                          "CAUSED_BY", provenance_props=prov)
                 result.kg_updates.append(Triple(inc_eid, "CAUSED_BY", cr_eid))
 
             result.log(f"Wrote Incident/Alert/ChangeRequest nodes for {service}")

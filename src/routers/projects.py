@@ -281,6 +281,7 @@ async def analyse_project(project_id: str, user: dict = Depends(require_permissi
     """Trigger CodeAnalysisAgent + ReverseEngineeringAgent + KnowledgeGraphAgent."""
     from src.agents.base_agent import AgentContext
     from src.orchestrator.agent_registry import get_agent
+    from src.graph import provenance
 
     # Fetch project to get full composite key
     project = get_item_by_pk("projects", project_id)
@@ -302,131 +303,147 @@ async def analyse_project(project_id: str, user: dict = Depends(require_permissi
         session_id=str(uuid.uuid4()),
     )
 
-    results = {}
-    for agent_name in ["code_analysis_agent", "reverse_engineering_agent", "knowledge_graph_agent"]:
-        agent = get_agent(agent_name)
-        if agent:
-            try:
-                res = await agent.run(context)
-                results[agent_name] = {"status": res.status, "log": res.activity_log[-3:]}
-                context.prior_results[agent_name] = res
-            except Exception as exc:
-                results[agent_name] = {"status": "failed", "error": str(exc)}
+    # One run covers the whole analysis — the three agents and the graph
+    # projection alike. They are one user action and one answer to "where did this
+    # come from", so splitting them into separate runs would fragment the trace of
+    # a single click into four unrelated entries.
+    with provenance.trace_run(
+        provenance.PIPELINE_DEV_MATE,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"],
+        actorId=user["userId"],
+        source="code-analysis",
+        sourceDetail=project.get("name") or project_id,
+        projectId=project_id,
+        sessionId=context.session_id,
+        writtenBy="projects.analyse_project",
+        notes="Project analysis: code + reverse engineering + knowledge graph",
+    ):
+        results = {}
+        for agent_name in ["code_analysis_agent", "reverse_engineering_agent", "knowledge_graph_agent"]:
+            agent = get_agent(agent_name)
+            if agent:
+                try:
+                    res = await agent.run(context)
+                    results[agent_name] = {"status": res.status, "log": res.activity_log[-3:]}
+                    context.prior_results[agent_name] = res
+                except Exception as exc:
+                    results[agent_name] = {"status": "failed", "error": str(exc)}
 
-    # ── Persist analysis results back to DynamoDB so Overview populates ──────
-    import json as _json
+        # ── Persist analysis results back to DynamoDB so Overview populates ──────
+        import json as _json
 
-    # Load existing project data — we only OVERWRITE if new analysis has MORE data
-    existing_services  = project.get("services", [])
-    existing_tech      = project.get("techStack", [])
-    existing_languages = project.get("languages", [])
-    existing_kg_raw    = project.get("knowledgeGraph", "")
+        # Load existing project data — we only OVERWRITE if new analysis has MORE data
+        existing_services  = project.get("services", [])
+        existing_tech      = project.get("techStack", [])
+        existing_languages = project.get("languages", [])
+        existing_kg_raw    = project.get("knowledgeGraph", "")
 
-    final_updates: dict = {
-        "status": "analyzed",
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-    }
+        final_updates: dict = {
+            "status": "analyzed",
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
 
-    # Code analysis → tech stack, services, languages
-    # Only overwrite if new results are non-empty (prevent wiping good data)
-    code_res = context.prior_results.get("code_analysis_agent")
-    new_services  = []
-    new_tech      = []
-    new_languages = []
-    if code_res and code_res.output:
-        out = code_res.output
-        new_tech      = list(set(out.get("tech_stack", [])))
-        new_services  = list(set(out.get("services", [])))
-        new_languages = list(out.get("languages", {}).keys()) if isinstance(out.get("languages"), dict) else list(out.get("languages", []))
+        # Code analysis → tech stack, services, languages
+        # Only overwrite if new results are non-empty (prevent wiping good data)
+        code_res = context.prior_results.get("code_analysis_agent")
+        new_services  = []
+        new_tech      = []
+        new_languages = []
+        if code_res and code_res.output:
+            out = code_res.output
+            new_tech      = list(set(out.get("tech_stack", [])))
+            new_services  = list(set(out.get("services", [])))
+            new_languages = list(out.get("languages", {}).keys()) if isinstance(out.get("languages"), dict) else list(out.get("languages", []))
 
-    # Merge: use new if non-empty, otherwise keep existing
-    final_updates["techStack"] = new_tech      if new_tech      else existing_tech
-    final_updates["services"]  = new_services  if new_services  else existing_services
-    final_updates["languages"] = new_languages if new_languages else existing_languages
+        # Merge: use new if non-empty, otherwise keep existing
+        final_updates["techStack"] = new_tech      if new_tech      else existing_tech
+        final_updates["services"]  = new_services  if new_services  else existing_services
+        final_updates["languages"] = new_languages if new_languages else existing_languages
 
-    # Reverse engineering → knowledge graph
-    re_res = context.prior_results.get("reverse_engineering_agent")
-    if re_res and re_res.output:
-        kg = re_res.output
+        # Reverse engineering → knowledge graph
+        re_res = context.prior_results.get("reverse_engineering_agent")
+        if re_res and re_res.output:
+            kg = re_res.output
 
-        # Ensure services in KG come from code analysis, not fake Bedrock items
-        all_known_services = set(final_updates["services"])
-        if kg.get("correlations"):
-            # Filter out correlations where from/to are language or tech items, not real services
-            all_langs_and_tech = set(
-                [l.lower() for l in final_updates["languages"]] +
-                [t.lower() for t in final_updates["techStack"]] +
-                ["yaml", "typescript", "python", "mule", "javascript", "java", "node.js", "node"]
+            # Ensure services in KG come from code analysis, not fake Bedrock items
+            all_known_services = set(final_updates["services"])
+            if kg.get("correlations"):
+                # Filter out correlations where from/to are language or tech items, not real services
+                all_langs_and_tech = set(
+                    [l.lower() for l in final_updates["languages"]] +
+                    [t.lower() for t in final_updates["techStack"]] +
+                    ["yaml", "typescript", "python", "mule", "javascript", "java", "node.js", "node"]
+                )
+                clean_correlations = [
+                    c for c in kg["correlations"]
+                    if c.get("from") and c.get("to")
+                    and c.get("from", "").lower() not in all_langs_and_tech
+                    and c.get("to", "").lower() not in all_langs_and_tech
+                    and "|" not in c.get("relationship", "")
+                    and len(c.get("relationship", "")) < 50
+                ]
+                kg["correlations"] = clean_correlations
+
+            # Inject confirmed services and code data into KG
+            kg.setdefault("code", {})
+            kg["code"]["tech_stack"] = final_updates["techStack"]
+            kg["code"]["services"]   = final_updates["services"]
+            kg["code"]["languages"]  = final_updates["languages"]
+
+            # Only save KG if it has real content (services or correlations)
+            has_real_content = (
+                len(final_updates["services"]) > 0
+                or len(kg.get("correlations", [])) > 0
+                or len(kg.get("infra", [])) > 0
             )
-            clean_correlations = [
-                c for c in kg["correlations"]
-                if c.get("from") and c.get("to")
-                and c.get("from", "").lower() not in all_langs_and_tech
-                and c.get("to", "").lower() not in all_langs_and_tech
-                and "|" not in c.get("relationship", "")
-                and len(c.get("relationship", "")) < 50
-            ]
-            kg["correlations"] = clean_correlations
+            if has_real_content:
+                final_updates["knowledgeGraph"] = _json.dumps(kg)
+            elif existing_kg_raw:
+                # Keep existing KG if new one has no content
+                pass
+        elif existing_kg_raw and final_updates["services"]:
+            # No RE result but we have services — update the existing KG's code section
+            try:
+                existing_kg = _json.loads(existing_kg_raw)
+                existing_kg.setdefault("code", {})
+                existing_kg["code"]["tech_stack"] = final_updates["techStack"]
+                existing_kg["code"]["services"]   = final_updates["services"]
+                existing_kg["code"]["languages"]  = final_updates["languages"]
+                final_updates["knowledgeGraph"] = _json.dumps(existing_kg)
+            except Exception:
+                pass
 
-        # Inject confirmed services and code data into KG
-        kg.setdefault("code", {})
-        kg["code"]["tech_stack"] = final_updates["techStack"]
-        kg["code"]["services"]   = final_updates["services"]
-        kg["code"]["languages"]  = final_updates["languages"]
+        update_item("projects", composite_key, final_updates)
 
-        # Only save KG if it has real content (services or correlations)
-        has_real_content = (
-            len(final_updates["services"]) > 0
-            or len(kg.get("correlations", [])) > 0
-            or len(kg.get("infra", [])) > 0
-        )
-        if has_real_content:
-            final_updates["knowledgeGraph"] = _json.dumps(kg)
-        elif existing_kg_raw:
-            # Keep existing KG if new one has no content
-            pass
-    elif existing_kg_raw and final_updates["services"]:
-        # No RE result but we have services — update the existing KG's code section
+        # ── Project the analysed code into Neo4j ────────────────────────────────
+        # Deliberately after the DynamoDB write and wrapped: the graph is a projection
+        # of the analysis, so Neo4j being unreachable must leave the analysis itself
+        # intact rather than failing the request.
+        graph_report: dict = {}
         try:
-            existing_kg = _json.loads(existing_kg_raw)
-            existing_kg.setdefault("code", {})
-            existing_kg["code"]["tech_stack"] = final_updates["techStack"]
-            existing_kg["code"]["services"]   = final_updates["services"]
-            existing_kg["code"]["languages"]  = final_updates["languages"]
-            final_updates["knowledgeGraph"] = _json.dumps(existing_kg)
-        except Exception:
-            pass
+            from src.graph import code_graph
+            connectors = [c for c in scan_items("connectors", limit=500)
+                          if c.get("projectId") == project_id]
+            connectors += [c for c in scan_items("user-connectors", limit=500)
+                           if c.get("projectId") == project_id]
+            graph_report = code_graph.sync_project(
+                {**project, **final_updates, "projectId": project_id},
+                connectors,
+                actor=user["username"],
+            ).as_dict()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Neo4j sync failed for %s: %s", project_id, exc)
+            graph_report = {"errors": [str(exc)]}
 
-    update_item("projects", composite_key, final_updates)
-
-    # ── Project the analysed code into Neo4j ────────────────────────────────
-    # Deliberately after the DynamoDB write and wrapped: the graph is a projection
-    # of the analysis, so Neo4j being unreachable must leave the analysis itself
-    # intact rather than failing the request.
-    graph_report: dict = {}
-    try:
-        from src.graph import code_graph
-        connectors = [c for c in scan_items("connectors", limit=500)
-                      if c.get("projectId") == project_id]
-        connectors += [c for c in scan_items("user-connectors", limit=500)
-                       if c.get("projectId") == project_id]
-        graph_report = code_graph.sync_project(
-            {**project, **final_updates, "projectId": project_id},
-            connectors,
-            actor=user["username"],
-        ).as_dict()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Neo4j sync failed for %s: %s", project_id, exc)
-        graph_report = {"errors": [str(exc)]}
-
-    return {"project_id": project_id, "results": results,
-            "graph": graph_report,
-            "summary": {
-                "services":     len(final_updates["services"]),
-                "techStack":    len(final_updates["techStack"]),
-                "languages":    len(final_updates["languages"]),
-                "correlations": len(_json.loads(final_updates.get("knowledgeGraph","{}") or "{}").get("correlations", [])),
-            }}
+        return {"project_id": project_id, "results": results,
+                "graph": graph_report,
+                "summary": {
+                    "services":     len(final_updates["services"]),
+                    "techStack":    len(final_updates["techStack"]),
+                    "languages":    len(final_updates["languages"]),
+                    "correlations": len(_json.loads(final_updates.get("knowledgeGraph","{}") or "{}").get("correlations", [])),
+                }}
 
 
 # ── Sample project seeder ─────────────────────────────────────────────────────

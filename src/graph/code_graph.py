@@ -75,25 +75,28 @@ def _slug(text: str) -> str:
 
 # Fields written by other producers (ingestion, the maintainer UI) must survive a
 # code-analysis run untouched, so the diff considers only what this module owns.
-def _changed(before: dict, after: dict, managed: list[str]) -> dict[str, tuple[Any, Any]]:
-    diff = {}
-    for key in managed:
-        old, new = before.get(key), after.get(key)
-        if old != new:
-            diff[key] = (old, new)
-    return diff
-
-
 def _upsert(
     report: SyncReport, label: str, external_id: str, props: dict,
     actor: str, project_id: str,
 ) -> str | None:
-    """Upsert one node and record history only if something actually changed."""
+    """Upsert one node and record history only if something actually changed.
+
+    The diff-then-audit routine this used to carry now lives in
+    `graph/provenance.traced_upsert`. It had been copied into
+    `qatest/graph_writeback` and written nowhere else, so the paths that most
+    needed it — MCP and file upload — had no history at all, and a node loaded
+    from either showed a lineage ribbon above an empty timeline.
+    """
+    from src.graph import provenance
+
     props = {**props, "source": SOURCE, "status": "active"}
-    managed = [k for k in props if k not in ("createdAt", "updatedAt")]
     try:
-        before, after, element_id, created = neo4j.upsert_node_returning_id(
-            label, external_id, props)
+        element_id, created, diff = provenance.traced_upsert(
+            label, external_id, props,
+            name=props.get("name", external_id),
+            session_id=f"analyse:{project_id}",
+            actor=actor, graph=neo4j, store=dynamo,
+        )
     except Exception as exc:  # noqa: BLE001 — one bad node must not abort the sync
         report.errors.append(f"{label} {external_id}: {exc}")
         log.warning("upsert failed %s %s: %s", label, external_id, exc)
@@ -102,46 +105,13 @@ def _upsert(
         report.errors.append(f"{label} {external_id}: upsert returned no node")
         return None
 
-    diff = _changed(before, after, managed)
     if created:
         report.created += 1
-        _audit(actor, "CREATE", label, external_id, element_id,
-               props.get("name", external_id), None, after, project_id)
     elif diff:
         report.updated += 1
-        _audit(actor, "UPDATE", label, external_id, element_id,
-               props.get("name", external_id),
-               {k: v[0] for k, v in diff.items()},
-               {k: v[1] for k, v in diff.items()}, project_id)
     else:
         report.unchanged += 1
     return element_id
-
-
-def _audit(
-    actor: str, change_type: str, label: str, external_id: str, element_id: str,
-    name: str, before: Any, after: Any, project_id: str,
-) -> None:
-    """Dual-write history: an :AuditLog node plus an ontology-changelog row.
-
-    Both are best-effort. Losing an audit row is bad, but failing the whole analysis
-    because the changelog table is unreachable would be worse.
-    """
-    try:
-        neo4j.write_audit_log(actor=actor, action=f"{change_type}:{label}",
-                              target_id=element_id, before=before, after=after)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("audit node failed for %s: %s", external_id, exc)
-    try:
-        dynamo.write_changelog(dynamo.build_changelog_entry(
-            entity_id=element_id, entity_type="Node", entity_label=label,
-            entity_name=name, change_type=change_type, actor=actor,
-            before=before, after=after,
-            session_id=f"analyse:{project_id}", source=SOURCE,
-            external_id=external_id,
-        ))
-    except Exception as exc:  # noqa: BLE001
-        log.debug("changelog failed for %s: %s", external_id, exc)
 
 
 def _link(from_label: str, from_eid: str, to_label: str, to_eid: str,
@@ -149,7 +119,7 @@ def _link(from_label: str, from_eid: str, to_label: str, to_eid: str,
     try:
         neo4j.upsert_relationship(
             from_label, from_eid, to_label, to_eid, rel,
-            provenance={"source": SOURCE, "discoveredBy": "code_analysis",
+            provenance_props={"source": SOURCE, "discoveredBy": "code_analysis",
                         "factType": fact_type},
         )
     except Exception as exc:  # noqa: BLE001
@@ -183,11 +153,18 @@ def _archive_stale(
     except Exception as exc:  # noqa: BLE001
         log.debug("archive scan failed for %s/%s: %s", repo_eid, rel, exc)
         return
+    from src.graph import provenance
     for row in rows or []:
         report.archived += 1
-        _audit(actor, "ARCHIVE_RELATIONSHIP", row.get("label") or "Node",
-               row.get("eid") or "", row.get("id") or "", row.get("name") or "",
-               {"active": True}, {"active": False, "relationship": rel}, project_id)
+        provenance.record_change(
+            change_type="RELATIONSHIP_ARCHIVE", entity_kind="edge",
+            element_id=row.get("id") or "", external_id=row.get("eid") or "",
+            label=row.get("label") or "Node", name=row.get("name") or "",
+            before={"active": True},
+            after={"active": False, "relationship": rel},
+            session_id=f"analyse:{project_id}",
+            actor=actor, graph=neo4j, store=dynamo,
+        )
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

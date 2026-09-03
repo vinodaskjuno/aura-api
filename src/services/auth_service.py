@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "user_dev": [
         "dashboard", "dev_workspace", "knowledge_graph",
-        "ontology", "advisor", "connectors", "upload", "logs",
+        "ontology", "connectors", "upload", "logs",
     ],
     "user_qa": [
         "dashboard", "qa_workspace", "knowledge_graph",
-        "advisor", "upload", "logs",
+        "upload", "logs",
     ],
     "user_ops": [
-        "dashboard", "aiops", "observability", "knowledge_graph", "advisor", "logs",
+        "dashboard", "aiops", "observability", "knowledge_graph", "logs",
         # `connectors` is required so an ops user can configure the observability
         # providers their own page depends on.
         "connectors",
@@ -36,17 +36,17 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "ontology_maintainer": [
         "dashboard", "dev_workspace", "knowledge_graph",
         "ontology", "ontology_maintain", "connectors",
-        "scheduler", "advisor", "logs",
+        "scheduler", "logs",
     ],
     "admin": [
         "dashboard", "dev_workspace", "qa_workspace", "aiops", "observability",
-        "knowledge_graph", "ontology", "ontology_maintain", "advisor",
+        "knowledge_graph", "ontology", "ontology_maintain",
         "connectors", "upload", "logs", "settings", "user_management",
         "scheduler",
     ],
     "super_admin": [
         "dashboard", "dev_workspace", "qa_workspace", "aiops", "observability",
-        "knowledge_graph", "ontology", "ontology_maintain", "advisor",
+        "knowledge_graph", "ontology", "ontology_maintain",
         "connectors", "upload", "logs", "settings", "user_management",
         "role_management", "scheduler",
     ],

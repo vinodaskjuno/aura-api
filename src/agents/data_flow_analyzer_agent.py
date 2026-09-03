@@ -71,11 +71,11 @@ class DataFlowAnalyzerAgent(BaseAgent):
 
             for step in flow.get("steps", []):
                 if step.get("source") and step.get("target"):
-                    neo4j.upsert_relationship(
-                        source_external_id=step["source"],
-                        target_external_id=step["target"],
+                    neo4j.link_nodes_by_eid(
+                        from_eid=step["source"],
+                        to_eid=step["target"],
                         rel_type=step.get("type", "FLOWS_TO"),
-                        provenance={
+                        provenance_props={
                             "source": "data_flow_analysis",
                             "discoveredBy": self.name,
                             "confidence": step.get("confidence", 0.75),

@@ -72,11 +72,11 @@ class ApiAnalyzerAgent(BaseAgent):
             nodes_added += 1
 
             if endpoint.get("service_id"):
-                neo4j.upsert_relationship(
-                    source_external_id=endpoint["service_id"],
-                    target_external_id=endpoint["id"],
+                neo4j.link_nodes_by_eid(
+                    from_eid=endpoint["service_id"],
+                    to_eid=endpoint["id"],
                     rel_type="EXPOSES",
-                    provenance={
+                    provenance_props={
                         "source": "api_analysis",
                         "discoveredBy": self.name,
                         "confidence": 0.95,

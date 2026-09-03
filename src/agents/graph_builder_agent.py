@@ -78,11 +78,11 @@ class GraphBuilderAgent(BaseAgent):
             for merge in merges:
                 if merge.get("keep") and merge.get("remove"):
                     # Re-point all edges from `remove` to `keep`
-                    neo4j.upsert_relationship(
-                        source_external_id=merge["keep"],
-                        target_external_id=merge["remove"],
+                    neo4j.link_nodes_by_eid(
+                        from_eid=merge["keep"],
+                        to_eid=merge["remove"],
                         rel_type="SAME_AS",
-                        provenance={"source": "deduplication", "discoveredBy": self.name,
+                        provenance_props={"source": "deduplication", "discoveredBy": self.name,
                                     "confidence": merge.get("confidence", 0.9), "factType": "inferred"},
                     )
         except Exception as exc:  # noqa: BLE001

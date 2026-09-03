@@ -11,6 +11,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
 
+# Aliased: `provenance` is also the historical name of the keyword argument on
+# upsert_relationship, and shadowing the module there was the whole reason that
+# parameter is now called provenance_props.
+from src.graph import provenance as prov_ctx
+
 log = logging.getLogger(__name__)
 
 # Connection handling and Cypher translation now live in src/graph/backends.py, so
@@ -135,6 +140,25 @@ NODE_INDEXES: list[tuple[str, str]] = [
     ("Runbook", "status"),
 ]
 
+# Provenance lookups — "everything this run wrote", "everything from Git", "what has
+# gone stale". Applied to the labels that carry real volume rather than to all 60
+# constrained labels: an index costs write throughput on every ingestion, and the
+# long tail holds tens of nodes each, where a scan is already faster than an index.
+#
+# Cross-label questions ("how much of the whole graph is unattributed") stay full
+# scans by nature — no per-label index can serve them — which is why the coverage
+# figure is computed for a summary endpoint and not on the hot path.
+_PROVENANCE_INDEXED_LABELS = [
+    "Service", "Repository", "Application", "API", "Module", "Class", "Function",
+    "CodeFile", "Dependency", "Infrastructure", "Container", "CloudResource",
+    "Project", "Incident", "Runbook", "TestCase",
+]
+NODE_INDEXES += [
+    (label, prop)
+    for label in _PROVENANCE_INDEXED_LABELS
+    for prop in ("lastSeenRunId", "pipeline", "lastSeenAt")
+]
+
 # Property-on-edge indexes. Memgraph cannot express these and returns None, in
 # which case the statement is skipped rather than approximated.
 EDGE_INDEXES: list[tuple[str, str]] = [
@@ -186,19 +210,29 @@ def ensure_schema():
 # ── Generic MERGE upsert ──────────────────────────────────────────────────────
 
 def upsert_node(label: str, external_id: str, props: dict[str, Any]) -> dict:
-    """MERGE on externalId — creates or updates.  Never deletes."""
+    """MERGE on externalId — creates or updates.  Never deletes.
+
+    Provenance (who/when/which source/which run) is merged in from the ambient
+    trace context, so every one of the ~79 call sites is attributed without being
+    edited. See `graph/provenance.py`.
+    """
     props_clean = {k: v for k, v in props.items() if v is not None}
-    props_clean["updatedAt"] = datetime.now(timezone.utc).isoformat()
-    if "createdAt" not in props_clean:
-        props_clean["createdAt"] = props_clean["updatedAt"]
+    props_clean = prov_ctx.stamp(props_clean)
+    first = prov_ctx.first_seen_props()
+    # createdAt belongs with the other origin facts: SET n += $props runs on every
+    # write, so leaving it there re-dated the node on each ingestion.
+    first.setdefault("createdAt", props_clean["updatedAt"])
+    if "createdAt" in props_clean:
+        first["createdAt"] = props_clean.pop("createdAt")
 
     cypher = f"""
     MERGE (n:{label} {{externalId: $eid}})
+    ON CREATE SET n += $first
     SET n += $props
     RETURN n
     """
     with session() as s:
-        result = s.run(cypher, eid=external_id, props=props_clean)
+        result = s.run(cypher, eid=external_id, props=props_clean, first=first)
         record = result.single()
         return dict(record["n"]) if record else {}
 
@@ -216,20 +250,23 @@ def upsert_node_returning_id(
     concurrent upsert cannot make this report a create as an update.
     """
     props_clean = {k: v for k, v in props.items() if v is not None}
-    props_clean["updatedAt"] = datetime.now(timezone.utc).isoformat()
-    if "createdAt" not in props_clean:
-        props_clean["createdAt"] = props_clean["updatedAt"]
+    props_clean = prov_ctx.stamp(props_clean)
+    first = prov_ctx.first_seen_props()
+    first.setdefault("createdAt", props_clean["updatedAt"])
+    if "createdAt" in props_clean:
+        first["createdAt"] = props_clean.pop("createdAt")
 
     cypher = f"""
     OPTIONAL MATCH (existing:{label} {{externalId: $eid}})
     WITH existing IS NULL AS created,
          CASE WHEN existing IS NULL THEN {{}} ELSE properties(existing) END AS before
     MERGE (n:{label} {{externalId: $eid}})
+    ON CREATE SET n += $first
     SET n += $props
     RETURN before, properties(n) AS after, elementId(n) AS id, created
     """
     with session() as s:
-        record = s.run(cypher, eid=external_id, props=props_clean).single()
+        record = s.run(cypher, eid=external_id, props=props_clean, first=first).single()
         if not record:
             return {}, {}, "", False
         return (dict(record["before"]), dict(record["after"]),
@@ -253,36 +290,51 @@ def upsert_relationship(
     to_label: str, to_eid: str,
     rel_type: str,
     props: dict[str, Any] | None = None,
-    provenance: dict[str, Any] | None = None,
+    provenance_props: dict[str, Any] | None = None,
+    **legacy: Any,
 ) -> bool:
     """MERGE relationship — creates if absent, updates props if present.
 
     Optional provenance dict accepts: source, sourceRecordId, discoveredBy,
     confidence (float), evidence (list), factType (known|inferred|hypothesis).
+    Run attribution is added from the ambient trace context on top of it.
+
+    The parameter is `provenance_props` rather than `provenance` because this module
+    now imports the `provenance` module; `**legacy` keeps the old keyword accepted so
+    no caller breaks on the rename.
     """
+    if "provenance" in legacy:
+        provenance_props = legacy.pop("provenance")
+    if legacy:
+        raise TypeError(f"upsert_relationship got unexpected arguments: {sorted(legacy)}")
     props = {k: v for k, v in (props or {}).items() if v is not None}
-    if provenance:
-        now = datetime.now(timezone.utc).isoformat()
-        prov = {k: v for k, v in provenance.items() if v is not None}
-        if "evidence" in prov and isinstance(prov["evidence"], list):
-            import json as _json
-            prov["evidence"] = _json.dumps(prov["evidence"])
-        if "firstSeen" not in prov:
-            prov["firstSeen"] = now
-        prov["lastSeen"] = now
-        props.update(prov)
+    now = datetime.now(timezone.utc).isoformat()
+    # The caller's provenance wins over the ambient context — only the caller knows
+    # how it derived the edge (confidence, evidence, factType). The context fills in
+    # the parts it cannot know: which run, which actor, which trigger.
+    prov = {k: v for k, v in (provenance_props or {}).items() if v is not None}
+    prov = {**prov_ctx.edge_provenance(), **prov}
+    if "evidence" in prov and isinstance(prov["evidence"], list):
+        import json as _json
+        prov["evidence"] = _json.dumps(prov["evidence"])
+    prov["lastSeen"] = now
+    props.update(prov)
     props["active"] = True
-    props["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    props = prov_ctx.stamp(props)
+
+    first = prov_ctx.first_seen_props()
+    first["firstSeen"] = prov.get("firstSeen", now)
 
     cypher = f"""
     MATCH (a:{from_label} {{externalId: $from_eid}})
     MATCH (b:{to_label} {{externalId: $to_eid}})
     MERGE (a)-[r:{rel_type}]->(b)
+    ON CREATE SET r += $first
     SET r += $props
     RETURN r
     """
     with session() as s:
-        result = s.run(cypher, from_eid=from_eid, to_eid=to_eid, props=props)
+        result = s.run(cypher, from_eid=from_eid, to_eid=to_eid, props=props, first=first)
         return result.single() is not None
 
 
@@ -291,21 +343,38 @@ def link_nodes_by_eid(
     to_eid: str,
     rel_type: str,
     props: dict[str, Any] | None = None,
+    provenance_props: dict[str, Any] | None = None,
 ) -> bool:
-    """MERGE a relationship between two nodes identified by externalId, without requiring labels."""
+    """MERGE a relationship between two nodes identified by externalId, without requiring labels.
+
+    Carries the same provenance as `upsert_relationship`. It had none until now,
+    which is why edges written by `repo_ingestion_service` and `mcp_client/ingest` —
+    both of which use this rather than the labelled form — had no lineage at all.
+    """
     p = {k: v for k, v in (props or {}).items() if v is not None}
+    now = datetime.now(timezone.utc).isoformat()
+    prov = {**prov_ctx.edge_provenance(),
+            **{k: v for k, v in (provenance_props or {}).items() if v is not None}}
+    if "evidence" in prov and isinstance(prov["evidence"], list):
+        import json as _json
+        prov["evidence"] = _json.dumps(prov["evidence"])
+    prov["lastSeen"] = now
+    p.update(prov)
     p["active"] = True
-    p["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    p = prov_ctx.stamp(p)
+    first = prov_ctx.first_seen_props()
+    first["firstSeen"] = prov.get("firstSeen", now)
     cypher = f"""
     MATCH (a {{externalId: $from_eid}})
     MATCH (b {{externalId: $to_eid}})
     MERGE (a)-[r:{rel_type}]->(b)
+    ON CREATE SET r += $first
     SET r += $props
     RETURN r
     """
     try:
         with session() as s:
-            result = s.run(cypher, from_eid=from_eid, to_eid=to_eid, props=p)
+            result = s.run(cypher, from_eid=from_eid, to_eid=to_eid, props=p, first=first)
             return result.single() is not None
     except Exception as exc:
         log.debug("link_nodes_by_eid %s→%s [%s]: %s", from_eid, to_eid, rel_type, exc)
@@ -317,11 +386,12 @@ def archive_relationship(rel_id: str) -> bool:
     cypher = """
     MATCH ()-[r]->()
     WHERE elementId(r) = $rid
-    SET r.active = false, r.archivedAt = $ts
+    SET r.active = false, r += $props
     RETURN r
     """
+    props = prov_ctx.stamp({"archivedAt": datetime.now(timezone.utc).isoformat()})
     with session() as s:
-        result = s.run(cypher, rid=rel_id, ts=datetime.now(timezone.utc).isoformat())
+        result = s.run(cypher, rid=rel_id, props=props)
         return result.single() is not None
 
 
@@ -347,11 +417,12 @@ def create_node(label: str, name: str, props: dict[str, Any], actor: str) -> dic
 def retire_node(label: str, external_id: str) -> bool:
     cypher = f"""
     MATCH (n:{label} {{externalId: $eid}})
-    SET n.status = 'retired', n.retiredAt = $ts
+    SET n.status = 'retired', n += $props
     RETURN n
     """
+    props = prov_ctx.stamp({"retiredAt": datetime.now(timezone.utc).isoformat()})
     with session() as s:
-        result = s.run(cypher, eid=external_id, ts=datetime.now(timezone.utc).isoformat())
+        result = s.run(cypher, eid=external_id, props=props)
         return result.single() is not None
 
 
@@ -716,14 +787,127 @@ def get_node_by_id(node_id: str) -> dict | None:
         return {"id": record["id"], "labels": record["labels"], **dict(record["props"])}
 
 
+def get_relationship_by_id(rel_id: str) -> dict | None:
+    """One relationship with its endpoints, for the edge trace panel.
+
+    `RelationshipDetailPanel` had no provenance at all, and could not have: the UI
+    holds an engine element id and there was no endpoint that resolved one.
+    """
+    cypher = """
+    MATCH (a)-[r]->(b) WHERE elementId(r) = $id
+    RETURN elementId(r) AS id, type(r) AS relType, properties(r) AS props,
+           elementId(a) AS sourceId, a.externalId AS sourceEid,
+           a.name AS sourceName, labels(a)[0] AS sourceLabel,
+           elementId(b) AS targetId, b.externalId AS targetEid,
+           b.name AS targetName, labels(b)[0] AS targetLabel
+    """
+    with session() as s:
+        record = s.run(cypher, id=rel_id).single()
+        if not record:
+            return None
+        return {
+            "id": record["id"], "type": record["relType"],
+            "source": {"id": record["sourceId"], "externalId": record["sourceEid"],
+                       "name": record["sourceName"], "label": record["sourceLabel"]},
+            "target": {"id": record["targetId"], "externalId": record["targetEid"],
+                       "name": record["targetName"], "label": record["targetLabel"]},
+            **dict(record["props"]),
+        }
+
+
+def provenance_summary() -> dict:
+    """Per-pipeline counts and freshness, plus attribution coverage.
+
+    A full scan by nature: "how much of the graph is unattributed" cannot be
+    answered from any per-label index, and the honest response to that is to run it
+    on a summary endpoint rather than to pretend an index would help.
+    """
+    node_cypher = """
+    MATCH (n)
+    RETURN coalesce(n.pipeline, 'unattributed') AS pipeline,
+           coalesce(n.attribution, 'pre-trace') AS attribution,
+           count(*) AS count,
+           max(coalesce(n.lastSeenAt, n.updatedAt)) AS lastSeen
+    ORDER BY count DESC
+    """
+    rel_cypher = """
+    MATCH ()-[r]->()
+    RETURN coalesce(r.pipeline, 'unattributed') AS pipeline, count(*) AS count
+    """
+    pipelines: dict[str, dict] = {}
+    coverage = {"traced": 0, "partial": 0, "unattributed": 0}
+    try:
+        with session() as s:
+            for row in s.run(node_cypher):
+                name = row["pipeline"]
+                entry = pipelines.setdefault(
+                    name, {"pipeline": name, "nodes": 0, "edges": 0, "lastSeen": ""})
+                entry["nodes"] += row["count"]
+                if (row["lastSeen"] or "") > entry["lastSeen"]:
+                    entry["lastSeen"] = row["lastSeen"] or ""
+                attribution = row["attribution"]
+                if attribution == "traced":
+                    coverage["traced"] += row["count"]
+                elif attribution == "pre-trace":
+                    coverage["partial"] += row["count"]
+                else:
+                    coverage["unattributed"] += row["count"]
+            for row in s.run(rel_cypher):
+                entry = pipelines.setdefault(
+                    row["pipeline"],
+                    {"pipeline": row["pipeline"], "nodes": 0, "edges": 0, "lastSeen": ""})
+                entry["edges"] += row["count"]
+    except Exception as exc:  # noqa: BLE001 — a summary must not 500 the page
+        log.warning("provenance_summary failed: %s", exc)
+        return {"pipelines": [], "coverage": coverage, "available": False}
+
+    total = sum(coverage.values())
+    return {
+        "pipelines": sorted(pipelines.values(), key=lambda p: -p["nodes"]),
+        "coverage": {**coverage, "total": total,
+                     "tracedPct": round(100 * coverage["traced"] / total, 1) if total else 0.0},
+        "available": True,
+    }
+
+
+def entities_written_by_run(run_id: str, limit: int = 200) -> list[dict]:
+    """Everything a run touched, straight from the graph.
+
+    Read from `lastSeenRunId` rather than from the changelog because the changelog
+    is diff-only: a run that re-confirmed 1,200 nodes without changing them wrote no
+    rows, and the Run Inspector should still be able to show what it covered.
+    """
+    cypher = """
+    MATCH (n) WHERE n.lastSeenRunId = $rid
+    RETURN elementId(n) AS id, labels(n)[0] AS label, n.name AS name,
+           n.externalId AS externalId, n.firstSeenRunId AS firstSeenRunId
+    LIMIT $limit
+    """
+    try:
+        with session() as s:
+            return [{
+                "id": r["id"], "label": r["label"],
+                "name": r["name"] or r["externalId"] or r["id"],
+                "externalId": r["externalId"],
+                # A node whose first run is this one was created here; anything else
+                # it touched, it updated or re-confirmed.
+                "change": "new" if r["firstSeenRunId"] == run_id else "updated",
+            } for r in s.run(cypher, rid=run_id, limit=limit)]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("entities_written_by_run failed: %s", exc)
+        return []
+
+
 def update_node_property(node_id: str, prop: str, value: Any) -> bool:
     cypher = f"""
     MATCH (n) WHERE elementId(n) = $id
-    SET n.`{prop}` = $val, n.updatedAt = $ts
+    SET n.`{prop}` = $val, n += $props
     RETURN n
     """
+    # A manual edit is a write like any other, and must show up in the node's trace
+    # with the person who made it — not only in the changelog.
     with session() as s:
-        result = s.run(cypher, id=node_id, val=value, ts=datetime.now(timezone.utc).isoformat())
+        result = s.run(cypher, id=node_id, val=value, props=prov_ctx.stamp({}))
         return result.single() is not None
 
 
@@ -756,9 +940,23 @@ def write_audit_log(actor: str, action: str, target_id: str, before: Any, after:
 
 
 def get_audit_log(page: int = 0, page_size: int = 50) -> list[dict]:
+    """Audit records, newest first.
+
+    Filtered on `auditId`, which only `write_audit_log` sets. A bare
+    `MATCH (a:AuditLog)` also returned INGESTED nodes: "AuditLog" is in
+    `ontology/schema.ALL_LABELS`, so an MCP tool called `list_audit_logs` is
+    classified into that label and written by `upsert_node` — with no `action`,
+    `actor` or `auditId`. Those rows reached the maintainer's Audit Trail tab and
+    crashed it on `entry.action.startsWith`.
+
+    Filtering rather than tolerating is the right fix twice over: a customer's own
+    audit data is not a record of what Aura changed, so showing it in this trail
+    would be wrong even if it rendered.
+    """
     skip = page * page_size
     cypher = """
     MATCH (a:AuditLog)
+    WHERE a.auditId IS NOT NULL
     RETURN a ORDER BY a.timestamp DESC
     SKIP $skip LIMIT $limit
     """

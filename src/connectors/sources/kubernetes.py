@@ -12,6 +12,8 @@ class KubernetesConnector(AbstractConnector):
       namespace: str | None         None = all namespaces
     """
 
+    pipeline = "api"
+
     def test_connection(self) -> tuple[bool, str]:
         try:
             from kubernetes import client, config as k8s_config
@@ -54,7 +56,7 @@ class KubernetesConnector(AbstractConnector):
                 })
                 graph.upsert_relationship(
                     "KubernetesCluster", cluster_eid, "Service", eid, "HOSTS",
-                    provenance={"source": "kubernetes", "discoveredBy": "kubernetes_connector",
+                    provenance_props={"source": "kubernetes", "discoveredBy": "kubernetes_connector",
                                 "confidence": 1.0, "factType": "known"})
                 result.entities_added += 1
 

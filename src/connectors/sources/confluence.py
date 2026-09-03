@@ -16,6 +16,8 @@ class ConfluenceConnector(AbstractConnector):
       space_keys: list[str]  optional filter
     """
 
+    pipeline = "api"
+
     def test_connection(self) -> tuple[bool, str]:
         try:
             resp = httpx.get(

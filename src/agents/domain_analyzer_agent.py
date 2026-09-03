@@ -69,11 +69,11 @@ class DomainAnalyzerAgent(BaseAgent):
             nodes_added += 1
 
         for rel in domains.get("relationships", []):
-            neo4j.upsert_relationship(
-                source_external_id=rel["source"],
-                target_external_id=rel["target"],
+            neo4j.link_nodes_by_eid(
+                from_eid=rel["source"],
+                to_eid=rel["target"],
                 rel_type=rel["type"],
-                provenance={
+                provenance_props={
                     "source": "domain_analysis",
                     "discoveredBy": self.name,
                     "confidence": rel.get("confidence", 0.75),

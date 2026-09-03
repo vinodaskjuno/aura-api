@@ -75,7 +75,20 @@ def ontology_delta_job():
     last_run = _job_last_run.get("ontology_delta_job")
     try:
         from src.connectors.ingestion_service import run_full_load
-        result = run_full_load(delta_since=last_run)
+        from src.graph import provenance
+        # The actor is the job, not the last person who happened to log in. A
+        # scheduled write attributed to a user is worse than one attributed to
+        # nobody — it is a plausible-looking lie.
+        with provenance.trace_run(
+            provenance.PIPELINE_MCP,
+            trigger=provenance.TRIGGER_SCHEDULED,
+            actor="scheduler:ontology_delta_job",
+            source="scheduler",
+            sourceDetail=f"delta since {last_run or 'never'}",
+            writtenBy="scheduler.ontology_delta_job",
+            notes="Nightly ontology delta ingestion",
+        ):
+            result = run_full_load(delta_since=last_run)
     except Exception as exc:
         log.exception("[Scheduler] ontology_delta_job failed")
         result = {"error": str(exc)}
@@ -92,7 +105,16 @@ def correlation_refresh_job():
     start = time.monotonic()
     try:
         from src.connectors.correlation_engine import run_correlation
-        result = run_correlation()
+        from src.graph import provenance
+        with provenance.trace_run(
+            provenance.PIPELINE_CORRELATION,
+            trigger=provenance.TRIGGER_SCHEDULED,
+            actor="scheduler:correlation_refresh_job",
+            source="correlation",
+            sourceDetail="scheduled correlation refresh",
+            writtenBy="scheduler.correlation_refresh_job",
+        ):
+            result = run_correlation()
     except Exception as exc:
         log.exception("[Scheduler] correlation_refresh_job failed")
         result = {"error": str(exc)}

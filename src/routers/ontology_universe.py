@@ -81,32 +81,41 @@ def load_ontology(
             status_code=503,
             detail="Neo4j is not available. Ensure neo4j_enabled=true in .env and Neo4j is running."
         )
-    from src.connectors.ingestion_service import run_full_load
+    from src.graph import provenance
     delta_since = (body.delta_since if body else None)
-    try:
-        result = run_full_load(delta_since=delta_since)
-    except Exception as exc:
-        log.exception("Ontology load failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+    with provenance.trace_run(
+        provenance.PIPELINE_MCP,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"], actorId=user.get("userId", ""),
+        source="bulk_load",
+        sourceDetail=f"full load, delta since {delta_since or 'never'}",
+        writtenBy="ontology_universe.load_ontology",
+    ):
+        from src.connectors.ingestion_service import run_full_load
+        try:
+            result = run_full_load(delta_since=delta_since)
+        except Exception as exc:
+            log.exception("Ontology load failed")
+            raise HTTPException(status_code=500, detail=str(exc))
 
-    # Version as one BULK_LOAD event — not per-entity (Option A decision)
-    try:
-        node_count = len(result.get("nodes", result)) if isinstance(result, dict) else 0
-        dynamo.write_changelog(_build_changelog_entry(
-            entity_id="bulk-load",
-            entity_type="BulkLoad",
-            entity_label="BulkLoad",
-            entity_name="Full MCP Ingestion",
-            change_type="BULK_LOAD",
-            actor=user["username"],
-            before=None,
-            after={"node_count": node_count, "delta_since": delta_since},
-            source="bulk_load",
-            notes=f"Full MCP ingestion triggered by {user['username']}",
-        ))
-    except Exception:
-        pass
-    return result
+        # Version as one BULK_LOAD event — not per-entity (Option A decision)
+        try:
+            node_count = len(result.get("nodes", result)) if isinstance(result, dict) else 0
+            dynamo.write_changelog(_build_changelog_entry(
+                entity_id="bulk-load",
+                entity_type="BulkLoad",
+                entity_label="BulkLoad",
+                entity_name="Full MCP Ingestion",
+                change_type="BULK_LOAD",
+                actor=user["username"],
+                before=None,
+                after={"node_count": node_count, "delta_since": delta_since},
+                source="bulk_load",
+                notes=f"Full MCP ingestion triggered by {user['username']}",
+            ))
+        except Exception:
+            pass
+        return result
 
 
 # ── Graph query endpoints ──────────────────────────────────────────────────────
@@ -182,31 +191,40 @@ def create_node(
     user: dict = Depends(require_permission("ontology_maintain")),
 ):
     """Create a new node with a generated externalId.  Writes Neo4j audit + DynamoDB changelog."""
-    if not neo4j.is_available():
-        raise HTTPException(status_code=503, detail="Neo4j not available")
-    try:
-        node = neo4j.create_node(body.label, body.name, body.props or {}, user["username"])
-    except Exception as exc:
-        log.exception("create_node failed")
-        raise HTTPException(status_code=500, detail=str(exc))
-    entity_id = node.get("elementId") or node.get("id", "unknown")
-    try:
-        dynamo.write_changelog(_build_changelog_entry(
-            entity_id=str(entity_id),
-            external_id=node.get("externalId"),
-            entity_type="Node",
-            entity_label=body.label,
-            entity_name=body.name,
-            change_type="CREATE",
-            actor=user["username"],
-            before=None,
-            after={**(body.props or {}), "name": body.name, "label": body.label},
-            source="api",
-            notes=f"Node created via API by {user['username']}",
-        ))
-    except Exception:
-        pass
-    return {"ok": True, "node": node}
+    from src.graph import provenance
+    with provenance.trace_run(
+        provenance.PIPELINE_MANUAL,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"], actorId=user.get("userId", ""),
+        source="manual",
+        sourceDetail=f"created {body.label} \u201c{body.name}\u201d in Onto Verse",
+        writtenBy="ontology_universe.create_node",
+    ):
+        if not neo4j.is_available():
+            raise HTTPException(status_code=503, detail="Neo4j not available")
+        try:
+            node = neo4j.create_node(body.label, body.name, body.props or {}, user["username"])
+        except Exception as exc:
+            log.exception("create_node failed")
+            raise HTTPException(status_code=500, detail=str(exc))
+        entity_id = node.get("elementId") or node.get("id", "unknown")
+        try:
+            dynamo.write_changelog(_build_changelog_entry(
+                entity_id=str(entity_id),
+                external_id=node.get("externalId"),
+                entity_type="Node",
+                entity_label=body.label,
+                entity_name=body.name,
+                change_type="CREATE",
+                actor=user["username"],
+                before=None,
+                after={**(body.props or {}), "name": body.name, "label": body.label},
+                source="api",
+                notes=f"Node created via API by {user['username']}",
+            ))
+        except Exception:
+            pass
+        return {"ok": True, "node": node}
 
 
 @router.put("/nodes/{node_id}")
@@ -216,44 +234,53 @@ def update_node(
     user: dict = Depends(require_permission("ontology_maintain")),
 ):
     """Update a single property on any node.  Writes Neo4j AuditLog + DynamoDB changelog."""
-    if not neo4j.is_available():
-        raise HTTPException(status_code=503, detail="Neo4j not available")
-    existing = neo4j.get_node_by_id(node_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Node {node_id!r} not found")
-    before = existing.get(body.prop)
-    ok = neo4j.update_node_property(node_id, body.prop, body.value)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Update failed")
-    entity_name = existing.get("name") or existing.get("externalId") or node_id
-    entity_label = existing["labels"][0] if existing.get("labels") else "Unknown"
-    try:
-        neo4j.write_audit_log(
-            actor=user["username"],
-            action=f"UPDATE_PROPERTY:{body.prop}",
-            target_id=node_id,
-            before=before,
-            after=body.value,
-        )
-    except Exception:
-        pass
-    try:
-        dynamo.write_changelog(_build_changelog_entry(
-            entity_id=node_id,
-            external_id=existing.get("externalId"),
-            entity_type="Node",
-            entity_label=entity_label,
-            entity_name=entity_name,
-            change_type="UPDATE",
-            actor=user["username"],
-            before={body.prop: before},
-            after={body.prop: body.value},
-            source="api",
-            notes=f"{body.prop}: {before!r} → {body.value!r}",
-        ))
-    except Exception:
-        pass
-    return {"ok": True, "node_id": node_id, "prop": body.prop, "value": body.value}
+    from src.graph import provenance
+    with provenance.trace_run(
+        provenance.PIPELINE_MANUAL,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"], actorId=user.get("userId", ""),
+        source="manual",
+        sourceDetail=f"edited {body.prop} in Onto Verse",
+        writtenBy="ontology_universe.update_node",
+    ):
+        if not neo4j.is_available():
+            raise HTTPException(status_code=503, detail="Neo4j not available")
+        existing = neo4j.get_node_by_id(node_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Node {node_id!r} not found")
+        before = existing.get(body.prop)
+        ok = neo4j.update_node_property(node_id, body.prop, body.value)
+        if not ok:
+            raise HTTPException(status_code=500, detail="Update failed")
+        entity_name = existing.get("name") or existing.get("externalId") or node_id
+        entity_label = existing["labels"][0] if existing.get("labels") else "Unknown"
+        try:
+            neo4j.write_audit_log(
+                actor=user["username"],
+                action=f"UPDATE_PROPERTY:{body.prop}",
+                target_id=node_id,
+                before=before,
+                after=body.value,
+            )
+        except Exception:
+            pass
+        try:
+            dynamo.write_changelog(_build_changelog_entry(
+                entity_id=node_id,
+                external_id=existing.get("externalId"),
+                entity_type="Node",
+                entity_label=entity_label,
+                entity_name=entity_name,
+                change_type="UPDATE",
+                actor=user["username"],
+                before={body.prop: before},
+                after={body.prop: body.value},
+                source="api",
+                notes=f"{body.prop}: {before!r} → {body.value!r}",
+            ))
+        except Exception:
+            pass
+        return {"ok": True, "node_id": node_id, "prop": body.prop, "value": body.value}
 
 
 @router.post("/nodes/{node_id}/relationships")
@@ -263,46 +290,55 @@ def add_relationship(
     user: dict = Depends(require_permission("ontology_maintain")),
 ):
     """Add a relationship from a node to another.  Writes Neo4j AuditLog + DynamoDB changelog."""
-    if not neo4j.is_available():
-        raise HTTPException(status_code=503, detail="Neo4j not available")
-    node = neo4j.get_node_by_id(node_id)
-    if not node:
-        raise HTTPException(status_code=404, detail=f"Source node {node_id!r} not found")
-    from_label = node["labels"][0] if node.get("labels") else "Unknown"
-    from_eid = node.get("externalId", node_id)
-    ok = neo4j.upsert_relationship(from_label, from_eid, body.to_label, body.to_external_id, body.rel_type, body.props)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Relationship creation failed")
-    entity_name = node.get("name") or node.get("externalId") or node_id
-    try:
-        neo4j.write_audit_log(
-            actor=user["username"],
-            action=f"ADD_RELATIONSHIP:{body.rel_type}",
-            target_id=node_id,
-            before=None,
-            after={"to": body.to_external_id, "type": body.rel_type},
-        )
-    except Exception:
-        pass
-    try:
-        dynamo.write_changelog(_build_changelog_entry(
-            entity_id=node_id,
-            # A relationship has no externalId of its own; key its history to the
-            # source node so it stays with something portable.
-            external_id=from_eid,
-            entity_type="Relationship",
-            entity_label=body.rel_type,
-            entity_name=f"{entity_name} → {body.to_external_id}",
-            change_type="RELATIONSHIP_ADD",
-            actor=user["username"],
-            before=None,
-            after={"from": from_eid, "to": body.to_external_id, "type": body.rel_type},
-            source="api",
-            notes=f"Added {body.rel_type} from {entity_name} to {body.to_external_id}",
-        ))
-    except Exception:
-        pass
-    return {"ok": True}
+    from src.graph import provenance
+    with provenance.trace_run(
+        provenance.PIPELINE_MANUAL,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"], actorId=user.get("userId", ""),
+        source="manual",
+        sourceDetail=f"added {body.rel_type} relationship in Onto Verse",
+        writtenBy="ontology_universe.add_relationship",
+    ):
+        if not neo4j.is_available():
+            raise HTTPException(status_code=503, detail="Neo4j not available")
+        node = neo4j.get_node_by_id(node_id)
+        if not node:
+            raise HTTPException(status_code=404, detail=f"Source node {node_id!r} not found")
+        from_label = node["labels"][0] if node.get("labels") else "Unknown"
+        from_eid = node.get("externalId", node_id)
+        ok = neo4j.upsert_relationship(from_label, from_eid, body.to_label, body.to_external_id, body.rel_type, body.props)
+        if not ok:
+            raise HTTPException(status_code=500, detail="Relationship creation failed")
+        entity_name = node.get("name") or node.get("externalId") or node_id
+        try:
+            neo4j.write_audit_log(
+                actor=user["username"],
+                action=f"ADD_RELATIONSHIP:{body.rel_type}",
+                target_id=node_id,
+                before=None,
+                after={"to": body.to_external_id, "type": body.rel_type},
+            )
+        except Exception:
+            pass
+        try:
+            dynamo.write_changelog(_build_changelog_entry(
+                entity_id=node_id,
+                # A relationship has no externalId of its own; key its history to the
+                # source node so it stays with something portable.
+                external_id=from_eid,
+                entity_type="Relationship",
+                entity_label=body.rel_type,
+                entity_name=f"{entity_name} → {body.to_external_id}",
+                change_type="RELATIONSHIP_ADD",
+                actor=user["username"],
+                before=None,
+                after={"from": from_eid, "to": body.to_external_id, "type": body.rel_type},
+                source="api",
+                notes=f"Added {body.rel_type} from {entity_name} to {body.to_external_id}",
+            ))
+        except Exception:
+            pass
+        return {"ok": True}
 
 
 @router.post("/relationships/{rel_id}/archive")
@@ -311,37 +347,46 @@ def archive_relationship(
     user: dict = Depends(require_permission("ontology_maintain")),
 ):
     """Soft-delete a relationship (sets active=false).  Writes Neo4j AuditLog + DynamoDB changelog."""
-    if not neo4j.is_available():
-        raise HTTPException(status_code=503, detail="Neo4j not available")
-    ok = neo4j.archive_relationship(rel_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"Relationship {rel_id!r} not found")
-    try:
-        neo4j.write_audit_log(
-            actor=user["username"],
-            action="ARCHIVE_RELATIONSHIP",
-            target_id=rel_id,
-            before={"active": True},
-            after={"active": False},
-        )
-    except Exception:
-        pass
-    try:
-        dynamo.write_changelog(_build_changelog_entry(
-            entity_id=rel_id,
-            entity_type="Relationship",
-            entity_label="Relationship",
-            entity_name=rel_id,
-            change_type="RELATIONSHIP_ARCHIVE",
-            actor=user["username"],
-            before={"active": True},
-            after={"active": False},
-            source="api",
-            notes=f"Relationship archived by {user['username']}",
-        ))
-    except Exception:
-        pass
-    return {"ok": True}
+    from src.graph import provenance
+    with provenance.trace_run(
+        provenance.PIPELINE_MANUAL,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"], actorId=user.get("userId", ""),
+        source="manual",
+        sourceDetail="archived a relationship in Onto Verse",
+        writtenBy="ontology_universe.archive_relationship",
+    ):
+        if not neo4j.is_available():
+            raise HTTPException(status_code=503, detail="Neo4j not available")
+        ok = neo4j.archive_relationship(rel_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Relationship {rel_id!r} not found")
+        try:
+            neo4j.write_audit_log(
+                actor=user["username"],
+                action="ARCHIVE_RELATIONSHIP",
+                target_id=rel_id,
+                before={"active": True},
+                after={"active": False},
+            )
+        except Exception:
+            pass
+        try:
+            dynamo.write_changelog(_build_changelog_entry(
+                entity_id=rel_id,
+                entity_type="Relationship",
+                entity_label="Relationship",
+                entity_name=rel_id,
+                change_type="RELATIONSHIP_ARCHIVE",
+                actor=user["username"],
+                before={"active": True},
+                after={"active": False},
+                source="api",
+                notes=f"Relationship archived by {user['username']}",
+            ))
+        except Exception:
+            pass
+        return {"ok": True}
 
 
 @router.get("/audit-log")
@@ -508,9 +553,23 @@ async def _apply_or_reject_changes(
     session_id = pending.get("session_id", "chat")
     actor = user["username"]
 
-    for change in pending["changes"]:
-        result = await _execute_single_change(change, actor, session_id)
-        results.append(result)
+    from src.graph import provenance
+    # One run for the whole approved batch. The maintainer chat proposes a set of
+    # changes and a human approves them together, so they are one decision — and
+    # the trace should read as one.
+    with provenance.trace_run(
+        provenance.PIPELINE_MANUAL,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=actor,
+        source="chat",
+        sourceDetail="approved in the Onto Verse maintainer chat",
+        sessionId=session_id,
+        writtenBy="ontology_universe.maintainer_chat",
+        notes=f"{len(pending['changes'])} change(s) approved by {actor}",
+    ):
+        for change in pending["changes"]:
+            result = await _execute_single_change(change, actor, session_id)
+            results.append(result)
 
     await ws.send_json({"type": "change_result", "changeId": change_id, "success": True, "results": results})
     await ws.send_json({"type": "graph_refresh_needed"})

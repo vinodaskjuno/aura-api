@@ -67,61 +67,72 @@ async def load_via_mcp(
     body: McpLoadRequest,
     user: dict = Depends(require_permission("ontology_maintain")),
 ):
-    """Ingest from selected MCP connectors and write a version record."""
-    from src.services.ontology_version_service import create_version_record, finish_version_record
+    """Ingest from selected MCP connectors, fully attributed."""
+    from src.graph import provenance
     from src.graph import neo4j_client as neo4j
 
     if not neo4j.is_available():
         raise HTTPException(503, "Neo4j not available")
 
-    version = create_version_record(
-        load_method="mcp",
+    sources = body.sources or []
+    with provenance.trace_run(
+        provenance.PIPELINE_MCP,
+        trigger=provenance.TRIGGER_MANUAL,
         actor=user["username"],
-        sources=body.sources,
+        actorId=user.get("userId", ""),
+        source="mcp",
+        sourceDetail=", ".join(sources) or "synthetic generator",
+        connectorIds=sources,
+        writtenBy="ontology_loader.load_via_mcp",
         notes=body.notes,
-    )
-    version_id = version["versionId"]
+    ) as run:
+        try:
+            if body.synthetic or not sources:
+                # The old path. `run_full_load` reads from connectors/mock_mcp, a
+                # random.seed() generator — nothing here ever touched a real MCP server,
+                # and `sources` was accepted and then never passed on.
+                from src.connectors.ingestion_service import run_full_load
+                result = run_full_load(delta_since=body.delta_since)
+                extra = {}
+            else:
+                import asyncio
 
-    try:
-        if body.synthetic or not body.sources:
-            # The old path. `run_full_load` reads from connectors/mock_mcp, a
-            # random.seed() generator — nothing here ever touched a real MCP server,
-            # and `sources` was accepted and then never passed on.
-            from src.connectors.ingestion_service import run_full_load
-            result = run_full_load(delta_since=body.delta_since)
-            extra = {}
-        else:
-            import asyncio
+                from src.mcp_client.ingest import ingest_from_mcp
 
-            from src.mcp_client.ingest import ingest_from_mcp
+                # In an executor, NOT inline. This route is `async def`, so there is a
+                # running event loop, and ingest_from_mcp drives the async MCP client with
+                # asyncio.run() — which raises "cannot be called from a running event
+                # loop". A thread is also where the blocking Neo4j writes belong.
+                #
+                # traced_callable, not a bare lambda: a plain executor hand-off starts
+                # with an empty context, so everything the ingest wrote would land
+                # unattributed while this run recorded that it had happened.
+                uid = user.get("userId", "")
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, provenance.traced_callable(ingest_from_mcp, uid, sources))
+                extra = {
+                    # What the loader could not map, reported rather than swallowed.
+                    "skipped": result.get("skipped", 0),
+                    "sources": result.get("sources", []),
+                    "errors": result.get("errors", []),
+                }
+                for message in result.get("errors", []):
+                    run.fail(message)
 
-            # In an executor, NOT inline. This route is `async def`, so there is a
-            # running event loop, and ingest_from_mcp drives the async MCP client with
-            # asyncio.run() — which raises "cannot be called from a running event
-            # loop". A thread is also where the blocking Neo4j writes belong.
-            uid = user.get("userId", "")
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: ingest_from_mcp(uid, body.sources))
-            extra = {
-                # What the loader could not map, reported rather than swallowed.
-                "skipped": result.get("skipped", 0),
-                "sources": result.get("sources", []),
-                "errors": result.get("errors", []),
+            stats = {
+                "nodesAdded": result.get("nodes_added", 0),
+                "nodesUpdated": result.get("nodes_updated", 0),
+                "relsAdded": result.get("rels_added", 0),
+                "totalNodes": result.get("total_nodes", 0),
             }
-
-        stats = {
-            "nodesAdded": result.get("nodes_added", 0),
-            "nodesUpdated": result.get("nodes_updated", 0),
-            "relsAdded": result.get("rels_added", 0),
-            "totalNodes": result.get("total_nodes", 0),
-        }
-        finish_version_record(version_id, "success", stats)
-        return {"versionId": version_id, "versionNumber": version["versionNumber"],
-                **stats, **extra}
-    except Exception as exc:
-        finish_version_record(version_id, "failed", {"nodesAdded": 0, "nodesUpdated": 0, "relsAdded": 0, "totalNodes": 0})
-        log.exception("MCP load failed")
-        raise HTTPException(500, str(exc))
+            run.record_stats(**stats)
+            return {"versionId": run.runId, "versionNumber": run.versionNumber,
+                    **stats, **extra}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("MCP load failed")
+            raise HTTPException(500, str(exc))
 
 
 # ── API load ───────────────────────────────────────────────────────────────────
@@ -133,19 +144,11 @@ async def load_via_api(
 ):
     """Fetch JSON from an external REST API and load into Neo4j."""
     import httpx
-    from src.services.ontology_version_service import create_version_record, finish_version_record
+    from src.graph import provenance
     from src.graph import neo4j_client as neo4j
 
     if not neo4j.is_available():
         raise HTTPException(503, "Neo4j not available")
-
-    version = create_version_record(
-        load_method="api",
-        actor=user["username"],
-        sources=[body.url],
-        notes=body.notes,
-    )
-    version_id = version["versionId"]
 
     headers: dict[str, str] = {}
     auth = None
@@ -156,24 +159,36 @@ async def load_via_api(
     elif body.auth_type == "apikey" and body.api_key_header:
         headers[body.api_key_header] = body.api_key_value or ""
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(body.url, headers=headers, auth=auth)
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:
-        finish_version_record(version_id, "failed", {"nodesAdded": 0, "nodesUpdated": 0, "relsAdded": 0, "totalNodes": 0})
-        raise HTTPException(400, f"API fetch failed: {exc}")
+    with provenance.trace_run(
+        provenance.PIPELINE_API,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user["username"],
+        actorId=user.get("userId", ""),
+        source="api_ingest",
+        sourceDetail=body.url,
+        sourceRecordId=body.url,
+        writtenBy="ontology_loader.load_via_api",
+        notes=body.notes,
+    ) as run:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(body.url, headers=headers, auth=auth)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            raise HTTPException(400, f"API fetch failed: {exc}")
 
-    try:
-        from src.services.file_load_service import load_json_records
-        stats = load_json_records(data if isinstance(data, list) else data.get("nodes", []), version_id)
-        finish_version_record(version_id, "success", stats)
-        return {"versionId": version_id, "versionNumber": version["versionNumber"], **stats}
-    except Exception as exc:
-        finish_version_record(version_id, "failed", {"nodesAdded": 0, "nodesUpdated": 0, "relsAdded": 0, "totalNodes": 0})
-        log.exception("API load failed")
-        raise HTTPException(500, str(exc))
+        try:
+            from src.services.file_load_service import load_json_records
+            stats = load_json_records(
+                data if isinstance(data, list) else data.get("nodes", []), run.runId)
+            run.record_stats(**stats)
+            return {"versionId": run.runId, "versionNumber": run.versionNumber, **stats}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("API load failed")
+            raise HTTPException(500, str(exc))
 
 
 # ── File upload load ───────────────────────────────────────────────────────────
@@ -185,7 +200,7 @@ async def load_via_file(
     user: dict = Depends(require_permission("ontology_maintain")),
 ):
     """Upload a JSON / Excel (.xlsx) / CSV file and load into Neo4j."""
-    from src.services.ontology_version_service import create_version_record, finish_version_record
+    from src.graph import provenance
     from src.graph import neo4j_client as neo4j
 
     if not neo4j.is_available():
@@ -199,37 +214,35 @@ async def load_via_file(
     if len(raw) > 50 * 1024 * 1024:
         raise HTTPException(400, "File too large — maximum 50 MB")
 
-    file_info = {
-        "name": file.filename,
-        "size": len(raw),
-        "type": file.content_type or "",
-    }
-    version = create_version_record(
-        load_method="file",
+    with provenance.trace_run(
+        provenance.PIPELINE_FILE,
+        trigger=provenance.TRIGGER_MANUAL,
         actor=user["username"],
-        sources=[file.filename],
+        actorId=user.get("userId", ""),
+        source="file_upload",
+        sourceDetail=file.filename,
+        writtenBy="ontology_loader.load_via_file",
         notes=notes,
-        file_info=file_info,
-    )
-    version_id = version["versionId"]
-
-    try:
-        from src.services.file_load_service import load_file_bytes
-        stats = load_file_bytes(raw, file.filename, version_id)
-        finish_version_record(version_id, "success", stats)
-        return {
-            "versionId": version_id,
-            "versionNumber": version["versionNumber"],
-            "filename": file.filename,
-            **stats,
-        }
-    except ValueError as exc:
-        finish_version_record(version_id, "failed", {"nodesAdded": 0, "nodesUpdated": 0, "relsAdded": 0, "totalNodes": 0})
-        raise HTTPException(400, str(exc))
-    except Exception as exc:
-        finish_version_record(version_id, "failed", {"nodesAdded": 0, "nodesUpdated": 0, "relsAdded": 0, "totalNodes": 0})
-        log.exception("File load failed")
-        raise HTTPException(500, str(exc))
+        fileInfo={"name": file.filename, "size": len(raw),
+                  "type": file.content_type or ""},
+    ) as run:
+        try:
+            from src.services.file_load_service import load_file_bytes
+            stats = load_file_bytes(raw, file.filename, run.runId)
+            run.record_stats(**stats)
+            return {
+                "versionId": run.runId,
+                "versionNumber": run.versionNumber,
+                "filename": file.filename,
+                **stats,
+            }
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log.exception("File load failed")
+            raise HTTPException(500, str(exc))
 
 
 # ── Version records ────────────────────────────────────────────────────────────

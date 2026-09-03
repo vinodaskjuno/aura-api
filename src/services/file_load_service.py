@@ -52,6 +52,7 @@ def load_file_bytes(raw: bytes, filename: str, version_id: str | None = None) ->
 def load_json_records(records: list[dict], version_id: str | None = None) -> dict[str, int]:
     """Write normalised records to Neo4j. Returns stats dict."""
     from src.graph import neo4j_client as neo4j
+    from src.graph import provenance
 
     nodes_added = nodes_updated = rels_added = 0
     for rec in records:
@@ -59,12 +60,24 @@ def load_json_records(records: list[dict], version_id: str | None = None) -> dic
         props: dict[str, Any] = rec.get("properties", {})
         ext_id = props.get("externalId") or f"file:{uuid.uuid4()}"
 
-        existing = _node_exists(label, ext_id)
-        neo4j.upsert_node_with_version(label, ext_id, props, version_id=version_id)
-        if existing:
-            nodes_updated += 1
-        else:
+        # traced_upsert rather than upsert_node_with_version: it records a CREATE or
+        # UPDATE in the changelog, so an uploaded node has a timeline rather than
+        # just a ribbon. It also reports created-vs-updated from inside the write
+        # transaction, which `_node_exists` could only guess at from a prior read.
+        try:
+            _eid, created, _diff = provenance.traced_upsert(
+                label, ext_id,
+                {**props, "versionId": version_id} if version_id else props,
+                session_id=f"file:{version_id or ''}",
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad record must not abort the load
+            log.warning("Node skip %s %s: %s", label, ext_id, exc)
+            provenance.note_error(f"{label} {ext_id}: {exc}")
+            continue
+        if created:
             nodes_added += 1
+        else:
+            nodes_updated += 1
 
         for rel in rec.get("relationships", []):
             try:
@@ -75,7 +88,7 @@ def load_json_records(records: list[dict], version_id: str | None = None) -> dic
                     to_eid=rel["targetExternalId"],
                     rel_type=rel["type"],
                     props=rel.get("props"),
-                    provenance={
+                    provenance_props={
                         "source": "file_upload",
                         "discoveredBy": "file_load_service",
                         "confidence": 1.0,
@@ -204,16 +217,6 @@ def _normalise_record(raw: dict) -> dict:
         props["externalId"] = f"file:{uuid.uuid4()}"
     rels = raw.get("relationships", [])
     return {"label": label, "properties": props, "relationships": rels}
-
-
-def _node_exists(label: str, ext_id: str) -> bool:
-    try:
-        from src.graph import neo4j_client as neo4j
-        cypher = f"MATCH (n:{label} {{externalId: $eid}}) RETURN 1 LIMIT 1"
-        with neo4j.session() as s:
-            return s.run(cypher, eid=ext_id).single() is not None
-    except Exception:
-        return False
 
 
 def _count_nodes() -> int:

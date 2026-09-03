@@ -122,13 +122,29 @@ def record(investigation_id: str, source: str, verdict: str, *,
         service_name=service_name or inv.get("serviceName", ""),
     )
     store.save_outcome(outcome.to_row())
-    _write_graph(outcome)
 
-    if outcome.teaches:
-        _learn(outcome, inv)
-    else:
-        log.info("Outcome for %s recorded at confidence %.2f — below the learning "
-                 "threshold, so it will not teach", investigation_id, outcome.confidence)
+    from src.graph import provenance
+    # The learning loop is the one pipeline where the graph changes without anyone
+    # touching it, so it is also the one where "why is this here?" is hardest to
+    # answer after the fact. `confirmed_by` is the human whose verdict drove it,
+    # when there was one — otherwise the signal source stands in.
+    with provenance.trace_run(
+        provenance.PIPELINE_SELF_LEARNING,
+        trigger=provenance.TRIGGER_AUTOMATIC,
+        actor=outcome.confirmed_by or f"signal:{source}",
+        source="observability",
+        sourceDetail=f"investigation {investigation_id} · verdict {final_verdict}",
+        sourceRecordId=investigation_id,
+        writtenBy="observability.outcomes",
+        notes=f"Outcome recorded from {source} at confidence {confidence:.2f}",
+    ):
+        _write_graph(outcome)
+
+        if outcome.teaches:
+            _learn(outcome, inv)
+        else:
+            log.info("Outcome for %s recorded at confidence %.2f — below the learning "
+                     "threshold, so it will not teach", investigation_id, outcome.confidence)
     return outcome
 
 
@@ -150,7 +166,7 @@ def _write_graph(outcome: IncidentOutcome) -> None:
         graph.upsert_relationship(
             "Incident", f"incident:{outcome.investigation_id}",
             "IncidentOutcome", oid, "HAS_OUTCOME",
-            provenance={"source": "observability", "discoveredBy": "outcomes",
+            provenance_props={"source": "observability", "discoveredBy": "outcomes",
                         "confidence": outcome.confidence, "factType": "known"})
     except Exception as exc:  # noqa: BLE001
         log.debug("Could not write outcome to graph: %s", exc)

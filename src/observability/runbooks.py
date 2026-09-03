@@ -160,15 +160,29 @@ def save_runbook(doc: dict, body: str = "", project_id: str = "") -> dict:
     }
     try:
         from src.graph import neo4j_client as graph
-        graph.upsert_node("Runbook", rid, props)
-        for svc in props["services"]:
-            if not svc:
-                continue
-            graph.upsert_node("Service", f"service:{svc}", {"name": svc})
-            graph.upsert_relationship(
-                "Runbook", rid, "Service", f"service:{svc}", "DOCUMENTS",
-                provenance={"source": "observability", "discoveredBy": "runbook_ingest",
-                            "confidence": 1.0, "factType": "known"})
+        from src.graph import provenance
+        # ensure_run, not trace_run: this is called from inside the learning loop
+        # (where the outcome's run should own the write) and directly from the
+        # upload route (where nothing else will).
+        with provenance.ensure_run(
+            provenance.PIPELINE_SELF_LEARNING,
+            trigger=provenance.TRIGGER_MANUAL,
+            actor=doc.get("createdBy", "") or doc.get("origin", "human"),
+            source="observability",
+            sourceDetail=f"runbook {doc.get('title', rid)}",
+            sourceRecordId=rid,
+            projectId=project_id,
+            writtenBy="observability.runbooks.save_runbook",
+        ):
+            graph.upsert_node("Runbook", rid, props)
+            for svc in props["services"]:
+                if not svc:
+                    continue
+                graph.upsert_node("Service", f"service:{svc}", {"name": svc})
+                graph.upsert_relationship(
+                    "Runbook", rid, "Service", f"service:{svc}", "DOCUMENTS",
+                    provenance_props={"source": "observability", "discoveredBy": "runbook_ingest",
+                                "confidence": 1.0, "factType": "known"})
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not persist runbook %s: %s", rid, exc)
     return {**props, "runbookId": rid, "steps": doc.get("steps") or []}

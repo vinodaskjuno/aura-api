@@ -81,11 +81,11 @@ class KnowledgeAnalyzerAgent(BaseAgent):
             nodes_added += 1
 
         for rel in knowledge.get("relationships", []):
-            neo4j.upsert_relationship(
-                source_external_id=rel["source"],
-                target_external_id=rel["target"],
+            neo4j.link_nodes_by_eid(
+                from_eid=rel["source"],
+                to_eid=rel["target"],
                 rel_type=rel["type"],
-                provenance={"source": rel.get("source_system", "wiki"),
+                provenance_props={"source": rel.get("source_system", "wiki"),
                             "discoveredBy": self.name, "confidence": rel.get("confidence", 0.8),
                             "factType": "known"},
             )

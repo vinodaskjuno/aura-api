@@ -72,11 +72,11 @@ class BusinessLogicAnalyzerAgent(BaseAgent):
             nodes_added += 1
 
             if rule.get("implemented_by"):
-                neo4j.upsert_relationship(
-                    source_external_id=rule["implemented_by"],
-                    target_external_id=rule["id"],
+                neo4j.link_nodes_by_eid(
+                    from_eid=rule["implemented_by"],
+                    to_eid=rule["id"],
                     rel_type="IMPLEMENTS",
-                    provenance={
+                    provenance_props={
                         "source": "business_logic_analysis",
                         "discoveredBy": self.name,
                         "confidence": rule.get("confidence", 0.8),

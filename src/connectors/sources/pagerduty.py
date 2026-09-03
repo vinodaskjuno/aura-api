@@ -19,6 +19,8 @@ class PagerDutyConnector(AbstractConnector):
         return {"Authorization": f"Token token={self.config['api_token']}",
                 "Accept": "application/vnd.pagerduty+json;version=2"}
 
+    pipeline = "api"
+
     def test_connection(self) -> tuple[bool, str]:
         try:
             resp = httpx.get(f"{_BASE}/abilities", headers=self._headers(), timeout=10)
@@ -60,7 +62,7 @@ class PagerDutyConnector(AbstractConnector):
                 graph.upsert_node("Service", f"service:{service}", {"name": service})
                 graph.upsert_relationship(
                     "Service", f"service:{service}", "Incident", eid, "HAS_INCIDENT",
-                    provenance={"source": "pagerduty",
+                    provenance_props={"source": "pagerduty",
                                 "sourceRecordId": incident.get("id", ""),
                                 "discoveredBy": "pagerduty_connector",
                                 "confidence": 1.0, "factType": "known"},

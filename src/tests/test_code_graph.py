@@ -36,9 +36,9 @@ class FakeGraph:
         return before, after, f"elem:{external_id}", created
 
     def upsert_relationship(self, from_label, from_eid, to_label, to_eid,
-                            rel_type, props=None, provenance=None):
+                            rel_type, props=None, provenance_props=None):
         self.edges[(from_eid, rel_type, to_eid)] = {
-            "active": True, **(provenance or {})}
+            "active": True, **(provenance_props or {})}
         return True
 
     def write_audit_log(self, actor, action, target_id, before, after):
@@ -217,7 +217,11 @@ def test_removed_dependency_is_archived_not_deleted(graph):
     assert "dep:p1:pypi:httpx" in graph.nodes
     assert graph.edges[("repo:p1:backend", "DEPENDS_ON", "dep:p1:pypi:httpx")]["active"] is False
     assert graph.edges[("repo:p1:backend", "DEPENDS_ON", "dep:p1:pypi:fastapi")]["active"] is True
-    assert any(a["action"] == "ARCHIVE_RELATIONSHIP:Dependency" for a in graph.audits)
+    # RELATIONSHIP_ARCHIVE, not ARCHIVE_RELATIONSHIP: this module used its own
+    # spelling while routers/ontology_universe.py used the other, so one entity's
+    # timeline could show the same kind of event under two names. The router's
+    # spelling wins — the UI's change-type palette is already keyed on it.
+    assert any(a["action"] == "RELATIONSHIP_ARCHIVE:Dependency" for a in graph.audits)
 
 
 def test_archival_is_scoped_to_one_repository(graph):

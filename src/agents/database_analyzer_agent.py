@@ -72,11 +72,11 @@ class DatabaseAnalyzerAgent(BaseAgent):
                     props={"name": table["name"], "rowEstimate": table.get("row_estimate")},
                     version_id=version_id,
                 )
-                neo4j.upsert_relationship(
-                    source_external_id=db["id"],
-                    target_external_id=table_id,
+                neo4j.link_nodes_by_eid(
+                    from_eid=db["id"],
+                    to_eid=table_id,
                     rel_type="CONTAINS",
-                    provenance={"source": "database_analysis", "discoveredBy": self.name,
+                    provenance_props={"source": "database_analysis", "discoveredBy": self.name,
                                 "confidence": 0.98, "factType": "known"},
                 )
                 nodes_added += 1
