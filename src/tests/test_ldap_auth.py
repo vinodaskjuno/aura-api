@@ -419,3 +419,289 @@ def test_placeholder_bind_password_reports_as_unset(monkeypatch):
         body = auth_router.get_ldap_config.__wrapped__() if hasattr(
             auth_router.get_ldap_config, "__wrapped__") else auth_router.get_ldap_config({})
         assert body["connection"]["bindPasswordSet"] is expected, stored
+
+
+# ── Organization roles ───────────────────────────────────────────────────────
+#
+# The tier between a directory group and a permission. Several AD groups mean the
+# same business function; the org role is where that is said once.
+
+def org_cfg(roles, mappings, enabled=True) -> AuthConfig:
+    return AuthConfig(enabled=enabled, org_roles=list(roles), mappings=list(mappings))
+
+
+def test_two_groups_on_one_org_role_grant_the_same_thing():
+    """The reason the tier exists — say it once, not once per group."""
+    engineering = auth_config.OrgRole(
+        id="engineering", label="Engineering",
+        permissions=["dashboard", "dev_workspace"], priority=50)
+    config = org_cfg(
+        [engineering],
+        [auth_config.Mapping("AURA-Dev", org_role_id="engineering"),
+         auth_config.Mapping("platform-eng", org_role_id="engineering")])
+
+    a = auth_config.resolve(["AURA-Dev"], config)
+    b = auth_config.resolve(["platform-eng"], config)
+    assert a["permissions"] == b["permissions"] == ["dashboard", "dev_workspace"]
+    assert a["roleId"] == b["roleId"] == "engineering"
+
+
+def test_several_org_roles_give_the_union_and_the_top_one_names_the_role():
+    config = org_cfg(
+        [auth_config.OrgRole(id="engineering", label="Engineering",
+                             permissions=["dashboard", "dev_workspace"], priority=50),
+         auth_config.OrgRole(id="platform", label="Platform",
+                             permissions=["dashboard", "settings"], priority=90)],
+        [auth_config.Mapping("AURA-Dev", org_role_id="engineering"),
+         auth_config.Mapping("AURA-Plat", org_role_id="platform")])
+
+    r = auth_config.resolve(["AURA-Dev", "AURA-Plat"], config)
+    assert set(r["permissions"]) == {"dashboard", "dev_workspace", "settings"}
+    assert r["roleId"] == "platform"
+    assert r["roleLabel"] == "Platform"
+
+
+def test_a_mapping_pointing_at_a_deleted_org_role_grants_nothing():
+    """Save-time validation rejects this, but a hand-edited DynamoDB row can produce
+    it — and the safe reading of a dangling pointer is 'no access', not 'all access'."""
+    config = org_cfg([], [auth_config.Mapping("AURA-Dev", org_role_id="gone")])
+    assert auth_config.resolve(["AURA-Dev"], config)["permissions"] == []
+
+
+# ── Upgrading a configuration written before org roles existed ───────────────
+
+def test_a_legacy_role_mapping_resolves_identically_after_the_upgrade():
+    """The regression that would lock everyone out of a deployed environment.
+
+    A configuration saved by the previous build must grant exactly what it granted
+    before, with no migration step run first.
+    """
+    from src.services.auth_service import ROLE_PERMISSIONS
+
+    legacy = cfg(Mapping("AURA-Dev", role_id="user_dev", priority=50))
+    r = auth_config.resolve(["AURA-Dev"], legacy)
+
+    assert r["permissions"] == ROLE_PERMISSIONS["user_dev"]
+    # And the role id is unchanged, so the JWT claim and ROLE_LABELS still resolve.
+    assert r["roleId"] == "user_dev"
+
+
+def test_legacy_groups_naming_the_same_role_collapse_onto_one_org_role():
+    legacy = cfg(Mapping("AURA-Dev", role_id="user_dev", priority=50),
+                 Mapping("platform-eng", role_id="user_dev", priority=50))
+    upgraded = auth_config._upgrade(legacy)
+
+    assert len(upgraded.org_roles) == 1
+    assert upgraded.org_roles[0].id == "user_dev"
+    assert {m.org_role_id for m in upgraded.mappings} == {"user_dev"}
+
+
+def test_a_legacy_bare_permission_mapping_keeps_its_extras():
+    """A group granted one extra screen on top of a role must not lose it."""
+    legacy = cfg(Mapping("AURA-Dev", role_id="user_dev", permissions=["settings"]))
+    r = auth_config.resolve(["AURA-Dev"], legacy)
+    assert "settings" in r["permissions"]
+    assert "dev_workspace" in r["permissions"]
+
+
+def test_a_legacy_mapping_with_no_role_gets_its_own_org_role():
+    legacy = cfg(Mapping("AURA-Contractors", permissions=["dashboard"]))
+    upgraded = auth_config._upgrade(legacy)
+
+    assert len(upgraded.org_roles) == 1
+    assert upgraded.org_roles[0].permissions == ["dashboard"]
+    assert auth_config.resolve(["AURA-Contractors"], legacy)["permissions"] == ["dashboard"]
+
+
+def test_the_upgrade_leaves_an_already_upgraded_config_alone():
+    """It runs on every resolve, so it has to be idempotent."""
+    config = org_cfg(
+        [auth_config.OrgRole(id="engineering", permissions=["dashboard"])],
+        [auth_config.Mapping("AURA-Dev", org_role_id="engineering")])
+    once = auth_config._upgrade(config)
+    twice = auth_config._upgrade(once)
+    assert len(twice.org_roles) == 1
+
+
+# ── Permissions follow the configuration, not the token ──────────────────────
+#
+# Permissions used to be a JWT claim, and the token lives 8 hours — so moving
+# someone between AD groups left them with their old menus for the working day.
+
+def _token_for(username, groups, monkeypatch):
+    from src.services import auth_service
+    monkeypatch.setattr(auth_service, "get_settings",
+                        lambda: type("S", (), {"jwt_secret": "test-secret",
+                                               "jwt_expire_minutes": 480})())
+    return auth_service.create_token({
+        "username": username, "userId": "u1", "role": "engineering",
+        "permissions": ["dashboard"], "groups": groups, "local": False,
+    })
+
+
+def test_the_token_carries_identity_not_permissions(monkeypatch):
+    from jose import jwt
+    token = _token_for("priya", ["AURA-Dev"], monkeypatch)
+    claims = jwt.decode(token, "test-secret", algorithms=["HS256"])
+
+    assert "permissions" not in claims, "permissions in the token is what went stale"
+    assert claims["groups"] == ["AURA-Dev"]
+    assert claims["sub"] == "priya"
+
+
+def test_editing_an_org_role_reaches_an_already_signed_in_user(monkeypatch):
+    """The point of the change: no re-login, no waiting for expiry."""
+    from src.services import auth_config, auth_service
+
+    token = _token_for("priya", ["AURA-Dev"], monkeypatch)
+    # Group membership is read from the token here — the directory is not reachable
+    # in this test, and _current_groups falls back to the token's groups.
+    auth_service.forget_cached_groups()
+
+    narrow = org_cfg([auth_config.OrgRole(id="engineering", permissions=["dashboard"])],
+                     [auth_config.Mapping("AURA-Dev", org_role_id="engineering")])
+    monkeypatch.setattr(auth_config, "get_config", lambda refresh=False: narrow)
+    assert auth_service.verify_token(token)["permissions"] == ["dashboard"]
+
+    wide = org_cfg([auth_config.OrgRole(id="engineering",
+                                        permissions=["dashboard", "qa_workspace"])],
+                   [auth_config.Mapping("AURA-Dev", org_role_id="engineering")])
+    monkeypatch.setattr(auth_config, "get_config", lambda refresh=False: wide)
+    auth_service.forget_cached_groups()
+    assert auth_service.verify_token(token)["permissions"] == ["dashboard", "qa_workspace"]
+
+
+def test_losing_every_mapped_group_revokes_access_on_the_next_request(monkeypatch):
+    from src.services import auth_config, auth_service
+
+    token = _token_for("priya", ["AURA-Dev"], monkeypatch)
+    auth_service.forget_cached_groups()
+    monkeypatch.setattr(auth_config, "get_config", lambda refresh=False:
+                        org_cfg([auth_config.OrgRole(id="ops", permissions=["logs"])],
+                                [auth_config.Mapping("AURA-Ops", org_role_id="ops")]))
+
+    assert auth_service.verify_token(token)["permissions"] == []
+
+
+def test_a_local_token_resolves_from_roles_not_org_roles(monkeypatch):
+    """Break-glass must survive a misconfigured org role — recovering from exactly
+    that is what it is for."""
+    from src.services import auth_config, auth_service
+
+    monkeypatch.setattr(auth_service, "get_settings",
+                        lambda: type("S", (), {"jwt_secret": "test-secret",
+                                               "jwt_expire_minutes": 480})())
+    monkeypatch.setattr(auth_service, "get_role", lambda rid: None)
+    # No org roles at all, and the directory enabled — the worst case.
+    monkeypatch.setattr(auth_config, "get_config", lambda refresh=False:
+                        org_cfg([], [], enabled=True))
+
+    token = auth_service.create_token({
+        "username": "admin", "userId": "u0", "role": "super_admin",
+        "permissions": [], "groups": [], "local": True,
+    })
+    resolved = auth_service.verify_token(token)
+    assert "user_management" in resolved["permissions"]
+
+
+def test_a_token_from_the_previous_build_still_works(monkeypatch):
+    """A deploy must not sign everyone out."""
+    from datetime import datetime, timedelta, timezone
+
+    from jose import jwt
+    from src.services import auth_service
+
+    monkeypatch.setattr(auth_service, "get_settings",
+                        lambda: type("S", (), {"jwt_secret": "test-secret",
+                                               "jwt_expire_minutes": 480})())
+    old_style = jwt.encode(
+        {"sub": "priya", "userId": "u1", "role": "user_dev",
+         "permissions": ["dashboard", "dev_workspace"],
+         "exp": datetime.now(timezone.utc) + timedelta(minutes=60)},
+        "test-secret", algorithm="HS256")
+
+    assert auth_service.verify_token(old_style)["permissions"] == [
+        "dashboard", "dev_workspace"]
+
+
+# ── Save-time validation ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def admin_api(monkeypatch):
+    """A client signed in as someone who may edit the directory configuration."""
+    from fastapi.testclient import TestClient
+    from src.main import app
+    from src.routers.auth import get_current_user
+
+    # Save and restore rather than pop: test_ontology_lens_api installs its own
+    # override at module import, and popping ours would take theirs with it.
+    previous = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "username": "admin", "userId": "u0", "role": "super_admin",
+        "permissions": ["user_management"],
+    }
+    saved: dict = {}
+    monkeypatch.setattr("src.services.auth_config.set_config",
+                        lambda enabled, mappings, actor, org_roles=None: saved.update(
+                            enabled=enabled, mappings=mappings, orgRoles=org_roles)
+                        or __import__("src.services.auth_config", fromlist=["x"]).AuthConfig())
+    yield TestClient(app), saved
+    if previous is None:
+        app.dependency_overrides.pop(get_current_user, None)
+    else:
+        app.dependency_overrides[get_current_user] = previous
+
+
+def _put(client, **body):
+    payload = {"enabled": True, "orgRoles": [], "mappings": [], **body}
+    return client.put("/auth/ldap/config", json=payload)
+
+
+ADMIN_ROLE = {"id": "platform", "label": "Platform",
+              "permissions": ["dashboard", "user_management"], "priority": 90}
+
+
+def test_an_org_role_granting_nothing_is_refused(admin_api):
+    client, _ = admin_api
+    r = _put(client,
+             orgRoles=[ADMIN_ROLE, {"id": "empty", "label": "Empty", "permissions": []}],
+             mappings=[{"group": "AURA-Admins", "orgRoleId": "platform"}])
+    assert r.status_code == 400
+    assert "grants no menus" in r.json()["detail"]
+
+
+def test_a_mapping_pointing_at_an_unknown_org_role_is_refused(admin_api):
+    client, _ = admin_api
+    r = _put(client, orgRoles=[ADMIN_ROLE],
+             mappings=[{"group": "AURA-Admins", "orgRoleId": "platform"},
+                       {"group": "AURA-Dev", "orgRoleId": "nope"}])
+    assert r.status_code == 400
+    assert "unknown organization role" in r.json()["detail"]
+
+
+def test_duplicate_org_role_ids_are_refused(admin_api):
+    client, _ = admin_api
+    r = _put(client, orgRoles=[ADMIN_ROLE, dict(ADMIN_ROLE)],
+             mappings=[{"group": "AURA-Admins", "orgRoleId": "platform"}])
+    assert r.status_code == 400
+    assert "share an id" in r.json()["detail"]
+
+
+def test_a_config_that_locks_every_admin_out_is_refused(admin_api):
+    """One save must not be able to remove the only way to undo it."""
+    client, _ = admin_api
+    r = _put(client,
+             orgRoles=[{"id": "engineering", "label": "Engineering",
+                        "permissions": ["dashboard"], "priority": 50}],
+             mappings=[{"group": "AURA-Dev", "orgRoleId": "engineering"}])
+    assert r.status_code == 400
+    assert "User Management" in r.json()["detail"]
+
+
+def test_a_valid_configuration_saves(admin_api):
+    client, saved = admin_api
+    r = _put(client, orgRoles=[ADMIN_ROLE],
+             mappings=[{"group": "AURA-Admins", "orgRoleId": "platform"}])
+    assert r.status_code == 200
+    assert saved["orgRoles"][0]["id"] == "platform"
+    assert saved["mappings"][0]["orgRoleId"] == "platform"

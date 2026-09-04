@@ -4,11 +4,13 @@ Tables:
   aura-users   PK: userId    fields: username, email, passwordHash, roleId, status, createdAt, lastLogin
   aura-roles   PK: roleId    fields: name, label, permissions (list of feature keys)
 
-5 built-in roles:
-  user_dev   user_qa   user_ops   admin   super_admin
+Access for directory users is granted by AD group → organization role, in
+`auth_config`. What lives here is local sign-in and the built-in role templates.
 """
 import uuid
 import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 from src.config_settings import get_settings
@@ -18,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 # ── Role definitions ─────────────────────────────────────────────────────────
 
+# The six built-in roles. Two narrow jobs now, and neither is granting access to a
+# directory user:
+#   * clone-from templates in the org-role editor, so an admin starts from something
+#     sensible rather than an empty checklist;
+#   * the permission set for break-glass and other local accounts, which must keep
+#     working when org roles are misconfigured — recovering from exactly that is what
+#     break-glass is for.
 ROLE_PERMISSIONS: dict[str, list[str]] = {
     "user_dev": [
         "dashboard", "dev_workspace", "knowledge_graph",
@@ -48,7 +57,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         "dashboard", "dev_workspace", "qa_workspace", "aiops", "observability",
         "knowledge_graph", "ontology", "ontology_maintain",
         "connectors", "upload", "logs", "settings", "user_management",
-        "role_management", "scheduler",
+        "scheduler",
     ],
 }
 
@@ -161,6 +170,10 @@ def list_users() -> list[dict]:
 
 
 def create_user(username: str, email: str, role_id: str, password: str) -> dict:
+    """Kept for `seed_default_data`'s break-glass account only — no endpoint calls it.
+
+    Local accounts are not a way to grant access any more; directory groups are.
+    """
     if get_user_by_username(username):
         raise ValueError(f"Username '{username}' already exists")
     user_id = str(uuid.uuid4())
@@ -205,8 +218,10 @@ def get_role(role_id: str) -> dict | None:
     return get_item("roles", {"roleId": role_id})
 
 
-def update_role_permissions(role_id: str, permissions: list[str]) -> dict | None:
-    return update_item("roles", {"roleId": role_id}, {"permissions": permissions})
+# `update_role_permissions` used to live here. It wrote to the `roles` table, which
+# the directory path never read — so editing a role in the UI changed local sign-in
+# and nothing else, while the screen existed to widen a group's access. Org roles in
+# `auth_config` are now the one editable source; see that module's header.
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -263,8 +278,15 @@ def authenticate(username: str, password: str) -> dict | None:
         "username": directory_user.username,
         "email": directory_user.email,
         "role": role_id,
-        "roleLabel": ROLE_LABELS.get(role_id, directory_user.display_name or "Directory User"),
+        # The org role's own label first — it is what an admin named this business
+        # function, and ROLE_LABELS only knows the six built-ins.
+        "roleLabel": (resolved.get("roleLabel")
+                      or ROLE_LABELS.get(role_id)
+                      or directory_user.display_name or "Directory User"),
         "permissions": resolved["permissions"],
+        # Carried into the token so each request can re-resolve without an LDAP call.
+        "groups": directory_user.groups,
+        "local": False,
     }
 
 
@@ -293,31 +315,133 @@ def _authenticate_local(username: str, password: str,
         "role": user.get("roleId", "user_dev"),
         "roleLabel": ROLE_LABELS.get(user.get("roleId", "user_dev"), "User"),
         "permissions": permissions,
+        "groups": [],
+        # Marks the token as local so `verify_token` resolves it from the roles table
+        # rather than from org roles — see the break-glass note there.
+        "local": True,
     }
 
 
 def create_token(user_data: dict) -> str:
+    """Mint a session token.
+
+    Identity only. `permissions` is deliberately NOT a claim: it used to be, and the
+    token lives for `jwt_expire_minutes` (8 hours by default), so moving someone
+    between AD groups left them with their old menus for the rest of the working day.
+    `groups` and `local` are carried instead — enough to re-resolve permissions on
+    each request without another directory round trip.
+    """
     s = get_settings()
     expire = datetime.now(timezone.utc) + timedelta(minutes=s.jwt_expire_minutes)
     payload = {
         "sub": user_data["username"],
         "userId": user_data["userId"],
         "role": user_data["role"],
-        "permissions": user_data["permissions"],
+        "groups": user_data.get("groups", []),
+        "local": bool(user_data.get("local")),
         "exp": expire,
     }
     return jwt.encode(payload, s.jwt_secret, algorithm="HS256")
 
 
 def verify_token(token: str) -> dict | None:
+    """Decode a token and resolve current permissions for it.
+
+    Permissions come from the live configuration, not from the token, so an edit to
+    an org role reaches every signed-in user on their next request. Tokens minted by
+    an older build still carry a `permissions` claim; it is honoured as a fallback so
+    a deploy does not sign everyone out.
+    """
     s = get_settings()
     try:
         payload = jwt.decode(token, s.jwt_secret, algorithms=["HS256"])
-        return {
-            "username": payload["sub"],
-            "userId": payload.get("userId", ""),
-            "role": payload.get("role", "user_dev"),
-            "permissions": payload.get("permissions", []),
-        }
     except JWTError:
         return None
+
+    username = payload["sub"]
+    claimed = list(payload.get("permissions") or [])
+    role = payload.get("role", "user_dev")
+
+    if payload.get("local"):
+        # Break-glass and local accounts resolve from the roles table, never from org
+        # roles: a misconfigured org role is one of the things break-glass exists to
+        # recover from, so it must not be able to lock break-glass out.
+        stored = get_role(role) or {}
+        permissions = list(stored.get("permissions") or ROLE_PERMISSIONS.get(role, []))
+        return {"username": username, "userId": payload.get("userId", ""),
+                "role": role, "permissions": permissions}
+
+    groups = list(payload.get("groups") or [])
+    if not groups:
+        # Pre-upgrade token, or a local account minted before `local` existed.
+        return {"username": username, "userId": payload.get("userId", ""),
+                "role": role, "permissions": claimed}
+
+    from src.services import auth_config
+    resolved = auth_config.resolve(_current_groups(username, groups))
+    if not resolved["permissions"]:
+        # Removed from every mapped group since sign-in. Returning the token's old
+        # permissions would keep them in until it expired, which is the behaviour
+        # this change exists to remove.
+        logger.info("Access revoked for %s — no mapped group remains", username)
+        return {"username": username, "userId": payload.get("userId", ""),
+                "role": "", "permissions": []}
+
+    return {
+        "username": username,
+        "userId": payload.get("userId", ""),
+        "role": resolved["roleId"],
+        "permissions": resolved["permissions"],
+    }
+
+
+# Directory group membership, cached per user.
+#
+# Re-resolving permissions per request fixes a MAPPING edit immediately, because the
+# mapping is read from a 10s-cached config. It does not by itself fix a GROUP
+# membership change — the groups in the token are whatever they were at sign-in. This
+# cache closes that gap without an LDAP round trip on every request.
+_GROUP_TTL_SECONDS = 300.0
+_group_cache: dict[str, tuple[float, list[str]]] = {}
+_group_lock = threading.Lock()
+
+
+def _current_groups(username: str, fallback: list[str]) -> list[str]:
+    """This user's directory groups, re-read at most every `_GROUP_TTL_SECONDS`.
+
+    Falls back to the token's groups whenever the directory cannot answer. An outage
+    must not revoke everyone mid-session — that would turn a directory blip into a
+    site-wide outage, which is a worse failure than access being a few minutes stale.
+    """
+    now = time.monotonic()
+    with _group_lock:
+        hit = _group_cache.get(username)
+        if hit and (now - hit[0]) < _GROUP_TTL_SECONDS:
+            return hit[1]
+
+    groups = fallback
+    try:
+        from src.services import ldap_auth
+        looked_up = ldap_auth.lookup_groups(username)
+        if looked_up.get("ok"):
+            groups = list(looked_up.get("groups") or [])
+    except Exception as exc:  # noqa: BLE001 — never fail a request over this
+        logger.debug("group refresh failed for %s, using token groups: %s", username, exc)
+
+    with _group_lock:
+        _group_cache[username] = (now, groups)
+    return groups
+
+
+def forget_cached_groups(username: str = "") -> None:
+    """Drop cached group membership so the next request re-reads the directory.
+
+    Not needed after a mapping edit — those are read through `get_config`, which has
+    its own 10s cache. This is for the case the TTL cannot cover: an admin who has
+    just moved someone in AD and wants to see it immediately, and for tests.
+    """
+    with _group_lock:
+        if username:
+            _group_cache.pop(username, None)
+        else:
+            _group_cache.clear()

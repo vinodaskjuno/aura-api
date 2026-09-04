@@ -4,9 +4,7 @@ from pydantic import BaseModel
 from typing import Callable
 from src.services.auth_service import (
     authenticate, create_token, verify_token,
-    list_users, create_user, update_user, deactivate_user,
-    list_roles, get_role, update_role_permissions,
-    ROLE_PERMISSIONS,
+    list_users, update_user, get_role,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -30,22 +28,8 @@ class TokenResponse(BaseModel):
     permissions: list[str]
 
 
-class CreateUserRequest(BaseModel):
-    username: str
-    email: str
-    roleId: str
+class RotatePasswordRequest(BaseModel):
     password: str
-
-
-class UpdateUserRequest(BaseModel):
-    email: str | None = None
-    roleId: str | None = None
-    status: str | None = None
-    password: str | None = None
-
-
-class UpdateRoleRequest(BaseModel):
-    permissions: list[str]
 
 
 # ── Auth dependencies ─────────────────────────────────────────────────────────
@@ -57,16 +41,11 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)) -> d
     return user
 
 
-def require_role(*allowed_roles: str) -> Callable:
-    """FastAPI dependency factory — raises 403 if user role not in allowed_roles."""
-    def _check(user: dict = Depends(get_current_user)) -> dict:
-        if user.get("role") not in allowed_roles:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Access denied. Required roles: {', '.join(allowed_roles)}"
-            )
-        return user
-    return _check
+# `require_role` used to live here. It guarded the six user- and role-administration
+# endpoints and nothing else, so retiring those retired it — and with it a real trap:
+# a directory user whose org role was not one of the six built-in names passed NO
+# require_role check, however much access their groups actually granted. Everything
+# now gates on a permission, which is the thing the menus read too.
 
 
 def require_permission(permission: str) -> Callable:
@@ -110,10 +89,9 @@ def login(req: LoginRequest):
 def me(user: dict = Depends(get_current_user)):
     """The caller's identity, plus whether access is coming from the directory.
 
-    `directoryManaged` is here rather than on the admin-only LDAP endpoints because
-    the pages that need it (User and Role Management) are gated on
-    role_management, which does not imply user_management — they could not read the
-    LDAP config to find out.
+    `permissions` is resolved here and now rather than read from the token, so a
+    change to an organization role reaches the UI on the next poll instead of at the
+    next sign-in.
     """
     from src.services.auth_config import get_config
     try:
@@ -123,70 +101,71 @@ def me(user: dict = Depends(get_current_user)):
     return {**user, "directoryManaged": managed}
 
 
-# ── User management (admin+) ──────────────────────────────────────────────────
+# ── Break-glass accounts ─────────────────────────────────────────────────────
+#
+# What is left of local user administration. Creating and editing local accounts is
+# gone: access is granted by directory group membership, and a second place to grant
+# it is a second place for it to be wrong.
+#
+# Rotating a break-glass password stays, because break-glass is what gets you back in
+# when the directory is misconfigured — and a credential you cannot rotate is one you
+# eventually stop trusting.
 
 @router.get("/users")
-def get_users(user: dict = Depends(require_role("admin", "super_admin"))):
-    return list_users()
+def get_users(_: dict = Depends(require_permission("user_management"))):
+    """The local account roster. Break-glass accounts first — they are the point."""
+    users = list_users()
+    return sorted(users, key=lambda u: (not u.get("breakGlass"), u.get("username", "")))
 
 
-@router.post("/users")
-def post_user(req: CreateUserRequest, user: dict = Depends(require_role("admin", "super_admin"))):
-    if req.roleId not in ROLE_PERMISSIONS:
-        raise HTTPException(status_code=400, detail=f"Invalid roleId: {req.roleId}")
-    try:
-        return create_user(req.username, req.email, req.roleId, req.password)
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-
-@router.put("/users/{user_id}")
-def put_user(user_id: str, req: UpdateUserRequest,
-             user: dict = Depends(require_role("admin", "super_admin"))):
-    updates = req.model_dump(exclude_none=True)
-    result = update_user(user_id, updates)
+@router.post("/users/{user_id}/password")
+def rotate_password(user_id: str, req: RotatePasswordRequest,
+                    _: dict = Depends(require_permission("user_management"))):
+    """Set a new password on a local account."""
+    if len(req.password) < 12:
+        raise HTTPException(
+            status_code=400,
+            detail="A break-glass password must be at least 12 characters.")
+    result = update_user(user_id, {"password": req.password})
     if not result:
         raise HTTPException(status_code=404, detail="User not found")
-    return result
-
-
-@router.delete("/users/{user_id}")
-def del_user(user_id: str, user: dict = Depends(require_role("super_admin",))):
-    deactivate_user(user_id)
-    return {"ok": True}
-
-
-# ── Role management (super_admin) ─────────────────────────────────────────────
-
-@router.get("/roles")
-def get_roles(user: dict = Depends(require_role("admin", "super_admin"))):
-    return list_roles()
-
-
-@router.put("/roles/{role_id}")
-def put_role(role_id: str, req: UpdateRoleRequest,
-             user: dict = Depends(require_role("super_admin",))):
-    result = update_role_permissions(role_id, req.permissions)
-    if not result:
-        raise HTTPException(status_code=404, detail="Role not found")
-    return result
+    log.info("Break-glass password rotated for %s", result.get("username"))
+    return {"ok": True, "username": result.get("username")}
 
 
 # ── Directory (LDAP / Active Directory) ──────────────────────────────────────
 #
-# Access is granted by AD group membership; these endpoints configure the mapping
-# from group to permission. Gated on `user_management`, the same permission that
-# gated the local user administration this replaces.
+# Access is granted by AD group membership: a group attaches to an organization role,
+# and the organization role grants menus. These endpoints configure both. Gated on
+# `user_management`, the same permission that gated the local user administration
+# this replaces.
 
 class LdapMapping(BaseModel):
+    """One directory group, attached to one organization role."""
+
     group: str
-    roleId: str = ""
+    orgRoleId: str = ""
+
+
+class LdapOrgRole(BaseModel):
+    """A business function and the menus it grants.
+
+    `permissions` is the authority. `basedOn` only records which built-in role was
+    cloned to start it, so the UI can say "based on User + Dev" without that becoming
+    a second source of permissions.
+    """
+
+    id: str
+    label: str = ""
+    description: str = ""
+    basedOn: str = ""
     permissions: list[str] = []
     priority: int = 0
 
 
 class LdapConfigRequest(BaseModel):
     enabled: bool
+    orgRoles: list[LdapOrgRole] = []
     mappings: list[LdapMapping] = []
 
 
@@ -194,7 +173,7 @@ class LdapConfigRequest(BaseModel):
 def get_ldap_config(_: dict = Depends(require_permission("user_management"))):
     from src.config_settings import get_settings
     from src.services import auth_config
-    from src.services.auth_service import ROLE_PERMISSIONS
+    from src.services.auth_service import ROLE_LABELS, ROLE_PERMISSIONS
 
     s = get_settings()
     return {
@@ -216,6 +195,12 @@ def get_ldap_config(_: dict = Depends(require_permission("user_management"))):
         },
         "availableRoles": sorted(ROLE_PERMISSIONS),
         "availablePermissions": sorted({p for v in ROLE_PERMISSIONS.values() for p in v}),
+        # Clone-from templates for the org-role editor. Sent with their permission
+        # sets so picking one fills the checklist without a second request.
+        "roleTemplates": [
+            {"id": rid, "label": ROLE_LABELS.get(rid, rid), "permissions": perms}
+            for rid, perms in sorted(ROLE_PERMISSIONS.items())
+        ],
     }
 
 
@@ -223,18 +208,29 @@ def get_ldap_config(_: dict = Depends(require_permission("user_management"))):
 def put_ldap_config(body: LdapConfigRequest,
                     user: dict = Depends(require_permission("user_management"))):
     from src.services import auth_config
-    from src.services.auth_service import ROLE_PERMISSIONS
 
-    known = set(ROLE_PERMISSIONS)
-    for m in body.mappings:
-        if m.roleId and m.roleId not in known:
-            raise HTTPException(status_code=400,
-                                detail=f"Unknown role {m.roleId!r}. Known: {sorted(known)}")
-        if not m.roleId and not m.permissions:
+    roles = {r.id: r for r in (body.orgRoles or [])}
+    if len(roles) != len(body.orgRoles or []):
+        raise HTTPException(status_code=400,
+                            detail="Two organization roles share an id.")
+
+    for role in body.orgRoles or []:
+        if not role.permissions:
             raise HTTPException(
                 status_code=400,
-                detail=f"Mapping for {m.group!r} grants nothing — give it a role or "
-                       "an explicit permission list.")
+                detail=f"{role.label or role.id!r} grants no menus. An organization "
+                       "role that grants nothing refuses everyone attached to it.")
+
+    for m in body.mappings:
+        if not m.orgRoleId:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Group {m.group!r} is not attached to an organization role.")
+        if m.orgRoleId not in roles:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Group {m.group!r} points at unknown organization role "
+                       f"{m.orgRoleId!r}.")
 
     # Enabling with no mappings would authenticate everyone and then refuse them all,
     # which reads as a broken product rather than a misconfiguration.
@@ -244,8 +240,25 @@ def put_ldap_config(body: LdapConfigRequest,
             detail="Enable directory sign-in only once at least one group is mapped, "
                    "otherwise every directory user is refused after authenticating.")
 
+    # Refuse a configuration that locks every directory administrator out of this
+    # screen. Break-glass would still get someone back in, but a save that quietly
+    # removes the only way to undo itself should not be accepted in the first place.
+    if body.enabled:
+        grants_admin = any(
+            "user_management" in roles[m.orgRoleId].permissions for m in body.mappings)
+        if not grants_admin:
+            raise HTTPException(
+                status_code=400,
+                detail="No mapped group would grant User Management, so nobody could "
+                       "reach this screen to undo it. Give at least one organization "
+                       "role that permission before saving.")
+
     return auth_config.set_config(
-        body.enabled, [m.model_dump() for m in body.mappings], user["username"]).as_dict()
+        body.enabled,
+        [m.model_dump() for m in body.mappings],
+        user["username"],
+        org_roles=[r.model_dump() for r in (body.orgRoles or [])],
+    ).as_dict()
 
 
 @router.post("/ldap/test")
