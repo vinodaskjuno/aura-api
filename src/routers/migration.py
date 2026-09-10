@@ -187,10 +187,16 @@ def put_mapping(session_id: str, body: MappingRequest, projectId: str = Query(..
     session = _load(session_id, projectId)
     _stage_guard(session, "target", "architecture", "proposed", "revised")
 
-    updated = sessions.set_mapping(
-        session, [row.model_dump() for row in body.mapping], origin="user")
-    if body.conversionShape:
-        updated = sessions.save(updated, conversionShape=body.conversionShape)
+    # _stage_guard above already decided this stage is allowed, so a StageError from
+    # the write means the two disagree — a bug, but one the caller should still see as
+    # a 409 it can act on rather than an opaque "Internal server error".
+    try:
+        updated = sessions.set_mapping(
+            session, [row.model_dump() for row in body.mapping], origin="user")
+        if body.conversionShape:
+            updated = sessions.save(updated, conversionShape=body.conversionShape)
+    except sessions.StageError as exc:
+        raise HTTPException(409, str(exc))
     return updated
 
 

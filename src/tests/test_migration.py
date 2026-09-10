@@ -756,3 +756,54 @@ def test_an_empty_inventory_says_so_instead_of_implying_an_empty_application():
 
     assert "NO SOURCE FILES WERE AVAILABLE" in prompt
     assert "do not invent components" in prompt.lower()
+
+
+# ── Changing the mapping after the strategy exists ───────────────────────────
+#
+# Live 500 in Dev: set_mapping hardcoded stage="architecture", so once a session
+# reached 'revised' the Save button on the mapping table raised StageError through
+# an endpoint that does not catch it. Swapping in Vault after reading the strategy
+# is the whole point of the architecture step, so these pin it open.
+
+def _at_stage(stage: str) -> dict:
+    return {"sessionId": "s1", "projectId": "p1", "stage": stage,
+            "mapping": [{"capability": "secrets", "technology": "AWS Secrets Manager",
+                         "origin": "inferred"}]}
+
+
+@pytest.mark.parametrize("stage", ["target", "architecture", "proposed", "revised"])
+def test_mapping_can_be_changed_at_every_stage_the_endpoint_allows(stage, fake_dynamo):
+    after = sess.set_mapping(_at_stage(stage), [
+        {"capability": "secrets", "technology": "HashiCorp Vault"}], origin="user")
+    assert after["mapping"][0]["technology"] == "HashiCorp Vault"
+    assert after["mapping"][0]["origin"] == "user"
+
+
+def test_confirming_the_mapping_never_drags_a_later_session_backwards(fake_dynamo):
+    after = sess.set_mapping(_at_stage("revised"), [
+        {"capability": "secrets", "technology": "HashiCorp Vault"}], origin="user")
+    assert after["stage"] == "revised", "answering questions was silently undone"
+
+
+def test_an_early_session_still_advances_to_architecture(fake_dynamo):
+    after = sess.set_mapping(_at_stage("target"), [
+        {"capability": "secrets", "technology": "HashiCorp Vault"}], origin="user")
+    assert after["stage"] == "architecture"
+
+
+def test_changing_the_mapping_marks_the_existing_strategy_stale(fake_dynamo):
+    """The strategy was written against the old mapping. Left unflagged, conversion
+    runs against a mapping the strategy never saw."""
+    session = {**_at_stage("revised"), "strategy": {"summary": "...", "components": []}}
+    after = sess.set_mapping(session, [
+        {"capability": "secrets", "technology": "HashiCorp Vault"}], origin="user")
+    assert after.get("strategyStale") is True
+
+
+def test_resaving_an_unchanged_mapping_does_not_invalidate_the_strategy(fake_dynamo):
+    """Otherwise merely pressing Save asks the user to re-run for nothing."""
+    session = {**_at_stage("revised"), "strategy": {"summary": "...", "components": []}}
+    after = sess.set_mapping(session, [
+        {"capability": "secrets", "technology": "AWS Secrets Manager"}], origin="user")
+    assert not after.get("strategyStale")
+    assert after["mapping"][0]["origin"] == "inferred", "origin churned without a change"

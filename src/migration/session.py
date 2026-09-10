@@ -204,12 +204,34 @@ def set_mapping(session: dict, mapping: list[dict], origin: str = "user") -> dic
     """
     previous = {r.get("capability"): r for r in (session.get("mapping") or [])}
     stamped: list[dict] = []
+    any_changed = False
     for row in mapping:
         cap = row.get("capability")
         before = previous.get(cap) or {}
         changed = row.get("technology") != before.get("technology")
+        any_changed = any_changed or changed
         stamped.append({
             **row,
             "origin": origin if changed else (before.get("origin") or row.get("origin") or "unset"),
         })
-    return save(session, mapping=stamped, stage="architecture")
+
+    # Only ADVANCE to architecture. Confirming the mapping is legitimate at
+    # `proposed` and `revised` too — changing where secrets or logging land is the
+    # point of the architecture step, and an organisation swapping in Vault after
+    # reading the strategy is the expected flow, not a mistake. Hardcoding
+    # `stage="architecture"` made that a backwards move, which `save` refuses, so
+    # the Save button on the mapping table raised StageError once a strategy
+    # existed. The endpoint's own guard already permits those stages; this was the
+    # write contradicting the guard.
+    current = session.get("stage", "")
+    stage = "architecture" if _index(current) < _index("architecture") else current
+
+    changes: dict[str, Any] = {"mapping": stamped, "stage": stage}
+    # The strategy was computed against the old mapping, so it no longer describes
+    # what would be generated. Say so rather than leaving a stale document looking
+    # current — the alternative is converting against a mapping the strategy never
+    # saw.
+    if any_changed and session.get("strategy"):
+        changes["strategyStale"] = True
+
+    return save(session, **changes)
