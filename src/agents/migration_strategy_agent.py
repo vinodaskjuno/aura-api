@@ -248,7 +248,32 @@ class MigrationStrategyAgent(BaseAgent):
 
         facts = extra.get("facts") or {}
         if facts:
-            parts.append(f"\nPARSED SOURCE FACTS:\n{json.dumps(facts, indent=2)[:6000]}")
+            parts.append(
+                f"\nSOURCE TREE — {facts.get('fileCount', 0)} files at "
+                f"{facts.get('root', '')}\n"
+                f"By extension: {json.dumps(facts.get('byExtension', {}))}\n"
+                f"Files:\n" + "\n".join(f"  {f}" for f in (facts.get('files') or [])[:250]))
+            if facts.get("listingTruncated"):
+                parts.append("  (listing truncated — there are more files than shown)")
+
+            for ex in facts.get("excerpts") or []:
+                parts.append(
+                    f"\n----- {ex['path']}"
+                    f"{' (truncated)' if ex.get('truncated') else ''} -----\n"
+                    f"{ex['content']}")
+
+            parts.append(
+                "\nThe files above ARE the application. Enumerate its components from "
+                "them — one entry per process, flow, job, script or module you can see. "
+                "Do not ask for file paths: you have them.")
+        else:
+            # Said explicitly. Left unsaid, the agent assumes the application is
+            # empty and returns a strategy with no components and no explanation.
+            parts.append(
+                "\nNO SOURCE FILES WERE AVAILABLE to read. Work from the knowledge "
+                "graph alone. If it too is empty, say so in `summary`, put what you "
+                "need in `questions`, and return an empty `components` list — do not "
+                "invent components.")
 
         graph = context.kg_snapshot or {}
         if graph:

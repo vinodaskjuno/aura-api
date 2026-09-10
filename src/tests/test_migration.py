@@ -670,3 +670,89 @@ def test_the_fixture_says_plainly_that_it_is_not_a_real_export():
     readme = (FIXTURE / "README.md").read_text().lower()
     assert "provisional" in readme
     assert "not" in readme and "export" in readme
+
+
+# ── Source inventory ─────────────────────────────────────────────────────────
+#
+# The gap that made the first real run useless: the strategy agent saw only the
+# knowledge graph, and for a platform with no parser the graph holds no components —
+# so it correctly refused to list any and asked for file paths instead. These guard
+# the fix and the honest fallback.
+
+from src.migration import source as msource  # noqa: E402
+
+
+@pytest.fixture
+def fixture_project(monkeypatch):
+    monkeypatch.setattr("src.database.dynamo_client.scan_items",
+                        lambda *a, **k: [{"projectId": "p1", "clonedPath": str(FIXTURE)}])
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="demo fixture not present")
+def test_the_inventory_finds_the_processes_the_graph_cannot_see(fixture_project):
+    inv = msource.inventory("p1", WORKFUSION_TO_AIRFLOW.detect)
+    assert inv["byExtension"].get(".bpmn") == 4
+    assert inv["byExtension"].get(".groovy") == 3
+    paths = " ".join(e["path"] for e in inv["excerpts"])
+    for process in ("claims-intake", "claims-adjudication", "payout-processing",
+                    "fraud-screening"):
+        assert process in paths, f"{process} never reaches the prompt"
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="demo fixture not present")
+def test_profile_matching_files_are_excerpted_before_the_readme(fixture_project):
+    """The excerpt budget is small. Spent on README.md instead of the process
+    definitions, the agent still cannot see the application."""
+    inv = msource.inventory("p1", WORKFUSION_TO_AIRFLOW.detect)
+    order = [e["path"] for e in inv["excerpts"]]
+    bpmn_at = min(i for i, p in enumerate(order) if p.endswith(".bpmn"))
+    readme_at = next((i for i, p in enumerate(order) if p.endswith("README.md")), 999)
+    assert bpmn_at < readme_at
+
+
+def test_no_working_copy_returns_empty_rather_than_raising(monkeypatch):
+    """The strategy must still run off the graph alone — degraded, not broken."""
+    monkeypatch.setattr("src.database.dynamo_client.scan_items",
+                        lambda *a, **k: [{"projectId": "p1", "clonedPath": "/nope"}])
+    assert msource.inventory("p1") == {}
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="demo fixture not present")
+def test_build_artifacts_and_binaries_are_not_read(fixture_project, tmp_path):
+    inv = msource.inventory("p1", WORKFUSION_TO_AIRFLOW.detect)
+    listed = " ".join(inv["files"])
+    for junk in ("node_modules", "__pycache__", "/target/", ".pyc"):
+        assert junk not in listed
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="demo fixture not present")
+def test_the_prompt_tells_the_agent_the_files_are_the_application(fixture_project):
+    """Without this the agent has the files and still asks for file paths."""
+    from src.agents.migration_strategy_agent import MigrationStrategyAgent
+    from src.agents.base_agent import AgentContext
+
+    inv = msource.inventory("p1", WORKFUSION_TO_AIRFLOW.detect)
+    ctx = AgentContext(user_id="u", username="dev", role="admin",
+                       intent="migrate", project_id="p1",
+                       extra={"source": "workfusion", "target": "airflow",
+                              "facts": inv})
+    prompt = MigrationStrategyAgent()._build_prompt(ctx, WORKFUSION_TO_AIRFLOW)
+
+    assert "claims-intake.bpmn" in prompt
+    assert "ocrTask" in prompt, "the excerpt content itself must be present"
+    assert "Do not ask for file paths" in prompt
+
+
+def test_an_empty_inventory_says_so_instead_of_implying_an_empty_application():
+    """Left unsaid, the agent concludes the application is empty and returns no
+    components with no explanation — which is what a user sees as 'nothing happened'."""
+    from src.agents.migration_strategy_agent import MigrationStrategyAgent
+    from src.agents.base_agent import AgentContext
+
+    ctx = AgentContext(user_id="u", username="dev", role="admin", intent="migrate",
+                       project_id="p1",
+                       extra={"source": "workfusion", "target": "airflow", "facts": {}})
+    prompt = MigrationStrategyAgent()._build_prompt(ctx, WORKFUSION_TO_AIRFLOW)
+
+    assert "NO SOURCE FILES WERE AVAILABLE" in prompt
+    assert "do not invent components" in prompt.lower()

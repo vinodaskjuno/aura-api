@@ -233,6 +233,25 @@ async def submit_answers(session_id: str, body: AnswersRequest,
     return await _propose(session, user, revised=True)
 
 
+def _source_facts(session: dict) -> dict:
+    """What the application actually contains, read from the working copy.
+
+    Without this the strategy agent sees only the knowledge graph — and for a
+    platform with no parser the graph holds no components at all, so it correctly
+    refuses to list any and asks for file paths instead. That is the agent being
+    honest about a missing input, not a prompt problem.
+    """
+    from src.migration import source
+    from src.migration.profiles import profile_for
+
+    profile = profile_for(session.get("source", ""), session.get("target", ""))
+    try:
+        return source.inventory(session["projectId"], profile.detect)
+    except Exception as exc:  # noqa: BLE001 — the graph path still works without it
+        log.warning("source inventory failed for %s: %s", session["projectId"], exc)
+        return {}
+
+
 async def _propose(session: dict, user: dict, revised: bool) -> dict:
     from src.agents.base_agent import AgentContext
     from src.graph import neo4j_client as neo4j
@@ -265,7 +284,10 @@ async def _propose(session: dict, user: dict, revised: bool) -> dict:
             "conversionShape": session.get("conversionShape") or {},
             "answers": session.get("answers") or [],
             "comments": session.get("comments") or [],
-            "facts": session.get("facts") or {},
+            # Read the tree every time rather than caching on the session: the
+            # user may have re-uploaded between attempts, and a stale inventory
+            # would plan a migration of code that is no longer there.
+            "facts": _source_facts(session),
         },
     )
 
