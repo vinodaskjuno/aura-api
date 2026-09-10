@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Payout processing. Scheduled, unattended, ordinary logic — the one process here
+     that should port to Airflow mechanically. -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:wf="http://www.workfusion.com/schema/bpmn/extensions"
+             targetNamespace="http://claims.example.com/processes">
+
+  <process id="payout-processing" name="Payout Processing" isExecutable="true">
+
+    <startEvent id="nightly" name="Nightly 02:00">
+      <timerEventDefinition>
+        <timeCycle>0 0 2 * * ?</timeCycle>
+      </timerEventDefinition>
+    </startEvent>
+
+    <sequenceFlow id="p1" sourceRef="nightly" targetRef="collect-approved"/>
+
+    <serviceTask id="collect-approved" name="Collect approved claims"
+                 wf:taskType="botTask" wf:bot="claims-db-bot">
+      <documentation>Selects claims in state APPROVED with no payment record.</documentation>
+    </serviceTask>
+
+    <sequenceFlow id="p2" sourceRef="collect-approved" targetRef="calculate-payouts"/>
+
+    <scriptTask id="calculate-payouts" name="Calculate payouts" scriptFormat="groovy">
+      <script>PayoutCalculation.calculate(execution)</script>
+    </scriptTask>
+
+    <sequenceFlow id="p3" sourceRef="calculate-payouts" targetRef="payment-batch"/>
+
+    <subProcess id="payment-batch" name="Issue payments">
+      <multiInstanceLoopCharacteristics isSequential="false"
+        wf:maxConcurrency="8"/>
+      <serviceTask id="issue-payment" name="Issue payment"
+                   wf:taskType="botTask" wf:bot="payment-gateway-bot"/>
+    </subProcess>
+
+    <sequenceFlow id="p4" sourceRef="payment-batch" targetRef="reconcile"/>
+
+    <scriptTask id="reconcile" name="Reconcile ledger" scriptFormat="groovy">
+      <script>PayoutCalculation.reconcile(execution)</script>
+    </scriptTask>
+
+    <sequenceFlow id="p5" sourceRef="reconcile" targetRef="payouts-done"/>
+    <endEvent id="payouts-done" name="Payouts complete"/>
+  </process>
+</definitions>

@@ -1,0 +1,12 @@
+# Python-side helpers for the claims bots.
+# These are what Aura's capability inference reads: a dependency manifest is a
+# fairly direct statement of what a team actually uses.
+
+hvac==2.1.0                    # HashiCorp Vault — secrets
+splunk-sdk==1.7.4              # Splunk — logging
+autodynatrace==2.1.0           # Dynatrace — APM
+kafka-python==2.0.2            # Kafka — messaging
+boto3==1.34.0                  # S3 for document storage
+psycopg2-binary==2.9.9
+requests==2.31.0
+python-dateutil==2.8.2

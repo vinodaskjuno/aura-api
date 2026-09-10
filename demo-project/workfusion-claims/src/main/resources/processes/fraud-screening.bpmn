@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fraud screening. Scores against a WorkFusion-trained model — a platform
+     capability with nothing to translate. -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:wf="http://www.workfusion.com/schema/bpmn/extensions"
+             targetNamespace="http://claims.example.com/processes">
+
+  <process id="fraud-screening" name="Fraud Screening" isExecutable="true">
+    <startEvent id="fs-start"/>
+    <sequenceFlow id="s1" sourceRef="fs-start" targetRef="score-claim"/>
+
+    <serviceTask id="score-claim" name="Score claim for fraud"
+                 wf:taskType="mlTask"
+                 wf:model="fraud-propensity-v11"
+                 wf:trainedOn="claims-2019-2025">
+      <documentation>WorkFusion cognitive model. Trained inside the platform; the
+        weights are not exportable as code.</documentation>
+    </serviceTask>
+
+    <sequenceFlow id="s2" sourceRef="score-claim" targetRef="fs-gate"/>
+    <exclusiveGateway id="fs-gate" name="High risk?"/>
+
+    <sequenceFlow id="s3" sourceRef="fs-gate" targetRef="flag-siu"/>
+    <sequenceFlow id="s4" sourceRef="fs-gate" targetRef="fs-done"/>
+
+    <serviceTask id="flag-siu" name="Refer to SIU"
+                 wf:taskType="botTask" wf:bot="siu-referral-bot"/>
+
+    <sequenceFlow id="s5" sourceRef="flag-siu" targetRef="fs-done"/>
+    <endEvent id="fs-done"/>
+  </process>
+</definitions>

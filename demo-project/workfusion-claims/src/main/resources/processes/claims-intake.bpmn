@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Claims intake. Receives a First Notice of Loss, extracts the documents, validates.
+     The OCR step is a WorkFusion platform capability, not code we own. -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:wf="http://www.workfusion.com/schema/bpmn/extensions"
+             targetNamespace="http://claims.example.com/processes">
+
+  <process id="claims-intake" name="Claims Intake" isExecutable="true">
+
+    <startEvent id="fnol-received" name="FNOL received">
+      <messageEventDefinition messageRef="FnolMessage"/>
+    </startEvent>
+
+    <sequenceFlow id="f1" sourceRef="fnol-received" targetRef="extract-documents"/>
+
+    <!-- WorkFusion's OCR/document-extraction task. There is no Airflow equivalent:
+         this is a product feature, not translatable logic. -->
+    <serviceTask id="extract-documents" name="Extract claim documents"
+                 wf:taskType="ocrTask"
+                 wf:model="claims-fnol-v4"
+                 wf:confidenceThreshold="0.82">
+      <documentation>Reads the scanned FNOL pack and extracts claimant, policy
+        number, loss date and estimated amount. Falls back to manual keying below
+        the confidence threshold.</documentation>
+    </serviceTask>
+
+    <sequenceFlow id="f2" sourceRef="extract-documents" targetRef="confidence-gate"/>
+
+    <exclusiveGateway id="confidence-gate" name="Extraction confident?"/>
+
+    <sequenceFlow id="f3" sourceRef="confidence-gate" targetRef="manual-keying">
+      <conditionExpression xsi:type="tFormalExpression"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        ${extractionConfidence &lt; 0.82}
+      </conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="f4" sourceRef="confidence-gate" targetRef="validate-claim">
+      <conditionExpression xsi:type="tFormalExpression"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        ${extractionConfidence &gt;= 0.82}
+      </conditionExpression>
+    </sequenceFlow>
+
+    <!-- Attended: a data-entry clerk keys what OCR could not read. -->
+    <userTask id="manual-keying" name="Manual document keying"
+              wf:queue="intake-clerks" wf:slaHours="4">
+      <documentation>Presented to the intake queue when extraction confidence is
+        below threshold.</documentation>
+    </userTask>
+
+    <sequenceFlow id="f5" sourceRef="manual-keying" targetRef="validate-claim"/>
+
+    <scriptTask id="validate-claim" name="Validate claim" scriptFormat="groovy">
+      <script>ClaimsValidation.validate(execution)</script>
+    </scriptTask>
+
+    <sequenceFlow id="f6" sourceRef="validate-claim" targetRef="lookup-policy"/>
+
+    <serviceTask id="lookup-policy" name="Look up policy"
+                 wf:taskType="botTask" wf:bot="policy-lookup-bot">
+      <documentation>Calls the policy administration system. Credentials come from
+        the platform vault.</documentation>
+    </serviceTask>
+
+    <sequenceFlow id="f7" sourceRef="lookup-policy" targetRef="handoff-adjudication"/>
+
+    <callActivity id="handoff-adjudication" name="Adjudicate"
+                  calledElement="claims-adjudication"/>
+
+    <sequenceFlow id="f8" sourceRef="handoff-adjudication" targetRef="intake-complete"/>
+
+    <endEvent id="intake-complete" name="Intake complete"/>
+  </process>
+</definitions>

@@ -175,6 +175,7 @@ from .routers import sop as sop_router
 from .routers import ontology_universe as ontology_universe_router
 from .routers import ontology_loader as ontology_loader_router
 from .routers import provenance as provenance_router
+from .routers import migration as migration_router
 from .routers import ontology_lens as ontology_lens_router
 from .routers import scheduler_router
 from .routers import chat_sessions as chat_sessions_router
@@ -200,6 +201,7 @@ app.include_router(ontology_universe_router.router)
 app.include_router(ontology_loader_router.router)
 app.include_router(ontology_lens_router.router)
 app.include_router(provenance_router.router)
+app.include_router(migration_router.router)
 app.include_router(scheduler_router.router)
 app.include_router(chat_sessions_router.router)
 app.include_router(git_ops_router.router)

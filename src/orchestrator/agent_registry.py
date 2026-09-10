@@ -62,6 +62,8 @@ def bootstrap() -> None:
     from src.agents.obs_hypothesis_agent import ObsHypothesisAgent
     from src.agents.obs_root_cause_agent import ObsRootCauseAgent
     from src.agents.obs_verifier_agent import ObsVerifierAgent
+    # Guided migration
+    from src.agents.migration_strategy_agent import MigrationStrategyAgent
 
     for agent in [
         # Legacy agents
@@ -80,5 +82,7 @@ def bootstrap() -> None:
         # Observability / SRE agents
         ObsSignalCollectorAgent(), ObsCorrelatorAgent(), ObsCaseRetrievalAgent(),
         ObsRunbookAgent(), ObsHypothesisAgent(), ObsRootCauseAgent(), ObsVerifierAgent(),
+        # Guided migration
+        MigrationStrategyAgent(),
     ]:
         register(agent)

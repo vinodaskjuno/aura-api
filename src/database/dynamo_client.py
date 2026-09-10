@@ -90,6 +90,7 @@ _COMPOSITE_TABLES = {
     "ai-datasets":                  ("datasetId",       "itemId"),
     "ai-experiments":               ("experimentId",    "itemKey"),
     "ai-prompts":                   ("promptId",        "version"),
+    "migration-sessions":           ("sessionId",       "projectId"),
 }
 
 
@@ -473,6 +474,16 @@ TABLE_SCHEMAS = [
             # "what did this run change?" — the Run Inspector's entity list. Without
             # it that answer is a full scan filtered client-side.
             {"index": "runId-timestamp-index",    "pk": "runId",    "sk": "timestamp"},
+        ],
+    },
+    {
+        # Guided migration sessions. Composite key so a project's sessions are a
+        # query, and a GSI on createdAt so "newest first" needs no scan.
+        "name": "migration-sessions",
+        "pk": "sessionId",
+        "sk": "projectId",
+        "gsis": [
+            {"index": "projectId-createdAt-index", "pk": "projectId", "sk": "createdAt"},
         ],
     },
     {

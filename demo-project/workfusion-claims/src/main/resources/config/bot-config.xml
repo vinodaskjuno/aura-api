@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Bot definitions. Each is a WorkFusion bot with its own credentials and
+     concurrency budget. -->
+<bots xmlns="http://www.workfusion.com/schema/bots">
+
+  <bot id="policy-lookup-bot" name="Policy Administration Lookup"
+       type="unattended" maxConcurrency="12">
+    <endpoint url="https://policyadmin.internal/api/v3"/>
+    <credentials vaultPath="secret/claims/policy-admin"/>
+    <retry attempts="3" backoffSeconds="5"/>
+  </bot>
+
+  <bot id="claims-db-bot" name="Claims Database" type="unattended" maxConcurrency="6">
+    <endpoint jdbc="jdbc:postgresql://claims-db.internal:5432/claims"/>
+    <credentials vaultPath="secret/claims/db"/>
+    <retry attempts="2" backoffSeconds="10"/>
+  </bot>
+
+  <bot id="payment-gateway-bot" name="Payment Gateway" type="unattended" maxConcurrency="4">
+    <endpoint url="https://payments.internal/v2/disburse"/>
+    <credentials vaultPath="secret/claims/payments"/>
+    <!-- Idempotency matters here: a duplicate disbursement is a real loss. -->
+    <retry attempts="1" idempotencyKey="claimNumber"/>
+  </bot>
+
+  <bot id="siu-referral-bot" name="SIU Referral" type="unattended" maxConcurrency="2">
+    <endpoint url="https://siu.internal/referrals"/>
+    <credentials vaultPath="secret/claims/siu"/>
+  </bot>
+
+  <!-- Attended: runs on a clerk's desktop against the legacy green-screen. A UI
+       recorder script, tied to screen coordinates. Nothing here survives a move. -->
+  <bot id="legacy-mainframe-bot" name="Mainframe Claim Entry" type="attended"
+       recorderScript="recordings/mainframe-entry.rpae">
+    <endpoint terminal="tn3270://mainframe.internal:23"/>
+    <credentials vaultPath="secret/claims/mainframe"/>
+  </bot>
+</bots>

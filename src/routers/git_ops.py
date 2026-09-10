@@ -16,7 +16,28 @@ from pydantic import BaseModel
 from src.routers.auth import get_current_user
 
 # Persistent workspace root for cloned repos (ECS-friendly; override via env var)
-_WORKSPACE_ROOT = Path(os.environ.get("AURA_WORKSPACE", "/workspace")).resolve()
+def _workspace_root() -> Path:
+    """Where project working copies live.
+
+    Read through Settings, NOT `os.environ`. pydantic-settings loads `src/.env` into
+    the Settings object and never into the process environment, so an `os.environ`
+    read silently ignores a configured `AURA_WORKSPACE` and falls back to
+    `/workspace` — which exists in the container and cannot be created on a Mac,
+    where the root volume is read-only. That is the whole bug.
+
+    A function, not an import-time constant, so the value follows configuration
+    rather than whatever the environment looked like when the module was first
+    imported. The env fallback stays for callers that run without app settings.
+
+    .resolve(): a relative path (./data/workspace) is otherwise interpreted against
+    whatever cwd a subprocess happens to have.
+    """
+    try:
+        from src.config_settings import get_settings
+        configured = get_settings().aura_workspace
+    except Exception:  # noqa: BLE001 — must still work without app settings
+        configured = ""
+    return Path(configured or os.environ.get("AURA_WORKSPACE", "/workspace")).resolve()
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/git", tags=["git-ops"])
@@ -173,10 +194,10 @@ def _clone_path(project_id: str) -> Path:
     """Return the persistent clone directory for a project."""
     safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", project_id or "")
     if not safe:
-        # `_WORKSPACE_ROOT / ""` is the workspace root itself, so a blank id would
+        # `_workspace_root() / ""` is the workspace root itself, so a blank id would
         # target every project's clone directory at once.
         raise HTTPException(status_code=400, detail="projectId is required")
-    return _WORKSPACE_ROOT / safe
+    return _workspace_root() / safe
 
 
 def _require_clone(project_id: str) -> Path:

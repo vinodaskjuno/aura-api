@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Adjudication. An adjuster reviews anything the rules refer. This is the process
+     that cannot be ported to an unattended scheduler without a redesign. -->
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:wf="http://www.workfusion.com/schema/bpmn/extensions"
+             targetNamespace="http://claims.example.com/processes">
+
+  <process id="claims-adjudication" name="Claims Adjudication" isExecutable="true">
+
+    <startEvent id="adj-start" name="Claim validated"/>
+    <sequenceFlow id="a1" sourceRef="adj-start" targetRef="screen-fraud"/>
+
+    <callActivity id="screen-fraud" name="Fraud screening"
+                  calledElement="fraud-screening"/>
+
+    <sequenceFlow id="a2" sourceRef="screen-fraud" targetRef="apply-rules"/>
+
+    <scriptTask id="apply-rules" name="Apply policy rules" scriptFormat="groovy">
+      <script>PolicyLookup.adjudicate(execution)</script>
+    </scriptTask>
+
+    <sequenceFlow id="a3" sourceRef="apply-rules" targetRef="decision"/>
+
+    <exclusiveGateway id="decision" name="Rule outcome"/>
+
+    <sequenceFlow id="a4" sourceRef="decision" targetRef="auto-approve">
+      <conditionExpression xsi:type="tFormalExpression"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        ${outcome == 'APPROVE' &amp;&amp; amount &lt;= autoApprovalLimit}
+      </conditionExpression>
+    </sequenceFlow>
+    <sequenceFlow id="a5" sourceRef="decision" targetRef="adjuster-review">
+      <conditionExpression xsi:type="tFormalExpression"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+        ${outcome == 'REFER' || amount &gt; autoApprovalLimit}
+      </conditionExpression>
+    </sequenceFlow>
+
+    <serviceTask id="auto-approve" name="Auto-approve"
+                 wf:taskType="botTask" wf:bot="claims-db-bot"/>
+
+    <!-- The blocker. A human decides, and the process waits — days, sometimes.
+         WorkFusion holds the process state while it waits; Airflow does not. -->
+    <userTask id="adjuster-review" name="Adjuster review"
+              wf:queue="senior-adjusters" wf:slaHours="72"
+              wf:escalateTo="claims-manager">
+      <documentation>The adjuster approves, denies, or requests more information.
+        The process is suspended until they act.</documentation>
+    </userTask>
+
+    <sequenceFlow id="a6" sourceRef="adjuster-review" targetRef="record-decision"/>
+    <sequenceFlow id="a7" sourceRef="auto-approve" targetRef="record-decision"/>
+
+    <scriptTask id="record-decision" name="Record decision" scriptFormat="groovy">
+      <script>PolicyLookup.record(execution)</script>
+    </scriptTask>
+
+    <sequenceFlow id="a8" sourceRef="record-decision" targetRef="adj-done"/>
+    <endEvent id="adj-done" name="Adjudicated"/>
+  </process>
+</definitions>

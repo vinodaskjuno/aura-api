@@ -25,8 +25,11 @@ DEV = {"userId": "u2", "username": "dev", "role": "user_dev",
 def _auth_and_workspace(tmp_path, monkeypatch):
     previous = app.dependency_overrides.get(get_current_user)
     app.dependency_overrides[get_current_user] = lambda: DEV
-    # _WORKSPACE_ROOT is bound at import, so patch the module attribute.
-    monkeypatch.setattr(git_ops, "_WORKSPACE_ROOT", tmp_path / "ws")
+    # The workspace root is resolved per call now, so patch the resolver. It used
+    # to be bound at import, which is what made a configured AURA_WORKSPACE
+    # unreachable and every path fall back to /workspace.
+    ws = tmp_path / "ws"
+    monkeypatch.setattr(git_ops, "_workspace_root", lambda: ws)
     yield
     if previous is None:
         app.dependency_overrides.pop(get_current_user, None)
@@ -57,20 +60,20 @@ def test_rebuilds_the_tree_and_reports_real_counts(fake_dynamo):
     assert body["fileCount"] == 3
     assert body["label"] == "backend"
 
-    dest = git_ops._WORKSPACE_ROOT / "p1" / "backend"
+    dest = git_ops._workspace_root() / "p1" / "backend"
     assert (dest / "app" / "main.py").read_bytes() == BACKEND[0][1]
     assert (dest / "app" / "services" / "pricing.py").exists()
     assert (dest / "requirements.txt").exists()
 
 
-def test_workspace_is_git_backed_so_devmate_tools_attach(fake_dynamo):
+def test_workspace_is_git_backed_so_devmate_tools_attach(fake_dynamo, monkeypatch):
     """_resolve_project_dir gates on `.git`; without it no file tool is offered."""
     _post("p2", "backend", BACKEND)
-    root = git_ops._WORKSPACE_ROOT / "p2"
+    root = git_ops._workspace_root() / "p2"
     assert (root / ".git").is_dir()
 
     from src.services.advisor import tools
-    tools._WORKSPACE_ROOT = git_ops._WORKSPACE_ROOT
+    monkeypatch.setattr(tools, "_workspace_root", git_ops._workspace_root)
     assert tools._resolve_project_dir("p2") == root
 
 
@@ -78,7 +81,7 @@ def test_multiple_folders_coexist_under_one_project(fake_dynamo):
     _post("p3", "backend", BACKEND)
     _post("p3", "frontend", [("src/App.tsx", b"export default () => null\n"),
                              ("package.json", b'{"name":"f"}\n')])
-    root = git_ops._WORKSPACE_ROOT / "p3"
+    root = git_ops._workspace_root() / "p3"
     assert (root / "backend" / "app" / "main.py").exists()
     assert (root / "frontend" / "src" / "App.tsx").exists()
 
@@ -88,7 +91,7 @@ def test_reupload_replaces_that_label_only(fake_dynamo):
     _post("p4", "frontend", [("index.html", b"<html></html>")])
     _post("p4", "backend", [("app/main.py", b"# rewritten\n")])
 
-    root = git_ops._WORKSPACE_ROOT / "p4"
+    root = git_ops._workspace_root() / "p4"
     # The stale file is gone — merging would leave it to be analysed as current.
     assert not (root / "backend" / "requirements.txt").exists()
     assert (root / "backend" / "app" / "main.py").read_bytes() == b"# rewritten\n"
@@ -111,7 +114,7 @@ def test_traversal_attempts_never_escape_the_destination(evil, fake_dynamo, tmp_
     assert r.json()["fileCount"] == 1          # only ok.py
     assert r.json()["skippedCount"] == 1
 
-    root = git_ops._WORKSPACE_ROOT
+    root = git_ops._workspace_root()
     escaped = [p for p in root.parent.rglob("*")
                if p.is_file() and p.read_bytes() == b"pwned"]
     assert escaped == [], f"traversal wrote outside the destination: {escaped}"
@@ -128,7 +131,7 @@ def test_dependency_and_build_output_are_filtered(fake_dynamo):
     assert r.status_code == 201
     assert r.json()["fileCount"] == 1
     assert r.json()["skippedCount"] == 4
-    root = git_ops._WORKSPACE_ROOT / "p6" / "backend"
+    root = git_ops._workspace_root() / "p6" / "backend"
     assert not (root / "node_modules").exists()
     assert (root / "app" / "main.py").exists()
 
@@ -137,7 +140,7 @@ def test_all_junk_is_a_clear_400_not_an_empty_success(fake_dynamo):
     r = _post("p7", "backend", [("node_modules/a.js", b"x"), ("dist/b.js", b"y")])
     assert r.status_code == 400
     assert "build output" in r.json()["detail"]
-    assert not (git_ops._WORKSPACE_ROOT / "p7" / "backend").exists()
+    assert not (git_ops._workspace_root() / "p7" / "backend").exists()
 
 
 # ── Argument validation ──────────────────────────────────────────────────────
@@ -155,7 +158,7 @@ def test_label_cannot_escape_the_project_directory(fake_dynamo):
     r = _post("p9", "../../evil", BACKEND)
     assert r.status_code == 201
     assert r.json()["label"] == "evil"
-    assert (git_ops._WORKSPACE_ROOT / "p9" / "evil").is_dir()
+    assert (git_ops._workspace_root() / "p9" / "evil").is_dir()
 
 
 def test_blank_project_id_is_refused(fake_dynamo):
@@ -168,4 +171,4 @@ def test_oversized_upload_is_refused_and_leaves_nothing_behind(fake_dynamo, monk
     r = _post("p10", "backend", [("big.py", b"x" * 2048)])
     assert r.status_code == 413
     assert "MB" in r.json()["detail"]
-    assert not (git_ops._WORKSPACE_ROOT / "p10" / "backend").exists()
+    assert not (git_ops._workspace_root() / "p10" / "backend").exists()

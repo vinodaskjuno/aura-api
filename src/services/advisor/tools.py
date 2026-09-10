@@ -3,15 +3,34 @@ import re
 import subprocess
 from pathlib import Path
 
-# Must match the value used in git_ops.py
-# .resolve(): a relative AURA_WORKSPACE (e.g. ./data/workspace) is otherwise
-# interpreted against whatever cwd a subprocess happens to run in.
-_WORKSPACE_ROOT = Path(os.environ.get("AURA_WORKSPACE", "/workspace")).resolve()
+# Must match the value used in git_ops.py.
+def _workspace_root() -> Path:
+    """Where project working copies live.
+
+    Read through Settings, NOT `os.environ`. pydantic-settings loads `src/.env` into
+    the Settings object and never into the process environment, so an `os.environ`
+    read silently ignores a configured `AURA_WORKSPACE` and falls back to
+    `/workspace` — which exists in the container and cannot be created on a Mac,
+    where the root volume is read-only. That is the whole bug.
+
+    A function, not an import-time constant, so the value follows configuration
+    rather than whatever the environment looked like when the module was first
+    imported. The env fallback stays for callers that run without app settings.
+
+    .resolve(): a relative path (./data/workspace) is otherwise interpreted against
+    whatever cwd a subprocess happens to have.
+    """
+    try:
+        from src.config_settings import get_settings
+        configured = get_settings().aura_workspace
+    except Exception:  # noqa: BLE001 — must still work without app settings
+        configured = ""
+    return Path(configured or os.environ.get("AURA_WORKSPACE", "/workspace")).resolve()
 
 
 def _clone_path(project_id: str) -> Path:
     safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", project_id)
-    return _WORKSPACE_ROOT / safe
+    return _workspace_root() / safe
 
 
 def _safe_target(clone_dir: Path, relative: str) -> Path:

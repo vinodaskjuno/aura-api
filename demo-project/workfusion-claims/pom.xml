@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WorkFusion Studio projects are Maven-based. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example.claims</groupId>
+  <artifactId>claims-automation</artifactId>
+  <version>8.4.2</version>
+  <packaging>wf-process</packaging>
+
+  <properties>
+    <workfusion.version>10.2.0</workfusion.version>
+    <groovy.version>3.0.19</groovy.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.workfusion</groupId>
+      <artifactId>workfusion-runtime</artifactId>
+      <version>${workfusion.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.workfusion</groupId>
+      <artifactId>workfusion-vault-client</artifactId>
+      <version>${workfusion.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.codehaus.groovy</groupId>
+      <artifactId>groovy-all</artifactId>
+      <version>${groovy.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.splunk.logging</groupId>
+      <artifactId>splunk-library-javalogging</artifactId>
+      <version>1.11.8</version>
+    </dependency>
+  </dependencies>
+</project>

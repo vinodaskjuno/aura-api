@@ -22,7 +22,7 @@ def clone(tmp_path, monkeypatch):
     """A minimal git repo standing in for a cloned project."""
     root = tmp_path / "ws"
     root.mkdir()
-    monkeypatch.setattr(tools, "_WORKSPACE_ROOT", root)
+    monkeypatch.setattr(tools, "_workspace_root", lambda: root)
     repo = root / "proj_1"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "calc.py").write_text("def rate(q):\n    return 1 if q > 10 else 0\n")
@@ -130,7 +130,7 @@ def test_a_run_that_never_started_explains_itself():
 async def test_execution_without_a_clone_is_labelled_simulated(monkeypatch, tmp_path):
     """It used to return {passed: 5, failed: 0} and store it as `completed`."""
     from src.agents.base_agent import AgentContext, AgentResult, S3Ref
-    monkeypatch.setattr(tools, "_WORKSPACE_ROOT", tmp_path / "empty")
+    monkeypatch.setattr(tools, "_workspace_root", lambda: tmp_path / "empty")
     ctx = AgentContext(user_id="u", username="u", role="admin", intent="run",
                        project_id="ghost", session_id="s")
     gen = AgentResult(agent_name="test_generation_agent")
