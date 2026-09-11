@@ -69,10 +69,70 @@ def _maybe_apps(app_url: str, specs: list, env: dict, emit):
         yield apps
 
 
+def _what_is_there(root) -> str:
+    """The file types actually present, so the reader can see WHY nothing matched.
+
+    "No runnable application was found" alone invites the reader to look for a bug.
+    "…it holds .bpmn, .groovy and .xml files" answers the question in the same breath:
+    this is not a web application, and no amount of retrying will change that.
+    """
+    from collections import Counter
+    from pathlib import Path as _Path
+
+    try:
+        root = _Path(root)
+        if not root.is_dir():
+            return ""
+        skip = {"node_modules", ".venv", ".git", "__pycache__", "dist", "build"}
+        counts: Counter = Counter()
+        for path in root.rglob("*"):
+            if path.is_file() and not any(part in skip for part in path.parts):
+                if path.suffix:
+                    counts[path.suffix.lower()] += 1
+        top = [ext for ext, _ in counts.most_common(4)]
+        if not top:
+            return " — which is empty"
+        return " — it holds " + ", ".join(top) + " files"
+    except Exception:                                         # noqa: BLE001
+        return ""
+
+
+def _cannot_start(root, specs, failures) -> str:
+    """Why no application started, in words the reader can act on.
+
+    This used to read `"No application could be started: " + "; ".join(...) or
+    "nothing runnable was detected"`, which binds as `(prefix + joined) or fallback` —
+    the prefix is always truthy, so with no failures to list the fallback never fired
+    and the message was a sentence ending in a colon. That is the case that needs the
+    explanation MOST: nothing was even attempted, and the reader is left with a screen
+    that says "Unavailable" and nothing else.
+    """
+    if failures:
+        return ("No application could be started: "
+                + "; ".join(why for _, why in failures))
+    if not specs:
+        return ("No runnable application was found in this project's working copy"
+                + _what_is_there(root) + ". QualityMind starts a Python ASGI app "
+                "(uvicorn, from a FastAPI/Starlette module) or a Node dev server (an "
+                "npm `dev` script), and deliberately does not guess a start command "
+                "for anything else — a wrong guess spawns a process that never serves, "
+                "and the run then fails for a reason that looks nothing like the "
+                "cause. If this project is not a web application, give the run an "
+                "Application URL that is already serving instead.")
+    blocked = "; ".join(f"{sp.kind} ({sp.name})" for sp in specs if sp.blocked)
+    if blocked:
+        return (f"The application was detected but could not be started: {blocked}. "
+                "Its dependencies are not installed on the runner.")
+    return ("An application was detected but none of them started, and no reason was "
+            "recorded — this is a bug worth reporting.")
+
+
 def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             ran_by: str = "", exploratory: bool = False,
             write_graph: bool = True, on_event=None,
-            cases: list | None = None, clouds: list[str] | None = None) -> dict:
+            cases: list | None = None, clouds: list[str] | None = None,
+            kinds: list[str] | None = None,
+            skip_unrunnable: bool = False) -> dict:
     """Run the project's plan and store the evidence.
 
     With no `app_url`, the application is STARTED from the project's own working copy
@@ -85,6 +145,12 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
 
     Emulators and app processes are torn down whatever happens: a leaked one holds its
     port, and the next run then fails for a reason that looks nothing like the cause.
+
+    `kinds` restricts the run to the kinds of case the person chose — the root case
+    always survives, since it is the only one a frontend can be tested by. Applied here
+    AND server-side at claim time; `filter_by_kind` is idempotent precisely so the two
+    cannot fight, and the claim-time pass is what lets a runner that has never heard of
+    `kinds` still execute the right subset.
 
     `cases` and `clouds` let a caller supply the plan instead of reading it from the
     knowledge graph. That exists for the self-hosted runner: it executes on a developer
@@ -104,19 +170,24 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             except Exception:  # noqa: BLE001 — a progress consumer must not fail a run
                 pass
 
+    facts: dict = {}
     if cases is None:
         emit("plan", message=f"Reading the knowledge graph for {project_id}")
         facts = plan.fetch_facts(project_id)
-        cases = plan.build_plan(project_id, facts)
+        from src.qatest import appserver as _appserver
+        plan_root, _checked = _appserver.locate(project_id)
+        cases = plan.build_plan(project_id, facts, root=plan_root)
         needed = emulators.clouds_for(facts.get("dependencies") or [])
     else:
         # Plan supplied by the caller. Case objects may arrive as plain dicts over the
         # wire, so rebuild them — run_plan reads attributes, not keys.
         emit("plan", message=f"Using a plan supplied for {project_id}")
-        cases = [c if isinstance(c, Case) else Case(**c) for c in cases]
+        cases = [Case.from_wire(c) for c in cases]
         wanted = set(clouds or [])
         needed = [c for c in emulators.CLOUDS if c.name in wanted]
-    emit("planned", cases=len(cases),
+    plan_total = len(cases)
+    cases = plan.filter_by_kind(cases, kinds, skip_unrunnable)
+    emit("planned", cases=len(cases), planTotal=plan_total, kinds=list(kinds or []),
          emulators=[c.name for c in needed],
          message=(f"{len(cases)} case(s); "
                   f"{'emulators: ' + ', '.join(c.name for c in needed) if needed else 'no cloud dependencies'}"))
@@ -126,6 +197,9 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
     # two sets of ports and announce ones that never get used.
     urls: dict[str, str] = {}
     specs: list = []
+    # None when the caller pointed the run at a URL: there is no working copy in play,
+    # so file checks have nothing to read and are simply not run.
+    root = None
     if app_url:
         urls = {"api": app_url, "ui": app_url}
     else:
@@ -170,12 +244,9 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
 
     from src.qatest.runner import run_plan
 
-    with emulators.EmulatorSet(needed, run_id) as emus:
-        for rec in emus.records:
-            emit("emulator", cloud=rec.cloud, started=rec.started,
-                 message=(f"{rec.cloud} emulator ready on :{rec.port}" if rec.started
-                          else f"{rec.cloud} emulator failed: {rec.error[:160]}"))
-
+    # EmulatorSet emits per container as it starts AND as it is removed, so a panel
+    # can show Floci coming up and going away rather than only learning it started.
+    with emulators.EmulatorSet(needed, run_id, on_event=on_event) as emus:
         # Started INSIDE the emulator block and after it, so the application inherits
         # the endpoint variables and talks to the emulators rather than real cloud.
         with _maybe_apps(app_url, specs, emus.env, emit) as apps:
@@ -185,33 +256,57 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
                     emit("app", kind=spec.kind, name=spec.name, started=False,
                          error=why[:400],
                          message=f"{spec.kind} app not started: {why[:200]}")
-                if not urls:
+                structural = [c for c in cases if c.kind == "structure"]
+                if not urls and not structural:
                     report = Report(run_id=run_id, project_id=project_id, app_url="",
                                     ran_by=ran_by, cases=cases, exploratory=exploratory,
                                     status="unavailable",
-                                    reason=("No application could be started: "
-                                            + "; ".join(w for _, w in apps.failures)
-                                            or "nothing runnable was detected"),
+                                    reason=_cannot_start(root, specs, apps.failures),
                                     completed_at=datetime.now(timezone.utc).isoformat())
                     evidence.write_report(report)
                     emit("done", status=report.status, reason=report.reason,
                          passed=0, failed=0, skipped=0)
                     return report.as_dict()
+                if not urls:
+                    # Nothing serves HTTP, but the file checks need nothing to serve.
+                    # This is the whole reason they exist: an RPA application or a set
+                    # of migrated DAGs can still be told apart from a broken one.
+                    cases = structural
+                    emit("app", stage="detect", apps=[],
+                         message=("No application to start — running "
+                                  f"{len(structural)} file check(s) instead"))
 
             target = ", ".join(f"{k}={v}" for k, v in urls.items())
             emit("running", message=f"Executing {len(cases)} case(s) against {target}")
-            report = run_plan(project_id, run_id, urls, cases,
+            report = run_plan(project_id, run_id, urls, cases, root=root,
                               emulators=emus.records, env=emus.env,
                               ran_by=ran_by, exploratory=exploratory,
-                              on_step=lambda s: emit("step", index=s.index,
-                                                     action=s.action, status=s.status))
+                              on_step=lambda s, total: emit(
+                                  "step", index=s.index, total=total,
+                                  action=s.action, status=s.status,
+                                  caseId=s.case_id))
 
-    report.covered = plan.covered_nodes(cases)
+    from src.qatest import coverage as cov
+
+    # run_plan hands these back in memory; falling back to S3 keeps a caller that
+    # supplied its own report working.
+    steps = report.__dict__.get("_steps")
+    if steps is None:
+        steps = evidence.read_steps(project_id, run_id)
+
+    statuses = cov.case_statuses(report.cases, steps)
+    report.covered = plan.covered_nodes(cases, statuses or None)
+    report.selected_kinds = list(kinds or [])
+    report.plan_total = plan_total
+    # Scored here while the graph facts are still in hand. Without them the denominator
+    # falls back to the plan's own node count, which understates a filtered run —
+    # `denominatorFromPlan` records which of the two a reader is looking at.
+    report.coverage = cov.summarise(
+        report, steps, plan.graph_totals(facts) if facts else None)
     evidence.write_report(report)
     emit("evidence", message=f"Evidence stored under {project_id}/{run_id}/")
 
     if write_graph:
-        steps = evidence.read_steps(project_id, run_id)
         written = graph_writeback.write_results(report, steps)
         emit("graph", message=(f"Graph updated: {written['created']} created, "
                                f"{written['updated']} updated, {written['links']} links")

@@ -84,11 +84,51 @@ def _reject_floats(table: str, value, path: str = "") -> None:
             _reject_floats(table, v, f"{path}[{i}]")
 
 
+def _matches(condition, row: dict) -> bool:
+    """Evaluate a boto3 Attr condition against a plain dict.
+
+    Only the operators this codebase actually uses. Anything else raises rather than
+    silently passing — a filter that quietly matches everything is exactly the failure
+    this helper exists to prevent.
+    """
+    expr = condition.get_expression()
+    operator = expr["operator"]
+    values = expr["values"]
+
+    if operator == "AND":
+        return all(_matches(v, row) for v in values)
+    if operator == "OR":
+        return any(_matches(v, row) for v in values)
+    if operator == "NOT":
+        return not _matches(values[0], row)
+
+    name = values[0].name
+    actual = row.get(name)
+    if operator == "=":
+        return actual == values[1]
+    if operator == "<>":
+        return actual != values[1]
+    if operator == "IN":
+        return actual in values[1]
+    if operator == "attribute_exists":
+        return name in row
+    if operator == "attribute_not_exists":
+        return name not in row
+    if operator == "begins_with":
+        return isinstance(actual, str) and actual.startswith(values[1])
+    if operator == "contains":
+        return actual is not None and values[1] in actual
+    raise NotImplementedError(
+        f"FakeDynamo does not evaluate {operator!r} — add it rather than "
+        f"letting the filter match everything")
+
+
 class FakeDynamo:
     """Enough of dynamo_client's surface for the observability store."""
 
     def __init__(self) -> None:
         self.tables: dict[str, list[dict]] = {}
+        self.scan_calls = 0
 
     def put_item(self, table, item):
         # Mirror real DynamoDB: an empty string is not a legal value for ANY key
@@ -133,9 +173,28 @@ class FakeDynamo:
         return [r for r in self.tables.get(table, []) if r.get(pk_name) == pk_value][:limit]
 
     def scan_items(self, table, filter_expr=None, limit=500):
-        return list(self.tables.get(table, []))[:limit]
+        # Counted so a test can assert an endpoint does NOT scan. A polled endpoint
+        # backed by a full-table scan is how this table gets hot, and the only way that
+        # constraint survives is if something fails when it is broken.
+        self.scan_calls += 1
+        rows = list(self.tables.get(table, []))
+        # The filter is applied BEFORE the limit, as DynamoDB does. Ignoring it here
+        # made every filtered scan untestable and hid a real outage: the QA queue's
+        # unfiltered `scan(limit=200)` silently stopped finding queued runs once the
+        # table passed 200 rows, so runs were enqueued and never claimed.
+        if filter_expr is not None:
+            rows = [r for r in rows if _matches(filter_expr, r)]
+        return rows[:limit]
 
     def update_item(self, table, key, updates):
+        """SET-only UpdateItem, including the upsert.
+
+        Real DynamoDB creates the item when a bare `SET` addresses a key that does not
+        exist yet — there is no condition on the expression. This used to return None
+        and write nothing, so code that legitimately relies on update-as-upsert (a
+        runner recording liveness before it has ever been seen) passed against DynamoDB
+        and silently did nothing here.
+        """
         from src.database.dynamo_client import _decimalize
         updates = {k: _decimalize(v) for k, v in updates.items()}
         _reject_floats(table, updates)
@@ -143,7 +202,9 @@ class FakeDynamo:
             if all(row.get(k) == v for k, v in key.items()):
                 row.update(updates)
                 return row
-        return None
+        row = {**key, **updates}
+        self.tables.setdefault(table, []).append(row)
+        return row
 
     def delete_item(self, table, key):
         rows = self.tables.get(table, [])
@@ -214,10 +275,17 @@ def fake_s3(monkeypatch):
         blobs[f"{bucket}/{key}"] = body
         return f"s3://{bucket}/{key}"
 
+    def get_object(bucket, key):
+        body = blobs.get(f"{bucket}/{key}")
+        if body is None:
+            return None
+        return body if isinstance(body, bytes) else str(body).encode("utf-8")
+
     import src.storage.s3_client as s3
     monkeypatch.setattr(s3, "put_json", put_json)
     monkeypatch.setattr(s3, "get_json", get_json)
     monkeypatch.setattr(s3, "put_object", put_object)
+    monkeypatch.setattr(s3, "get_object", get_object)
     return blobs
 
 

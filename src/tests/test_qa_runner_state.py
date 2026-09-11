@@ -1,0 +1,589 @@
+"""What the server knows about a developer's machine, and how it says so.
+
+The API runs on Fargate and can never see podman, so every claim the Floci panel makes
+about someone's laptop is second-hand. These tests pin the two properties that keeps
+honest: a report that has gone quiet is marked STALE rather than presented as current,
+and a command is dispatched exactly once.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.main import app
+from src.qatest import queue
+from src.routers import qa as qa_router
+from src.routers.auth import get_current_user
+from src.services.auth_service import ROLE_PERMISSIONS
+
+client = TestClient(app)
+
+QA = {"userId": "u-qa", "username": "qa", "role": "user_qa",
+      "permissions": ROLE_PERMISSIONS["user_qa"]}
+BASE = "/api/qa"
+RUNNER = "qa/qa-runner"
+
+
+@pytest.fixture(autouse=True)
+def _auth_and_runner(monkeypatch):
+    previous = app.dependency_overrides.get(get_current_user)
+    app.dependency_overrides[get_current_user] = lambda: QA
+    # The runner authenticates with a gateway key rather than a JWT, so the identity
+    # helper is what has to be stubbed — it is called directly, not via Depends.
+    monkeypatch.setattr(qa_router, "_runner_identity", lambda _request: RUNNER)
+    yield
+    if previous is None:
+        app.dependency_overrides.pop(get_current_user, None)
+    else:
+        app.dependency_overrides[get_current_user] = previous
+
+
+def _state(**over):
+    body = {"protocol": 2, "podman": True, "browser": True, "busyRunId": "",
+            "containers": [{"id": "9f3a", "name": "aura-qa-aws-run1",
+                            "image": "docker.io/floci/floci:latest",
+                            "status": "Up 4 minutes", "ports": "4566->4566",
+                            "cloud": "aws"}]}
+    body.update(over)
+    return body
+
+
+# ── Reporting state ─────────────────────────────────────────────────────────
+
+def test_a_runner_can_report_its_containers_and_read_them_back(fake_dynamo):
+    assert client.post(f"{BASE}/runner/state", json=_state()).status_code == 200
+
+    runners = client.get(f"{BASE}/runners").json()["runners"]
+    assert len(runners) == 1
+    me = runners[0]
+    assert me["name"] == RUNNER and me["online"] is True and me["podman"] is True
+    assert me["containers"][0]["name"] == "aura-qa-aws-run1"
+    assert me["containers"][0]["managed"] is True
+    assert me["reportsState"] is True
+
+
+def test_reporting_state_does_not_destroy_the_liveness_stamp(fake_dynamo):
+    """`touch_runner` used to `put_item`, which REPLACES the row — so a poll five
+    seconds after a state report erased every container it had just reported."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    queue.touch_runner(RUNNER)
+
+    row = queue.runner_state(RUNNER)
+    assert row["containers"], "the poll wiped the reported state"
+    assert row["podman"] is True
+
+
+def test_the_body_is_actually_received(fake_dynamo):
+    """A `Body | None = None` spelling silently removes the body from the route and
+    discards everything in it — which already happened once, to the heartbeat."""
+    schema = app.openapi()["paths"][f"{BASE}/runner/state"]["post"]
+    assert "requestBody" in schema
+
+    client.post(f"{BASE}/runner/state", json=_state(podman=False))
+    assert queue.runner_state(RUNNER)["podman"] is False
+
+
+# ── Staleness ───────────────────────────────────────────────────────────────
+
+def test_a_quiet_runner_is_stale_and_its_containers_are_last_known(fake_dynamo):
+    """A sleeping laptop must not leave a panel claiming four emulators are running."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+    for row in fake_dynamo.tables[queue.TABLE]:
+        if row.get("type") == queue.RUNNER_KIND:
+            row["updatedAt"] = old
+            for key, value in list(row.items()):
+                if key.startswith("r_") and isinstance(value, dict):
+                    value["updatedAt"] = old
+
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["online"] is False and me["stale"] is True
+    # Still returned — the panel needs something to grey out, not an empty table.
+    assert me["containers"]
+
+
+def test_two_runners_are_independent(fake_dynamo, monkeypatch):
+    client.post(f"{BASE}/runner/state", json=_state())
+    monkeypatch.setattr(qa_router, "_runner_identity", lambda _r: "other/qa-runner")
+    client.post(f"{BASE}/runner/state", json=_state(podman=False, containers=[]))
+
+    names = {r["name"]: r for r in client.get(f"{BASE}/runners").json()["runners"]}
+    assert set(names) == {RUNNER, "other/qa-runner"}
+    assert names[RUNNER]["podman"] is True
+    assert names["other/qa-runner"]["podman"] is False
+
+
+def test_online_runners_reads_the_index_without_scanning(fake_dynamo):
+    """`/capabilities` calls this on every page load. It used to scan 500 rows."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    before = fake_dynamo.scan_calls
+    assert [r["name"] for r in queue.online_runners()] == [RUNNER]
+    assert fake_dynamo.scan_calls == before, "online_runners scanned the table"
+
+
+def test_online_runners_falls_back_to_the_scan_when_the_index_is_missing(fake_dynamo):
+    """First deploy, or a lost row. The index is a cache and must never be the reason
+    the panel is empty."""
+    queue.touch_runner(RUNNER)
+    fake_dynamo.tables[queue.TABLE] = [
+        r for r in fake_dynamo.tables[queue.TABLE]
+        if r.get("testRunId") != queue.RUNNER_INDEX_ID]
+    assert [r["name"] for r in queue.online_runners()] == [RUNNER]
+
+
+# ── Log commands ────────────────────────────────────────────────────────────
+
+def test_a_log_request_is_handed_over_exactly_once(fake_dynamo):
+    """Two polls racing must not both run the command."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    requested = client.post(f"{BASE}/runners/logs",
+                            json={"runner": RUNNER,
+                                  "container": "aura-qa-aws-run1"}).json()
+    assert requested["status"] == "pending"
+
+    first = client.post(f"{BASE}/runner/state", json=_state()).json()
+    second = client.post(f"{BASE}/runner/state", json=_state()).json()
+    assert len(first["commands"]) == 1
+    assert first["commands"][0]["id"] == requested["commandId"]
+    assert second["commands"] == []
+
+
+def test_a_repeat_request_returns_the_one_already_in_flight(fake_dynamo):
+    client.post(f"{BASE}/runner/state", json=_state())
+    first = client.post(f"{BASE}/runners/logs",
+                        json={"runner": RUNNER, "container": "aura-qa-aws-run1"}).json()
+    again = client.post(f"{BASE}/runners/logs",
+                        json={"runner": RUNNER, "container": "aura-qa-aws-run1"}).json()
+    assert again["commandId"] == first["commandId"]
+    assert again.get("deduped") is True
+
+
+def test_logs_are_refused_for_a_container_aura_did_not_start(fake_dynamo):
+    """Enforced here as well as on the runner. Without it a buggy or compromised
+    server could read arbitrary container output off a developer's laptop."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    r = client.post(f"{BASE}/runners/logs",
+                    json={"runner": RUNNER, "container": "my-employers-database"})
+    assert r.status_code == 400
+    assert "Aura started" in r.json()["detail"]
+
+
+def test_a_log_body_is_capped_and_keeps_the_tail(fake_dynamo, fake_s3):
+    """The recent lines are the ones being asked about, so the HEAD is what goes."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    cmd = client.post(f"{BASE}/runners/logs",
+                      json={"runner": RUNNER, "container": "aura-qa-aws-run1"}).json()
+    client.post(f"{BASE}/runner/state", json=_state())
+
+    huge = ("x" * 1000 + "\n") * 300 + "THE-LAST-LINE\n"
+    client.post(f"{BASE}/runner/state", json=_state(
+        commandResults=[{"id": cmd["commandId"], "ok": True, "output": huge}]))
+
+    out = client.get(f"{BASE}/runners/logs/{cmd['commandId']}",
+                     params={"runner": RUNNER}).json()
+    assert out["status"] == "ready"
+    assert out["lines"][-1] == "THE-LAST-LINE"
+    assert out["truncated"] is True
+
+
+def test_a_pending_log_request_says_pending_rather_than_failing(fake_dynamo):
+    """The runner answers on its next poll, so the first read is always pending. The
+    UI has to be able to say "asking…" instead of showing an error."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    cmd = client.post(f"{BASE}/runners/logs",
+                      json={"runner": RUNNER, "container": "aura-qa-aws-run1"}).json()
+    out = client.get(f"{BASE}/runners/logs/{cmd['commandId']}",
+                     params={"runner": RUNNER}).json()
+    assert out["status"] == "pending"
+
+
+def test_a_failed_command_reports_its_error(fake_dynamo):
+    client.post(f"{BASE}/runner/state", json=_state())
+    cmd = client.post(f"{BASE}/runners/logs",
+                      json={"runner": RUNNER, "container": "aura-qa-aws-run1"}).json()
+    client.post(f"{BASE}/runner/state", json=_state(
+        commandResults=[{"id": cmd["commandId"], "ok": False,
+                         "error": "podman not found on PATH"}]))
+    out = client.get(f"{BASE}/runners/logs/{cmd['commandId']}",
+                     params={"runner": RUNNER}).json()
+    assert out["status"] == "failed" and "podman" in out["error"]
+
+
+# ── An unmanaged container is never even reported ───────────────────────────
+
+def test_only_auras_own_containers_are_marked_managed(fake_dynamo):
+    """A developer's machine runs their employer's containers. The agent filters them
+    out; if one arrives anyway it must not be presented as ours."""
+    client.post(f"{BASE}/runner/state", json=_state(containers=[
+        {"id": "1", "name": "aura-qa-aws-run1", "image": "floci"},
+        {"id": "2", "name": "customer-postgres", "image": "postgres"}]))
+    containers = client.get(f"{BASE}/runners").json()["runners"][0]["containers"]
+    flags = {c["name"]: c["managed"] for c in containers}
+    assert flags == {"aura-qa-aws-run1": True, "customer-postgres": False}
+
+
+# ── Every new read endpoint, called for real ────────────────────────────────
+#
+# These exist because a signature mismatch shipped: `/coverage` called
+# `evidence.list_runs(project_id, limit=10)`, which takes no `limit` and returns run
+# IDs rather than dicts. Both mistakes are invisible to a unit test of the module and
+# fatal the first time a browser asks. Anything reachable over HTTP gets called over
+# HTTP here, even if the assertion is only "it did not 500".
+
+REPORT = {
+    "runId": "run-1", "projectId": "p1", "appUrl": "http://x",
+    "status": "passed", "startedAt": "2026-09-10T10:00:00+00:00",
+    "totalPassed": 1, "totalFailed": 0, "totalSkipped": 1, "totalUnemulated": 0,
+    "durationMs": 1200,
+    "cases": [
+        {"case_id": "root-001", "kind": "ui", "name": "application loads",
+         "verifies_label": "", "verifies_eid": "", "method": "GET", "path": "/",
+         "source_file": "", "skip_reason": ""},
+        {"case_id": "api-001", "kind": "api", "name": "POST /items",
+         "verifies_label": "API", "verifies_eid": "a1", "method": "POST",
+         "path": "/items", "source_file": "app.py",
+         "skip_reason": "POST needs a request body the graph does not describe"},
+    ],
+    "emulators": [], "covered": [], "exploratory": False,
+}
+
+
+@pytest.fixture
+def stored_run(monkeypatch):
+    """One finished run in S3, and a graph that knows what the project has."""
+    monkeypatch.setattr("src.qatest.evidence.list_runs", lambda pid: ["run-1"])
+    monkeypatch.setattr("src.qatest.evidence.read_report", lambda pid, rid: dict(REPORT))
+    monkeypatch.setattr("src.qatest.evidence.read_steps", lambda pid, rid: [
+        {"index": 1, "action": "application loads", "target": "/", "status": "passed",
+         "caseId": "root-001", "screenshotKey": ""},
+        {"index": 2, "action": "POST /items", "target": "/items", "status": "skipped",
+         "caseId": "api-001", "screenshotKey": ""},
+    ])
+    monkeypatch.setattr("src.qatest.evidence.screenshot_urls", lambda pid, rid: {})
+    monkeypatch.setattr("src.qatest.plan.fetch_facts", lambda pid: {
+        "apis": [{"eid": "a1", "method": "POST", "path": "/items"},
+                 {"eid": "a2", "method": "GET", "path": "/health"}],
+        "services": [], "dependencies": [{"name": "boto3"}]})
+
+
+def test_project_coverage_endpoint_answers(fake_dynamo, stored_run):
+    r = client.get(f"{BASE}/projects/p1/coverage")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["runId"] == "run-1"
+    cov = body["coverage"]
+    # One API node verified out of two, and the uncovered one carries its reason.
+    assert cov["nodeTotal"] == 2
+    assert cov["uncovered"][0]["reason"].startswith("POST needs a request body")
+
+
+def test_project_coverage_is_not_an_error_when_nothing_has_run(fake_dynamo, monkeypatch):
+    monkeypatch.setattr("src.qatest.evidence.list_runs", lambda pid: [])
+    r = client.get(f"{BASE}/projects/p1/coverage")
+    assert r.status_code == 200
+    assert r.json()["coverage"] is None
+
+
+def test_plan_preview_endpoint_answers(fake_dynamo, stored_run):
+    from src.qatest import plan as plan_mod
+    plan_mod._preview_cache.clear()
+
+    r = client.get(f"{BASE}/projects/p1/plan")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["graphReady"] is True
+    assert body["counts"]["api"] == 2
+    assert body["totalCases"] == 3          # two APIs plus the application root
+    assert body["clouds"] == ["aws"]        # boto3 implies exactly one emulator
+
+
+def test_plan_preview_says_why_when_the_graph_is_empty(fake_dynamo, monkeypatch):
+    """"0 cases" and "never analysed" look identical otherwise, and only one of them
+    is something the user can act on."""
+    from src.qatest import plan as plan_mod
+    plan_mod._preview_cache.clear()
+    monkeypatch.setattr("src.qatest.plan.fetch_facts",
+                        lambda pid: {"apis": [], "services": [], "dependencies": []})
+
+    body = client.get(f"{BASE}/projects/empty/plan").json()
+    assert body["graphReady"] is False
+    assert "Analyse it in Dev Workspace" in body["reason"]
+
+
+def test_get_result_carries_coverage(fake_dynamo, stored_run):
+    r = client.get(f"{BASE}/results/p1/run-1")
+    assert r.status_code == 200, r.text
+    assert r.json()["coverage"]["nodeTotal"] == 2
+    assert len(r.json()["steps"]) == 2
+
+
+def test_run_progress_endpoint_answers(fake_dynamo):
+    row = queue.enqueue("p1", "", "qa")
+    r = client.get(f"{BASE}/runs/{row['testRunId']}/progress", params={"projectId": "p1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["pct"] is None
+
+
+def test_run_progress_404s_for_a_run_that_does_not_exist(fake_dynamo):
+    assert client.get(f"{BASE}/runs/nope/progress",
+                      params={"projectId": "p1"}).status_code == 404
+
+
+def test_console_endpoint_answers_even_with_no_log(fake_dynamo, fake_s3):
+    r = client.get(f"{BASE}/results/p1/run-1/console")
+    assert r.status_code == 200
+    assert r.json()["lines"] == []
+
+
+def test_the_index_carries_everything_the_panel_renders(fake_dynamo):
+    """Readers go through the aggregate index, so a field stored only on the
+    per-runner row is invisible in the UI even though it was reported correctly.
+    That happened to `os` and both version strings."""
+    client.post(f"{BASE}/runner/state", json=_state(
+        os="darwin/arm64", podmanVersion="5.2.1", browserVersion="131"))
+
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["os"] == "darwin/arm64"
+    assert me["podmanVersion"] == "5.2.1"
+    assert me["browserVersion"] == "131"
+
+
+# ── The heartbeat wire contract ─────────────────────────────────────────────
+#
+# `HeartbeatRequest` is where live emulator state enters the system, and pydantic
+# DROPS any field the model does not declare — silently, with a 200 OK. A test that
+# calls `queue.heartbeat()` directly cannot see that: it passes while the real path
+# throws the payload away. This one goes over HTTP, which is the only way the model
+# is exercised at all.
+
+def _heartbeat(run_id, project_id, **body):
+    return client.post(f"{BASE}/runner/{run_id}/heartbeat",
+                       params={"projectId": project_id, "phase": body.get("phase", "")},
+                       json=body)
+
+
+def test_the_heartbeat_model_accepts_every_field_the_agent_sends(fake_dynamo):
+    """The agent's on_event builds this payload. Anything missing from the model is
+    dropped before the queue sees it, and the panel it feeds stays empty."""
+    schema = app.openapi()["components"]["schemas"]["HeartbeatRequest"]["properties"]
+    for field in ("phase", "totalPassed", "totalFailed", "totalSkipped",
+                  "totalUnemulated", "totalCases", "stepIndex", "phaseDetail",
+                  "emulators"):
+        assert field in schema, f"the heartbeat model drops {field!r}"
+
+
+def test_live_emulators_survive_the_round_trip_over_http(fake_dynamo):
+    row = queue.enqueue("p1", "", "qa")
+    r = _heartbeat(row["testRunId"], "p1", phase="emulator", totalCases=3,
+                   phaseDetail="aws emulator ready on :4566",
+                   emulators=[{"cloud": "aws", "port": 4566, "started": True,
+                               "container": "aura-qa-aws-x",
+                               "image": "docker.io/floci/floci:latest"}])
+    assert r.status_code == 200, r.text
+
+    active = client.get(f"{BASE}/active/p1").json()["active"][0]
+    assert active["emulators"], "the emulator never reached /active"
+    assert active["emulators"][0]["cloud"] == "aws"
+    assert active["emulators"][0]["port"] == 4566
+    assert active["phaseDetail"] == "aws emulator ready on :4566"
+
+
+def test_a_stopped_emulator_replaces_the_started_one(fake_dynamo):
+    """Last write wins per cloud, so the panel shows the CURRENT set rather than an
+    append-only history of every transition."""
+    row = queue.enqueue("p1", "", "qa")
+    _heartbeat(row["testRunId"], "p1", phase="emulator", totalCases=3,
+               emulators=[{"cloud": "aws", "started": True}])
+    _heartbeat(row["testRunId"], "p1", phase="emulator", totalCases=3,
+               emulators=[{"cloud": "aws", "started": False, "stopped": True}])
+
+    emus = client.get(f"{BASE}/active/p1").json()["active"][0]["emulators"]
+    assert len(emus) == 1 and emus[0]["stopped"] is True
+
+
+def test_unemulated_is_carried_separately_over_http(fake_dynamo):
+    row = queue.enqueue("p1", "", "qa")
+    _heartbeat(row["testRunId"], "p1", phase="step", totalCases=4,
+               totalPassed=1, totalUnemulated=2)
+    active = client.get(f"{BASE}/active/p1").json()["active"][0]
+    assert active["totalUnemulated"] == 2
+    assert queue.progress(row["testRunId"], "p1")["done"] == 3
+
+
+# ── The run's own console ───────────────────────────────────────────────────
+#
+# `phaseDetail` carries only the CURRENT line. Without a history a remote run shows
+# one sentence that keeps changing, which is not "what is happening" — it is a
+# glimpse of one moment, and the busy stretches worth watching are exactly the ones
+# that flash past between two polls.
+
+def test_the_console_is_stored_as_the_runner_sends_it(fake_dynamo):
+    """The runner holds the history and sends all of it; the server stores it.
+
+    This was a read-modify-write append, and it lost almost everything — a step event
+    beats immediately, so several heartbeats are in flight at once, each reads the row
+    before the previous landed, and each write clobbers the last. A 12-case run ended
+    with a single line in the console.
+    """
+    row = queue.enqueue("p1", "", "qa")
+    console = [
+        {"at": "t1", "phase": "emulator", "text": "starting the aws emulator on :4566"},
+        {"at": "t2", "phase": "emulator", "text": "aws emulator ready on :4566"},
+    ]
+    _heartbeat(row["testRunId"], "p1", phase="emulator", totalCases=2, events=console)
+    console.append({"at": "t3", "phase": "step", "text": "1. application loads — passed"})
+    _heartbeat(row["testRunId"], "p1", phase="step", totalCases=2, events=console)
+
+    activity = client.get(f"{BASE}/active/p1").json()["active"][0]["activity"]
+    assert [a["text"] for a in activity] == [c["text"] for c in console]
+
+
+def test_concurrent_heartbeats_cannot_lose_console_lines(fake_dynamo):
+    """The failure that shipped: interleaved beats, each carrying the full history.
+    Whichever lands last must still hold every line."""
+    row = queue.enqueue("p1", "", "qa")
+    console = []
+    for i in range(6):
+        console.append({"at": f"t{i}", "phase": "step", "text": f"step {i}"})
+        _heartbeat(row["testRunId"], "p1", phase="step", totalCases=6,
+                   events=list(console))
+    # And a late beat carrying an EARLIER snapshot, as a slow request would.
+    _heartbeat(row["testRunId"], "p1", phase="step", totalCases=6,
+               events=console[:3])
+
+    activity = queue.progress(row["testRunId"], "p1")["activity"]
+    assert len(activity) >= 3, "the console was emptied by a stale beat"
+
+
+def test_the_console_is_capped_so_the_row_cannot_grow_without_bound(fake_dynamo):
+    """The row is rewritten on every beat and DynamoDB items cap at 400 KB."""
+    row = queue.enqueue("p1", "", "qa")
+    console = [{"at": f"t{i}", "phase": "step", "text": f"step {i}"} for i in range(200)]
+    _heartbeat(row["testRunId"], "p1", phase="step", totalCases=200, events=console)
+
+    activity = queue.progress(row["testRunId"], "p1")["activity"]
+    assert len(activity) == queue.ACTIVITY_MAX
+    # The TAIL survives — the recent lines are the ones being watched.
+    assert activity[-1]["text"] == "step 199"
+
+
+def test_a_heartbeat_without_events_leaves_the_console_alone(fake_dynamo):
+    """Most beats carry no new events. They must not wipe the history."""
+    row = queue.enqueue("p1", "", "qa")
+    _heartbeat(row["testRunId"], "p1", phase="step", totalCases=2,
+               events=[{"at": "t1", "phase": "plan", "text": "12 cases"}])
+    _heartbeat(row["testRunId"], "p1", phase="step", totalCases=2, totalPassed=1)
+
+    assert len(queue.progress(row["testRunId"], "p1")["activity"]) == 1
+
+
+# ── Health and setup on the wire ────────────────────────────────────────────
+#
+# Pydantic drops what a model does not declare, silently, with a 200 OK — which is how
+# live emulator state was thrown away for a whole release. These go over HTTP for that
+# reason: a test that calls queue.record_runner_state directly cannot see it.
+
+HEALTH = {"ok": False, "platform": "darwin/arm64", "checkedAt": "2026-09-11T00:00:00Z",
+          "findings": [{"check": "podman.working", "ok": False, "severity": "blocks",
+                        "title": "the podman machine is not running",
+                        "detail": "podman is installed but its VM is stopped.",
+                        "remedy": ["podman machine start"], "fixable": True}]}
+
+
+def test_a_runners_problems_reach_the_panel(fake_dynamo):
+    client.post(f"{BASE}/runner/state", json=_state(health=HEALTH,
+                                                    podmanVersion="5.7.0",
+                                                    browserVersion="1234"))
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["health"]["ok"] is False
+    assert me["health"]["findings"][0]["remedy"] == ["podman machine start"]
+    # The version labels the panel already renders, finally populated.
+    assert me["podmanVersion"] == "5.7.0"
+    assert me["browserVersion"] == "1234"
+
+
+def test_findings_are_capped_and_stripped_server_side(fake_dynamo):
+    """A runner writes this and every colleague reads it, and every runner's state
+    shares ONE DynamoDB item. The agent's own limit is not something to trust."""
+    from src.qatest import queue as q
+
+    noisy = {"ok": False, "findings": [
+        {"check": f"c{i}", "severity": "blocks",
+         "title": "t" * 500, "detail": "d" * 5000,
+         "remedy": ["r" * 500, "r2", "r3", "r4"]} for i in range(30)]}
+    client.post(f"{BASE}/runner/state", json=_state(health=noisy))
+
+    health = client.get(f"{BASE}/runners").json()["runners"][0]["health"]
+    assert len(health["findings"]) == q.HEALTH_MAX_FINDINGS
+    first = health["findings"][0]
+    assert len(first["title"]) <= 120
+    assert len(first["detail"]) <= q.HEALTH_MAX_TEXT
+    assert len(first["remedy"]) <= 2
+
+
+def test_control_characters_are_stripped(fake_dynamo):
+    """Runner-authored text rendered in a shared panel."""
+    client.post(f"{BASE}/runner/state", json=_state(health={
+        "ok": False, "findings": [{"check": "x", "severity": "blocks",
+                                   "title": "bad\x07\x00title", "remedy": []}]}))
+    title = client.get(f"{BASE}/runners").json()["runners"][0]["health"]["findings"][0]["title"]
+    assert "\x07" not in title and "\x00" not in title
+
+
+def test_a_runner_without_health_still_works(fake_dynamo):
+    """An older agent sends none. That is "we did not ask", not "everything is broken"."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["health"] == {}
+    assert me["online"] is True
+
+
+def test_setup_progress_reaches_the_panel(fake_dynamo):
+    """The install the USER started, visible in Aura rather than only in a terminal."""
+    client.post(f"{BASE}/runner/state", json=_state(setup={
+        "active": True, "step": "podman machine init", "index": 2, "total": 4,
+        "log": [{"at": "t1", "text": "Downloading machine image…"}]}))
+
+    setup = client.get(f"{BASE}/runners").json()["runners"][0]["setup"]
+    assert setup["active"] is True
+    assert setup["index"] == 2 and setup["total"] == 4
+    assert setup["log"][-1]["text"].startswith("Downloading")
+
+
+def test_the_setup_log_is_bounded_server_side(fake_dynamo):
+    client.post(f"{BASE}/runner/state", json=_state(setup={
+        "active": True, "step": "x", "index": 1, "total": 1,
+        "log": [{"at": f"t{i}", "text": f"line {i}"} for i in range(400)]}))
+    log = client.get(f"{BASE}/runners").json()["runners"][0]["setup"]["log"]
+    assert len(log) <= 60
+    assert log[-1]["text"] == "line 399"          # the tail survives
+
+
+def test_an_unhealthy_runner_does_not_disable_the_run_button(fake_dynamo, monkeypatch):
+    """Disabling it recreates the deadlock /capabilities was written to fix: the
+    button is off, so nothing is queued, so nothing is ever claimed.
+
+    The local branch is suppressed to model a DEPLOYED backend, which is the only
+    place this matters — Fargate has neither podman nor a browser, so a connected
+    runner is the whole answer to "can anything run".
+    """
+    from src.qatest import emulators, runner as runner_mod
+    monkeypatch.setattr(emulators, "podman_available", lambda: False)
+    monkeypatch.setattr(runner_mod, "_playwright_available", lambda: (False, "no browser"))
+
+    client.post(f"{BASE}/runner/state", json=_state(health=HEALTH))
+    caps = client.get(f"{BASE}/capabilities").json()
+
+    assert caps["canRun"] is True
+    assert "not ready" in caps["reason"]
+    assert "podman machine start" in caps["commands"]
+
+
+def test_capabilities_offers_the_doctor_when_nothing_is_connected(fake_dynamo):
+    """Structured, because the panel used to scrape the prose for a `python -m` line."""
+    caps = client.get(f"{BASE}/capabilities").json()
+    if not caps["runners"] and not caps["local"]:
+        assert any("--doctor" in c for c in caps["commands"])
+        assert any("--setup" in c for c in caps["commands"])

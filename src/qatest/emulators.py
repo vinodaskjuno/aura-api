@@ -110,14 +110,53 @@ def clouds_for(dependencies: list[dict]) -> list[Cloud]:
     return needed
 
 
+def podman_path() -> str | None:
+    """Where podman actually is, searching install locations as well as PATH.
+
+    `shutil.which("podman")` answers a narrower question and got it wrong: the .pkg
+    installs to /opt/podman/bin, which is not on the PATH of a process launched from
+    anywhere but a login shell — so the runner refused to start on machines where
+    aura-infra's own scripts (which export that directory) work fine.
+    """
+    from src.qatest import toolpath
+    return toolpath.which("podman")
+
+
 def podman_available() -> bool:
-    return shutil.which("podman") is not None
+    return podman_path() is not None
+
+
+def podman_ready() -> tuple[bool, str]:
+    """Is podman actually usable — not merely installed. (ok, reason).
+
+    On macOS and Windows podman is a client for a VM, so `which` succeeds while every
+    command fails. That is not hypothetical: preflight passed, the agent claimed a run
+    and marked it running, and only then did each emulator fail, which is the worst
+    possible moment to find out.
+    """
+    binary = podman_path()
+    if not binary:
+        return False, "podman is not installed, or is not in any known location"
+    code, out = _run(["info", "--format", "{{.Host.RemoteSocket.Exists}}"], timeout=20)
+    if code == 0:
+        return True, ""
+    lowered = out.lower()
+    if "machine" in lowered or "connection" in lowered or "socket" in lowered:
+        return False, ("podman is installed but not running — on macOS and Windows it "
+                       "needs its virtual machine started: `podman machine start`")
+    return False, f"podman is installed but not usable: {out.strip()[-200:]}"
 
 
 def _run(args: list[str], timeout: int = _TIMEOUT_S) -> tuple[int, str]:
+    from src.qatest import toolpath
+
+    # The ABSOLUTE path and an augmented PATH, not one or the other: podman execs its
+    # own helpers (gvproxy, vfkit) out of the same directory, so an absolute podman
+    # with a bare PATH still cannot start a machine.
+    binary = toolpath.which("podman") or "podman"
     try:
-        p = subprocess.run(["podman", *args], capture_output=True, text=True,
-                           timeout=timeout)
+        p = subprocess.run([binary, *args], capture_output=True, text=True,
+                           timeout=timeout, env=toolpath.env())
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return 124, f"podman {' '.join(args)} timed out after {timeout}s"
@@ -165,10 +204,21 @@ class EmulatorSet:
     for a reason that looks nothing like the cause.
     """
 
-    def __init__(self, clouds: list[Cloud], run_id: str):
+    def __init__(self, clouds: list[Cloud], run_id: str, on_event=None):
         self.clouds = clouds
         self.run_id = run_id
         self.records: list[EmulatorRecord] = []
+        # So the UI can watch containers come up and go away. Without an event on the
+        # way OUT, a panel can only ever learn that an emulator started.
+        self.on_event = on_event
+
+    def _emit(self, **data) -> None:
+        if not self.on_event:
+            return
+        try:
+            self.on_event({"type": "emulator", **data})
+        except Exception:                                     # noqa: BLE001
+            pass
 
     @property
     def env(self) -> dict[str, str]:
@@ -182,7 +232,16 @@ class EmulatorSet:
 
     def __enter__(self) -> "EmulatorSet":
         for cloud in self.clouds:
-            self.records.append(self._start(cloud))
+            self._emit(cloud=cloud.name, image=cloud.image, port=cloud.port,
+                       container=f"aura-qa-{cloud.name}-{self.run_id}",
+                       starting=True, started=False,
+                       message=f"starting the {cloud.name} emulator on :{cloud.port}")
+            rec = self._start(cloud)
+            self.records.append(rec)
+            self._emit(**rec.as_dict(),
+                       message=(f"{rec.cloud} emulator ready on :{rec.port}"
+                                if rec.started else
+                                f"{rec.cloud} emulator failed: {rec.error[:160]}"))
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -194,8 +253,12 @@ class EmulatorSet:
                              digest=image_digest(cloud.image), port=cloud.port,
                              container=name)
 
-        if not podman_available():
-            rec.error = "podman not found on PATH"
+        # `podman_ready`, not `podman_available`: being installed is not being usable.
+        # A stopped machine used to pass every check and then fail here with a raw exec
+        # error, once per cloud, after the run had already been claimed.
+        ready, why = podman_ready()
+        if not ready:
+            rec.error = why
             return rec
 
         # A container left behind by an interrupted run holds the name and the port.
@@ -223,6 +286,10 @@ class EmulatorSet:
         for rec in self.records:
             if rec.container:
                 _run(["rm", "-f", rec.container])
+                self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
+                           image=rec.image, digest=rec.digest,
+                           started=False, stopped=True,
+                           message=f"{rec.cloud} emulator stopped")
         log.info("qatest: emulators stopped")
 
 
@@ -235,3 +302,86 @@ def probe(cloud_name: str) -> dict:
         rec = es.records[0]
         return {"ok": rec.started, "message": rec.error or "ready",
                 "digest": rec.digest, "port": rec.port, "env": es.env}
+
+
+# ── Reporting the machine's own state ──────────────────────────────────────────
+#
+# Only the runner can see podman; the API runs on Fargate. These are called BY the
+# agent and their output is shipped to the server, which is the only way "show Floci
+# running on your machine" can be answered at all.
+
+def list_containers(include_unmanaged: bool = False) -> list[dict]:
+    """Aura's Floci containers as podman reports them, right now.
+
+    Defaults to Aura's own containers ONLY. A developer's machine runs their
+    employer's containers, and shipping every name on it to a shared server is a data
+    leak dressed as a feature — `include_unmanaged` exists for the agent's explicit
+    --report-all-containers flag and nothing else.
+    """
+    if not podman_available():
+        return []
+    code, out = _run(["ps", "--format", "json"], timeout=20)
+    if code != 0 or not out.strip():
+        return []
+    try:
+        raw = json.loads(out)
+    except (ValueError, TypeError) as exc:
+        log.debug("qatest: could not parse podman ps: %s", exc)
+        return []
+
+    containers = []
+    for item in raw if isinstance(raw, list) else []:
+        names = item.get("Names") or item.get("names") or []
+        name = (names[0] if isinstance(names, list) and names else str(names or ""))
+        if not include_unmanaged and not name.startswith("aura-qa-"):
+            continue
+        ports = item.get("Ports") or []
+        containers.append({
+            "id": str(item.get("Id") or item.get("ID") or "")[:12],
+            "name": name,
+            "image": str(item.get("Image") or ""),
+            "status": str(item.get("Status") or item.get("State") or ""),
+            "ports": _format_ports(ports),
+            "createdAt": str(item.get("CreatedAt") or ""),
+            "cloud": _cloud_of(name),
+        })
+    return containers
+
+
+def _cloud_of(container_name: str) -> str:
+    """The cloud a container serves, from `aura-qa-<cloud>-<runId>`."""
+    parts = container_name.split("-")
+    return parts[2] if len(parts) > 3 and parts[2] in _BY_NAME else ""
+
+
+def _format_ports(ports) -> str:
+    if isinstance(ports, str):
+        return ports
+    out = []
+    for p in ports if isinstance(ports, list) else []:
+        if isinstance(p, dict):
+            host = p.get("host_port") or p.get("hostPort") or ""
+            cont = p.get("container_port") or p.get("containerPort") or ""
+            if host or cont:
+                out.append(f"{host}->{cont}")
+        else:
+            out.append(str(p))
+    return ", ".join(out)[:120]
+
+
+def container_logs(name: str, tail: int = 200) -> tuple[bool, str]:
+    """`podman logs --tail N` for one of Aura's own containers.
+
+    Refuses anything not named `aura-qa-*`, on the RUNNER side as well as the server's.
+    The check is cheap and the failure mode is severe: without it, a bug or a
+    compromised server could read arbitrary container output off a developer's laptop.
+    """
+    if not name.startswith("aura-qa-"):
+        return False, "refusing to read logs for a container Aura did not start"
+    if not podman_available():
+        return False, "podman not found on PATH"
+    tail = max(1, min(int(tail or 200), 500))
+    code, out = _run(["logs", "--tail", str(tail), name], timeout=30)
+    if code != 0:
+        return False, out.strip()[-400:] or f"podman logs exited {code}"
+    return True, out

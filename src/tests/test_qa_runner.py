@@ -832,3 +832,153 @@ def test_s3_key_helper_survived_the_removal():
 
     assert _s3_key("s3://aura-123-test-artifacts/p1/r1/a.png") == "p1/r1/a.png"
     assert _s3_key("p1/r1/a.png") == "p1/r1/a.png"
+
+
+# ── Progress, the plan size, and the old-agent cliff ─────────────────────────
+
+def test_progress_reports_unknown_rather_than_zero_when_the_plan_size_is_not_known(
+        fake_dynamo):
+    """A queued run has not been claimed, so nothing knows how many cases it has. 0%
+    would say something false about a run that has not started."""
+    row = queue.enqueue("p1", "", "qa")
+    out = queue.progress(row["testRunId"], "p1")
+    assert out["totalCases"] == 0
+    assert out["pct"] is None, "an unknown plan size was reported as 0%"
+
+
+def test_progress_is_a_getitem_not_a_scan(fake_dynamo):
+    """This is what a 2-second poll hits. `list_for_project` scans the table, and a
+    polled endpoint backed by a scan is how a table gets hot."""
+    row = queue.enqueue("p1", "", "qa")
+    before = fake_dynamo.scan_calls
+    queue.progress(row["testRunId"], "p1")
+    assert fake_dynamo.scan_calls == before
+
+
+def test_progress_never_exceeds_one_hundred_percent(fake_dynamo):
+    """A heartbeat racing the final report can report more done than planned, and
+    113% destroys trust in every other number on the panel."""
+    row = queue.enqueue("p1", "", "qa")
+    queue.heartbeat(row["testRunId"], "p1", "step", "laptop",
+                    {"totalCases": 3, "totalPassed": 5})
+    out = queue.progress(row["testRunId"], "p1")
+    assert out["pct"] == 100 and out["done"] == 3
+
+
+def test_finishing_keeps_the_plan_size(fake_dynamo):
+    """`/runs/{id}/progress` reads this row directly and would otherwise report a
+    completed run as 0 of 0."""
+    row = queue.enqueue("p1", "", "qa")
+    queue.heartbeat(row["testRunId"], "p1", "step", "laptop", {"totalCases": 4})
+    queue.finish(row["testRunId"], "p1",
+                 {"status": "passed", "totalPassed": 4, "planTotal": 4})
+    assert queue.progress(row["testRunId"], "p1")["totalCases"] == 4
+
+
+def test_a_heartbeat_carries_the_running_emulators_through_to_active(fake_dynamo):
+    row = queue.enqueue("p1", "", "qa")
+    queue.heartbeat(row["testRunId"], "p1", "emulator", "laptop", {
+        "totalCases": 2,
+        "emulators": [{"cloud": "aws", "port": 4566, "container": "aura-qa-aws-x",
+                       "image": "floci", "started": True, "error": ""}]})
+    out = queue.progress(row["testRunId"], "p1")
+    assert out["emulators"][0]["cloud"] == "aws"
+    assert out["emulators"][0]["port"] == 4566
+
+
+def test_reaping_marks_the_emulators_stale(fake_dynamo):
+    """Otherwise an abandoned run's panel keeps showing containers that are gone —
+    a phantom that reads as "still working"."""
+    row = queue.enqueue("p1", "", "qa")
+    queue.heartbeat(row["testRunId"], "p1", "step", "laptop",
+                    {"totalCases": 1,
+                     "emulators": [{"cloud": "aws", "started": True}]})
+    old = (datetime.now(timezone.utc) - timedelta(seconds=5000)).isoformat()
+    for r in fake_dynamo.tables[queue.TABLE]:
+        if r.get("testRunId") == row["testRunId"]:
+            r["updatedAt"] = old
+    assert queue.reap(stale_after_s=900) == 1
+    assert queue.progress(row["testRunId"], "p1")["emulatorsStale"] is True
+
+
+def test_an_old_agent_never_receives_a_case_field_it_cannot_construct():
+    """`service.execute` does `Case(**c)`, so a new field kills every agent already
+    running — uncaught, inside its poll loop. This is the one real cliff."""
+    from src.routers.qa import _LEGACY_CASE_FIELDS, _cases_for_protocol
+    from src.qatest.types import Case as C
+
+    case = C(case_id="c1", kind="api", name="GET /x", skip_reason="because")
+    legacy = _cases_for_protocol([case], 1)[0]
+    assert set(legacy) == set(_LEGACY_CASE_FIELDS)
+    assert "skip_reason" not in legacy
+    # And the constructor an old agent uses must accept exactly that dict.
+    assert C(**legacy).case_id == "c1"
+
+    current = _cases_for_protocol([case], 2)[0]
+    assert current["skip_reason"] == "because"
+
+
+def test_from_wire_drops_an_unknown_key_instead_of_raising():
+    """The other direction — a new agent against an older server."""
+    from src.qatest.types import Case as C
+    assert C.from_wire({"case_id": "c", "kind": "api", "name": "n",
+                        "invented_later": True}).case_id == "c"
+
+
+# ── A busy table must not starve the queue ──────────────────────────────────
+#
+# What happened on a real dev machine: `test-results` accumulated 262 rows — 196 of
+# them from the old execution agent — and `claim` scanned with an UNFILTERED
+# limit=200. The queued run fell outside that window, so the runner polled every five
+# seconds against a queue that looked empty, `/active` never listed the run, and the
+# launcher sat there forever. Nothing errored anywhere.
+
+def _clutter(fake_dynamo, n: int = 260) -> None:
+    """Rows from other producers, which is what this table really looks like."""
+    for i in range(n):
+        fake_dynamo.put_item(queue.TABLE, {
+            "testRunId": f"old-{i:04d}", "projectId": "someone-else",
+            "type": "execution", "status": "completed",
+            "createdAt": f"2026-01-01T00:{i % 60:02d}:00+00:00"})
+
+
+def test_a_queued_run_is_claimable_on_a_table_full_of_other_rows(fake_dynamo):
+    _clutter(fake_dynamo)
+    row = queue.enqueue("p1", "", "qa")
+
+    claimed = queue.claim("laptop")
+    assert claimed is not None, "the queue went blind once the table grew"
+    assert claimed["testRunId"] == row["testRunId"]
+
+
+def test_an_in_flight_run_is_listed_on_a_table_full_of_other_rows(fake_dynamo):
+    """The same starvation hit `/active`, so the launcher polled for a run the API
+    insisted did not exist and fell through to a 404 on its report."""
+    _clutter(fake_dynamo)
+    row = queue.enqueue("p1", "", "qa")
+
+    live = [r["testRunId"] for r in queue.list_for_project("p1")]
+    assert row["testRunId"] in live
+
+
+def test_the_reaper_still_sees_runs_on_a_busy_table(fake_dynamo):
+    _clutter(fake_dynamo)
+    row = queue.enqueue("p1", "", "qa")
+    queue.claim("laptop")
+    old = (datetime.now(timezone.utc) - timedelta(seconds=5000)).isoformat()
+    for r in fake_dynamo.tables[queue.TABLE]:
+        if r.get("testRunId") == row["testRunId"]:
+            r["updatedAt"] = old
+
+    assert queue.reap(stale_after_s=900) == 1
+
+
+def test_a_runner_is_still_found_on_a_busy_table(fake_dynamo):
+    _clutter(fake_dynamo)
+    queue.touch_runner("laptop")
+    # Drop the index so the scan fallback is what answers — the path that starves.
+    fake_dynamo.tables[queue.TABLE] = [
+        r for r in fake_dynamo.tables[queue.TABLE]
+        if r.get("testRunId") != queue.RUNNER_INDEX_ID]
+
+    assert [r["name"] for r in queue.online_runners()] == ["laptop"]

@@ -18,6 +18,7 @@ import time
 from datetime import datetime, timezone
 
 from src.qatest import evidence
+from src.qatest import plan
 from src.qatest.types import Case, EmulatorRecord, Report, Step
 
 log = logging.getLogger(__name__)
@@ -32,9 +33,17 @@ class _Recorder:
     step and its image can never disagree about which is which.
     """
 
-    def __init__(self, project_id: str, run_id: str):
+    def __init__(self, project_id: str, run_id: str, on_step=None, total: int = 0):
         self.project_id = project_id
         self.run_id = run_id
+        # Reporting lives HERE rather than at each call site. It used to be called from
+        # two of the five branches, so every skipped case — a Service smoke test, a
+        # non-GET route, a parameterised path — advanced the run without advancing the
+        # progress bar, and a project with many POST routes showed a bar that stalled
+        # and never reached 100%. One case produces exactly one step, so this is also
+        # the only place that can guarantee one report per case.
+        self.on_step = on_step
+        self.total = total
         self.steps: list[Step] = []
         self.console: list[str] = []
         # Problems seen since the last step closed, so each step owns the errors its
@@ -59,6 +68,11 @@ class _Recorder:
                     duration_ms=int((time.monotonic() - started) * 1000),
                     error=error[:2000], screenshot_key=key, case_id=case_id)
         self.steps.append(step)
+        if self.on_step:
+            try:
+                self.on_step(step, self.total)
+            except Exception:  # noqa: BLE001 — a progress consumer must not fail a run
+                pass
         return step
 
 
@@ -93,16 +107,77 @@ def _url_for(urls: dict[str, str], case: Case) -> str:
     return f"{base.rstrip('/')}{case.path or '/'}" if base else ""
 
 
+def _run_structure(rec: "_Recorder", cases: list[Case], root) -> None:
+    """Run every file check. No browser, no application, no emulator."""
+    from src.qatest import structure
+
+    for case in cases:
+        started = time.monotonic()
+        check = structure.Check(check_id=case.case_id, name=case.name,
+                                rel_path=case.path, validator=case.method)
+        ok, detail = structure.run_check(root, check)
+        rec.add(case.name, case.path, "passed" if ok else "failed", started,
+                error="" if ok else detail, case_id=case.case_id)
+        # The detail of a PASS is worth keeping too — "8 sequence flows all resolve"
+        # is what makes a green tick mean something.
+        if ok and detail:
+            rec.steps[-1].action = f"{case.name} — {detail}"
+
+
+def _run_stack(rec: "_Recorder", cases: list[Case], urls: dict[str, str]) -> None:
+    """Ask the running stack the questions only it can answer."""
+    from src.qatest import stack as stack_mod
+
+    base = urls.get("api") or urls.get("ui") or ""
+    for case in cases:
+        started = time.monotonic()
+        if not base:
+            rec.add(case.name, case.path, "skipped", started,
+                    error="the stack did not start, so it could not be asked",
+                    case_id=case.case_id)
+            continue
+        assertion = stack_mod.Assertion(
+            assertion_id=case.case_id, name=case.name, path=case.path,
+            checker=case.method,
+            auth=stack_mod._AIRFLOW_AUTH if case.method.startswith("airflow") else None)
+        ok, detail = stack_mod.run_assertion(base, assertion)
+        rec.add(f"{case.name} — {detail}" if ok else case.name, base + case.path,
+                "passed" if ok else "failed", started,
+                error="" if ok else detail, case_id=case.case_id)
+
+
+def _finish(report: Report, rec: "_Recorder", project_id: str, run_id: str,
+            started_wall: float) -> Report:
+    """Tally, store evidence, and stamp the report. Shared by both exit paths."""
+    report.total_passed = sum(1 for s in rec.steps if s.status == "passed")
+    report.total_failed = sum(1 for s in rec.steps if s.status == "failed")
+    report.total_skipped = sum(1 for s in rec.steps if s.status == "skipped")
+    report.total_unemulated = sum(1 for s in rec.steps if s.status == "unemulated")
+    report.status = "failed" if report.total_failed else "passed"
+    report.duration_ms = int((time.monotonic() - started_wall) * 1000)
+    report.completed_at = datetime.now(timezone.utc).isoformat()
+    report.__dict__["_steps"] = list(rec.steps)
+    try:
+        evidence.write_steps(project_id, run_id, rec.steps)
+        if rec.console:
+            evidence.write_console(project_id, run_id, rec.console)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("qatest: evidence upload failed: %s", exc)
+        report.reason = f"evidence partially uploaded: {exc}"
+    return report
+
+
 def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
              cases: list[Case],
              emulators: list[EmulatorRecord] | None = None,
              env: dict[str, str] | None = None,
              ran_by: str = "", exploratory: bool = False,
-             on_step=None) -> Report:
+             on_step=None, root=None) -> Report:
     """Run every case in order and return the report. Does not write to S3.
 
-    `on_step` is called with each completed Step so a caller can stream progress; the
-    stored evidence is identical either way.
+    `on_step` is called as `on_step(step, total)` for EVERY completed step — including
+    skipped ones — so a progress bar reaches 100%. The stored evidence is identical
+    either way.
     """
     # A bare string keeps the CLI's --url and the router's app_url working: it means
     # "one application, serving everything".
@@ -115,8 +190,29 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
                     ran_by=ran_by, exploratory=exploratory,
                     emulators=list(emulators or []), cases=list(cases))
 
+    # File checks first, and without a browser. A project that serves no HTTP has
+    # nothing else it can be asked, so gating these behind Playwright would put the
+    # only answerable questions behind a requirement they do not have.
+    structural = [c for c in cases if c.kind == "structure"]
+    stack_cases = [c for c in cases if c.kind == "stack"]
+    web = [c for c in cases if c.kind not in ("structure", "stack")]
+
+    if structural and root is not None:
+        rec_early = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
+        _run_structure(rec_early, structural, root)
+        if not web and not stack_cases:
+            return _finish(report, rec_early, project_id, run_id, started_wall)
+
     ok, why = _playwright_available()
     if not ok:
+        if structural and root is not None:
+            # The file checks already ran and mean what they say. Reporting the whole
+            # run as `unavailable` would throw away real results because a DIFFERENT
+            # kind of case could not run.
+            report = _finish(report, rec_early, project_id, run_id, started_wall)
+            report.reason = (f"{len(web)} case(s) needed a browser and were not run: "
+                             f"{why}")
+            return report
         report.status = "unavailable"
         report.reason = why
         report.completed_at = datetime.now(timezone.utc).isoformat()
@@ -130,7 +226,21 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
         report.completed_at = datetime.now(timezone.utc).isoformat()
         return report
 
-    rec = _Recorder(project_id, run_id)
+    if stack_cases and not web:
+        # A converted project: a stack to ask questions of, and no graph-derived
+        # routes to browse. No browser needed at all.
+        rec_only = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
+        if structural and root is not None:
+            rec_only.steps.extend(rec_early.steps)
+        _run_stack(rec_only, stack_cases, urls)
+        return _finish(report, rec_only, project_id, run_id, started_wall)
+
+    rec = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
+    if structural and root is not None:
+        # Keep the numbering continuous across both passes.
+        rec.steps.extend(rec_early.steps)
+        rec.console.extend(rec_early.console)
+
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
@@ -156,7 +266,7 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
         # never shows up in an HTTP status.
         page.on("pageerror", lambda e: rec.pending.append(f"uncaught: {str(e)[:200]}"))
 
-        for case in cases:
+        for case in web:
             started = time.monotonic()
 
             if case.case_id == "root-001":
@@ -203,36 +313,23 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
                 except Exception as exc:  # noqa: BLE001
                     rec.add("application loads", root_url, "failed", started,
                             error=str(exc), case_id=case.case_id)
-                if on_step:
-                    try:
-                        on_step(rec.steps[-1])
-                    except Exception:  # noqa: BLE001
-                        pass
                 continue
 
-            if case.kind == "smoke":
-                # A Service node names a code unit, not an address. Recording it as
-                # skipped-with-a-reason is honest; asserting it "passed" would not be.
-                rec.add(f"service smoke: {case.name}", case.verifies_eid, "skipped",
-                        started, error="no HTTP address for a Service node",
-                        case_id=case.case_id)
+            # One reason, decided by the planner. The runner used to make this call
+            # itself with a slightly different rule than the plan did (`"{" in path`
+            # versus the plan's regex), so the preview could promise a case that the
+            # runner then declined. The plan is what the user was shown, so the plan
+            # decides. `why_unrunnable` is the fallback for a plan built by an older
+            # server, and keeps this module correct standalone.
+            reason = case.skip_reason or plan.why_unrunnable(case)
+            if reason:
+                target = (case.verifies_eid if case.kind == "smoke"
+                          else _url_for(urls, case))
+                rec.add(case.name, target, "skipped", started,
+                        error=reason, case_id=case.case_id)
                 continue
 
             url = _url_for(urls, case)
-
-            if case.method != "GET":
-                # A blind POST would mutate state with invented data; the request
-                # shape is not in the graph, so this is not something we can assert.
-                rec.add(f"{case.method} {case.path}", url, "skipped", started,
-                        error=f"{case.method} needs a request body the graph does not describe",
-                        case_id=case.case_id)
-                continue
-
-            if "{" in case.path or ":" in case.path.split("/")[-1]:
-                rec.add(f"GET {case.path}", url, "skipped", started,
-                        error="path parameter has no known value",
-                        case_id=case.case_id)
-                continue
 
             try:
                 resp = page.goto(url, timeout=_STEP_TIMEOUT_MS, wait_until="domcontentloaded")
@@ -264,29 +361,10 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
                 rec.add(f"GET {case.path}", url, "failed", started,
                         error=str(exc), png=png, case_id=case.case_id)
 
-            if on_step:
-                try:
-                    on_step(rec.steps[-1])
-                except Exception:  # noqa: BLE001 — a progress consumer must not fail the run
-                    pass
 
         browser.close()
 
-    report.total_passed = sum(1 for s in rec.steps if s.status == "passed")
-    report.total_failed = sum(1 for s in rec.steps if s.status == "failed")
-    report.total_skipped = sum(1 for s in rec.steps if s.status == "skipped")
-    report.total_unemulated = sum(1 for s in rec.steps if s.status == "unemulated")
-    report.status = "failed" if report.total_failed else "passed"
-    report.duration_ms = int((time.monotonic() - started_wall) * 1000)
-    report.completed_at = datetime.now(timezone.utc).isoformat()
+    if stack_cases:
+        _run_stack(rec, stack_cases, urls)
 
-    report_steps = rec.steps
-    try:
-        evidence.write_steps(project_id, run_id, report_steps)
-        if rec.console:
-            evidence.write_console(project_id, run_id, rec.console)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("qatest: evidence upload failed: %s", exc)
-        report.reason = f"evidence partially uploaded: {exc}"
-
-    return report
+    return _finish(report, rec, project_id, run_id, started_wall)

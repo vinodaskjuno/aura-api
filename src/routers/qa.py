@@ -2,11 +2,12 @@
 from __future__ import annotations
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
                      WebSocket, WebSocketDisconnect)
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from src.routers.auth import get_current_user, require_permission
 from src.database.dynamo_client import put_item, get_item, get_item_by_pk, scan_items, update_item
 from src.storage.s3_client import get_json, list_objects, presigned_url
@@ -184,6 +185,44 @@ def get_qa_activity(user: dict = Depends(require_permission("qa_workspace"))):
 # a Lambda named `aura-test-runner` which was never deployed, so every run from a
 # deployed environment failed.
 
+#: What this server sends. Anything newer inside `cases[]` is stripped for agents that
+#: predate it, because an older agent splats those into `Case(**c)` and dies on an
+#: unknown key — uncaught, inside its poll loop, killing every runner at once.
+RUNNER_PROTOCOL = 2
+
+#: The same bucket evidence.py writes runs to, so a log and a run live together and
+#: one lifecycle rule covers both.
+_ARTIFACT_BUCKET = "test-artifacts"
+
+#: Hard cap on a stored log body, matching the agent's own. A chatty emulator must not
+#: be able to push megabytes through the API on someone else's behalf.
+_LOG_MAX_BYTES = 128 * 1024
+
+
+def _slug(value: str) -> str:
+    """A runner name as a safe S3 path segment. `_runner_identity` returns
+    `username/tool_label`, so it contains a slash and cannot be used raw."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "runner"
+
+#: The fields a protocol-1 agent knows how to receive.
+_LEGACY_CASE_FIELDS = ("case_id", "kind", "name", "verifies_label", "verifies_eid",
+                       "method", "path", "source_file")
+
+
+def _runner_protocol(request: Request) -> int:
+    try:
+        return int(request.headers.get("X-Aura-Runner-Protocol") or 1)
+    except ValueError:
+        return 1
+
+
+def _cases_for_protocol(cases: list, protocol: int) -> list[dict]:
+    out = [c if isinstance(c, dict) else c.__dict__ for c in cases]
+    if protocol >= RUNNER_PROTOCOL:
+        return out
+    return [{k: v for k, v in c.items() if k in _LEGACY_CASE_FIELDS} for c in out]
+
+
 class LocalRunRequest(BaseModel):
     project_id: str
     # Empty starts the project's own application from its working copy; a value
@@ -209,6 +248,21 @@ def _online_runners() -> list[dict]:
     return queue.online_runners(RUNNER_STALE_S)
 
 
+def _runner_health() -> list[dict]:
+    """Connected runners that reported something wrong with themselves."""
+    from src.qatest import queue
+
+    out = []
+    for runner in queue.list_runner_state():
+        if not runner.get("online"):
+            continue
+        health = runner.get("health") or {}
+        blocking = [f for f in (health.get("findings") or [])
+                    if f.get("severity") == "blocks"]
+        out.append({"name": runner.get("name", ""), "blocking": blocking})
+    return out
+
+
 @router.get("/capabilities")
 def qa_capabilities(user: dict = Depends(require_permission("qa_workspace"))):
     """Whether a run can execute AT ALL, and why not when it cannot.
@@ -230,10 +284,20 @@ def qa_capabilities(user: dict = Depends(require_permission("qa_workspace"))):
     local = podman and browser
     runners = _online_runners()
 
+    commands: list[str] = []
     if local:
         reason = ""
     elif runners:
         reason = ""
+        # A runner is connected but cannot actually run anything. Say so — and do NOT
+        # set canRun false: disabling the button recreates the deadlock this endpoint's
+        # docstring exists to describe (nothing queued, so nothing ever claimed).
+        broken = [r for r in _runner_health() if r.get("blocking")]
+        if broken:
+            first = broken[0]
+            reason = (f"{first['name']} is connected but not ready: "
+                      f"{first['blocking'][0]['title']}.")
+            commands = [c for c in first["blocking"][0].get("remedy") or []]
     else:
         why = "; ".join(x for x in [
             "" if podman else "podman is not available here",
@@ -242,6 +306,9 @@ def qa_capabilities(user: dict = Depends(require_permission("qa_workspace"))):
         reason = (f"{why} — and no self-hosted runner is connected. Start one on a "
                   f"machine that has podman and Chromium:\n"
                   f"  python -m src.qatest.agent --api <this-host> --key gw-…")
+        commands = ["python -m src.qatest.agent --api <this-host> --key gw-…",
+                    "python -m src.qatest.agent --doctor",
+                    "python -m src.qatest.agent --setup"]
 
     return {
         "canRun": bool(local or runners),
@@ -250,6 +317,10 @@ def qa_capabilities(user: dict = Depends(require_permission("qa_workspace"))):
         "local": local,
         "runners": runners,
         "reason": reason,
+        # Structured, because the panel used to SCRAPE `reason` for the first line
+        # starting with `python -m` — a heuristic that breaks the moment the prose
+        # changes, which it just did.
+        "commands": commands,
         "clouds": [{"name": c.name, "port": c.port, "image": c.image} for c in CLOUDS],
     }
 
@@ -260,9 +331,17 @@ async def run_local(req: LocalRunRequest,
     """Plan from the graph, start only the emulators the project needs, run, store."""
     from src.qatest.service import execute
 
+    def on_event(event: dict) -> None:
+        # This path had no consumer at all, so a synchronous local run produced no
+        # trace anywhere while it worked. The WebSocket path streams; this one at least
+        # logs.
+        log.info("qa run %s: %-9s %s", req.run_id or "-", event.get("type", ""),
+                 str(event.get("message") or "")[:160])
+
     report = await asyncio.to_thread(
-        execute, req.project_id, req.app_url, req.run_id,
-        user["username"], req.exploratory)
+        lambda: execute(req.project_id, req.app_url, req.run_id,
+                        user["username"], req.exploratory,
+                        on_event=on_event, kinds=req.kinds))
     return report
 
 
@@ -281,6 +360,7 @@ class EnqueueRequest(BaseModel):
     project_id: str
     app_url: str = ""
     exploratory: bool = False
+    kinds: list[str] = Field(default_factory=list)
 
 
 class HeartbeatRequest(BaseModel):
@@ -290,7 +370,21 @@ class HeartbeatRequest(BaseModel):
     totalPassed: int = 0
     totalFailed: int = 0
     totalSkipped: int = 0
+    totalUnemulated: int = 0
     totalCases: int = 0
+    stepIndex: int = 0
+    #: What the run is doing right now, in words — "aws emulator ready on :4566"
+    #: beats the bare phase name.
+    phaseDetail: str = ""
+    #: The Floci containers serving this run, as the runner sees them. THIS is what
+    #: makes the emulator panel live rather than only appearing in the stored report
+    #: after the run is over — pydantic drops any field not declared here, so an
+    #: omission is silent and total.
+    emulators: list[dict] = Field(default_factory=list)
+    #: What has happened since the last heartbeat — one entry per event, in order.
+    #: `phaseDetail` carries only the CURRENT line, so without this a remote run has
+    #: no history at all and the reader sees a single sentence that keeps changing.
+    events: list[dict] = Field(default_factory=list)
 
 
 class FinishRequest(BaseModel):
@@ -325,8 +419,228 @@ def enqueue_run(body: EnqueueRequest,
 
     row = queue.enqueue(body.project_id, body.app_url, user.get("username", ""),
                         body.exploratory)
+    if body.kinds:
+        # Recorded on the row so the claim can filter, and so a reader of a finished
+        # run can tell a deliberately partial run from a project with three endpoints.
+        update_item("test-results",
+                    {"testRunId": row["testRunId"], "projectId": row["projectId"]},
+                    {"kinds": list(body.kinds)})
     return {"runId": row["testRunId"], "projectId": row["projectId"],
-            "status": row["status"]}
+            "status": row["status"], "kinds": list(body.kinds)}
+
+
+@router.get("/projects/{project_id}/plan")
+def get_plan_preview(project_id: str, refresh: bool = Query(False),
+                     _: dict = Depends(require_permission("qa_workspace"))):
+    """What a run WOULD do, so the launcher can offer a choice before starting one.
+
+    Reports `graphReady: false` with a reason rather than an empty plan: "0 cases" and
+    "this project was never analysed" look identical otherwise, and only one of them is
+    something the user can act on.
+    """
+    from src.qatest import plan
+
+    return plan.preview(project_id, refresh=refresh)
+
+
+@router.get("/projects/{project_id}/coverage")
+def get_project_coverage(project_id: str,
+                         _: dict = Depends(require_permission("qa_workspace"))):
+    """Coverage from this project's most recent run with evidence."""
+    from src.qatest import evidence
+
+    # list_runs returns run IDS, newest first — not row dicts, and it takes no limit.
+    # Capped here instead: the first run with a readable report wins, and walking every
+    # run a project ever had to find it would be a read per run.
+    for run_id in (evidence.list_runs(project_id) or [])[:10]:
+        report = evidence.read_report(project_id, run_id)
+        if not report:
+            continue
+        coverage = _coverage_for(project_id, report)
+        if coverage:
+            return {"projectId": project_id, "runId": report.get("runId", ""),
+                    "ranAt": report.get("startedAt", ""), "coverage": coverage}
+    return {"projectId": project_id, "runId": "", "ranAt": "", "coverage": None}
+
+
+def _coverage_for(project_id: str, report: dict) -> dict | None:
+    """A report's coverage block, computed on read when it predates the feature.
+
+    Stored on new reports at finish; recomputed here for older ones so the Coverage tab
+    is not blank for every run that already exists.
+    """
+    if report.get("coverage"):
+        return report["coverage"]
+    try:
+        from src.qatest import coverage as cov
+        from src.qatest import evidence, plan
+        from src.qatest.types import Report, Step
+
+        run_id = report.get("runId", "")
+        rebuilt = Report.from_dict(report)
+        if not rebuilt.cases:
+            return None
+        steps = [Step(index=int(s.get("index") or 0), action=s.get("action", ""),
+                      target=s.get("target", ""), status=s.get("status", "skipped"),
+                      case_id=s.get("caseId", ""))
+                 for s in (evidence.read_steps(project_id, run_id) or [])]
+        totals = plan.graph_totals(plan.fetch_facts(project_id))
+        return cov.summarise(rebuilt, steps, totals)
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("qa: could not compute coverage for %s: %s", report.get("runId"), exc)
+        return None
+
+
+@router.get("/runs/{run_id}/progress")
+def get_run_progress(run_id: str, projectId: str = Query(...),
+                     _: dict = Depends(require_permission("qa_workspace"))):
+    """One run's live counters. A GetItem, deliberately.
+
+    This is what a 2-second poll hits. `list_for_project` scans the table, and a polled
+    endpoint backed by a scan is how a table gets hot.
+    """
+    from src.qatest import queue
+
+    row = queue.progress(run_id, projectId)
+    if row is None:
+        raise HTTPException(404, "no such run")
+    return row
+
+
+# ── The runner's own machine ──────────────────────────────────────────────────
+#
+# The API runs on Fargate and can never see a developer's podman, so everything these
+# endpoints report is second-hand — and says how old it is.
+
+@router.post("/runner/state")
+def post_runner_state(body: dict = Body(...), request: Request = None):  # noqa: B008
+    """A runner reporting what it is running, and collecting any pending command.
+
+    A separate endpoint rather than a richer `/runner/next` response ON PURPOSE: that
+    call answers 204 when idle and deployed agents treat any 200 as a job. A 200
+    without a `runId` would raise KeyError inside their poll loop and kill every runner
+    at once.
+    """
+    from src.qatest import queue
+
+    runner = _runner_identity(request)
+
+    # Results first: the runner may be handing back the output of the command it was
+    # given last time.
+    for result in (body.get("commandResults") or [])[:4]:
+        _store_command_result(runner, result)
+
+    queue.record_runner_state(runner, body)
+    command = queue.take_command(runner)
+    return {"ok": True,
+            "pollSeconds": 15,
+            "commands": [command] if command else []}
+
+
+def _store_command_result(runner: str, result: dict) -> None:
+    """Park a command's output in S3 and note where it went.
+
+    S3 rather than DynamoDB: the runner row is rewritten every 15 seconds and a log
+    body would blow past the 400 KB item limit. The API does the write because an IDLE
+    runner holds no AWS credentials at all — they are minted per run, scoped to that
+    run's prefix.
+    """
+    from src.qatest import queue
+    from src.storage.s3_client import put_object
+
+    command_id = str(result.get("id") or "")
+    if not command_id:
+        return
+    if not result.get("ok"):
+        queue.record_command_result(runner, command_id,
+                                    error=str(result.get("error") or "")[:400])
+        return
+    body = str(result.get("output") or "")[-_LOG_MAX_BYTES:]
+    key = f"_runners/{_slug(runner)}/logs/{command_id}.log"
+    try:
+        put_object(_ARTIFACT_BUCKET, key, body.encode("utf-8"), "text/plain")
+        queue.record_command_result(runner, command_id, key=key)
+    except Exception as exc:                                  # noqa: BLE001
+        queue.record_command_result(runner, command_id, error=str(exc)[:400])
+
+
+@router.get("/runners")
+def list_runners(_: dict = Depends(require_permission("qa_workspace"))):
+    """Every known runner, with the Floci containers it last reported.
+
+    `stale` is the field that matters: a sleeping laptop must not leave a panel
+    claiming four emulators are running.
+    """
+    from src.qatest import emulators, queue
+
+    return {"runners": queue.list_runner_state(),
+            "staleAfterSeconds": queue.RUNNER_STALE_S,
+            "clouds": [{"name": c.name, "port": c.port, "image": c.image}
+                       for c in emulators.CLOUDS]}
+
+
+class LogsRequest(BaseModel):
+    runner: str
+    container: str
+    tail: int = 200
+
+
+@router.post("/runners/logs")
+def request_container_logs(body: LogsRequest,
+                           _: dict = Depends(require_permission("qa_workspace"))):
+    """Ask a runner for a container's output. Answered on its next poll.
+
+    Not a stream, and the UI must not call it one — the runner has no inbound port by
+    design, so this is a round trip with one poll interval of latency.
+    """
+    from src.qatest import queue
+
+    if not body.container.startswith(queue.MANAGED_PREFIX):
+        # Enforced here as well as on the runner. The failure mode — reading arbitrary
+        # container output off someone's laptop — is severe enough to check twice.
+        raise HTTPException(400, "logs are only available for containers Aura started")
+    tail = max(1, min(int(body.tail or 200), 500))
+    return queue.request_command(body.runner, "logs", body.container, tail)
+
+
+@router.get("/runners/logs/{command_id}")
+def get_container_logs(command_id: str, runner: str = Query(...),
+                       _: dict = Depends(require_permission("qa_workspace"))):
+    """The output of a log request, once the runner has answered."""
+    from src.qatest import queue
+    from src.storage.s3_client import get_object
+
+    record = queue.command_result(runner, command_id)
+    if not record:
+        raise HTTPException(404, "no such log request")
+    if record.get("error"):
+        return {"status": "failed", "error": record["error"],
+                "container": record.get("container", "")}
+    if not record.get("resultKey"):
+        return {"status": "pending", "container": record.get("container", ""),
+                "requestedAt": record.get("requestedAt", "")}
+    try:
+        raw = get_object(_ARTIFACT_BUCKET, record["resultKey"]) or b""
+    except Exception as exc:                                  # noqa: BLE001
+        raise HTTPException(502, f"could not read the stored log: {exc}")
+    text = raw.decode("utf-8", errors="replace")
+    return {"status": "ready", "container": record.get("container", ""),
+            "fetchedAt": record.get("resultAt", ""),
+            "truncated": len(raw) >= _LOG_MAX_BYTES,
+            "lines": text.splitlines()}
+
+
+@router.get("/results/{project_id}/{run_id}/console")
+def get_run_console(project_id: str, run_id: str,
+                    _: dict = Depends(require_permission("qa_workspace"))):
+    """Browser console errors and failed requests captured during a run."""
+    from src.storage.s3_client import get_object
+
+    try:
+        raw = get_object(_ARTIFACT_BUCKET, f"{project_id}/{run_id}/console.log") or b""
+    except Exception:                                         # noqa: BLE001
+        raw = b""
+    return {"lines": raw.decode("utf-8", errors="replace").splitlines()}
 
 
 @router.get("/runner/next")
@@ -339,7 +653,8 @@ def runner_next(request: Request):
     """
     from fastapi.responses import Response
 
-    from src.qatest import credentials, emulators, plan, queue, workspace
+    from src.qatest import (appserver, credentials, emulators, plan, queue,
+                            workspace)
 
     runner = _runner_identity(request)
     # Before claiming, and unconditionally: a poll that finds nothing is still proof
@@ -356,8 +671,23 @@ def runner_next(request: Request):
 
     # Planned HERE, against Neo4j, and shipped with the claim.
     facts = plan.fetch_facts(project_id)
-    cases = plan.build_plan(project_id, facts)
+    # Planned WITH the working copy, so file checks are included. The API can read it
+    # (the workspace volume is mounted here); the runner receives them in the claim
+    # like any other case and needs no new protocol.
+    plan_root, _checked = appserver.locate(project_id)
+    cases = plan.build_plan(project_id, facts, root=plan_root)
     clouds = [c.name for c in emulators.clouds_for(facts.get("dependencies") or [])]
+
+    # Filtered HERE as well as inside service.execute. This is the pass that matters
+    # for compatibility: an agent that has never heard of `kinds` simply receives a
+    # shorter list and cannot tell the difference. filter_by_kind is idempotent, so
+    # applying it twice is harmless.
+    kinds = list(row.get("kinds") or [])
+    cases = plan.filter_by_kind(cases, kinds)
+
+    # So a queued run stops reporting an unknown plan size the moment it is claimed.
+    queue.heartbeat(run_id, project_id, "claimed", runner,
+                    {"totalCases": len(cases)})
 
     return {
         "runId": run_id,
@@ -365,8 +695,10 @@ def runner_next(request: Request):
         "appUrl": row.get("appUrl", ""),
         "exploratory": bool(row.get("exploratory")),
         "ranBy": row.get("userId", ""),
-        "cases": [c.__dict__ for c in cases],
+        "kinds": kinds,
+        "cases": _cases_for_protocol(cases, _runner_protocol(request)),
         "clouds": clouds,
+        "planTotal": len(plan.build_plan(project_id, facts)),
         "credentials": credentials.mint(project_id, run_id),
         # Aura's own copy of the code, so the runner does not need the project cloned
         # on it. Only packaged when there is no explicit app_url — pointing a run at a
@@ -414,6 +746,18 @@ def runner_finish(run_id: str, body: FinishRequest, request: Request,
     _runner_identity(request)
     report = body.report or {}
     queue.finish(run_id, projectId, report)
+
+    # Coverage is scored again HERE because only the API can reach Neo4j: the runner
+    # computes it from the plan alone, which understates the denominator for a filtered
+    # run. Re-stored so the Results tab reads one authoritative number.
+    try:
+        graded = _coverage_for(projectId, report)
+        if graded and graded != report.get("coverage"):
+            report["coverage"] = graded
+            from src.qatest.types import Report as _R
+            evidence.write_report(_R.from_dict(report))
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("qa: coverage rescore for %s failed: %s", run_id, exc)
 
     try:
         steps = evidence.read_steps(projectId, run_id)
@@ -491,7 +835,18 @@ def list_active_runs(project_id: str,
         "totalPassed": int(r.get("totalPassed") or 0),
         "totalFailed": int(r.get("totalFailed") or 0),
         "totalSkipped": int(r.get("totalSkipped") or 0),
+        "totalUnemulated": int(r.get("totalUnemulated") or 0),
         "totalCases": int(r.get("totalCases") or 0),
+        "phaseDetail": r.get("phaseDetail", ""),
+        "kinds": list(r.get("kinds") or []),
+        # The Floci containers serving this run, as the runner last reported them.
+        # `emulatorsStale` means the runner went quiet — the reaper stamps it — so the
+        # panel can grey them out instead of showing phantoms.
+        "emulators": list(r.get("emulators") or []),
+        "emulatorsStale": bool(r.get("emulatorsStale", False)),
+        # The run's own console, so the UI can show what is happening rather than a
+        # single phase word that keeps changing.
+        "activity": list(r.get("activity") or []),
     } for r in queue.list_for_project(project_id) if r.get("status") in queue.LIVE]}
 
 
@@ -509,14 +864,17 @@ def get_result(project_id: str, run_id: str,
     urls = evidence.screenshot_urls(project_id, run_id)
     for step in steps:
         step["screenshotUrl"] = urls.get(step.get("screenshotKey") or "", "")
-    return {"report": report, "steps": steps}
+    # Computed on read for runs that predate the coverage field, so the detail view is
+    # not blank for every run that already exists.
+    return {"report": report, "steps": steps,
+            "coverage": _coverage_for(project_id, report)}
 
 
 @router.websocket("/ws/local-run")
 async def ws_local_run(ws: WebSocket):
     """Stream a local run's progress as it happens.
 
-    Client sends: {"token", "project_id", "app_url", "run_id"?, "exploratory"?}
+    Client sends: {"token", "project_id", "app_url", "run_id"?, "kinds"?}
     Server streams: plan | planned | emulator | running | step | evidence | graph | done | error
 
     Events are forwarded from the orchestrator's own callback rather than reconstructed
@@ -565,7 +923,8 @@ async def ws_local_run(ws: WebSocket):
             try:
                 return execute(project_id, app_url, data.get("run_id"),
                                user["username"], bool(data.get("exploratory")),
-                               on_event=on_event)
+                               on_event=on_event,
+                               kinds=list(data.get("kinds") or []))
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, {"type": SENTINEL})
 

@@ -9,7 +9,7 @@ so a stored result could not answer "what actually happened, and where did it fa
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -23,7 +23,22 @@ StepStatus = Literal["passed", "failed", "skipped", "unemulated"]
 # unrepresentable.
 RunStatus = Literal["passed", "failed", "unavailable"]
 
-CaseKind = Literal["api", "ui", "smoke"]
+# What KIND of thing is being tested — not how the harness reaches it.
+#
+#   ui     the application root: does it load, render, and not throw
+#   api    an API node from the graph, whatever its method or path shape
+#   smoke  a Service node
+#   structure  a file, checked without running anything — for projects that do not
+#              serve HTTP at all (BPMN/Groovy, or migrated Airflow DAGs)
+#   stack      a property of the RUNNING target platform — "every converted DAG
+#              imports" — asked of the compose stack the converter shipped
+#
+# These values used to mean browser-openable / not-openable / service, which made
+# `GET /health` a "ui" case and `POST /quote` an "api" one. That is the opposite of
+# what anyone reading a filter labelled "API" expects, so the meaning was corrected
+# when the kinds became user-selectable. Reports written before that carry the old
+# meaning; `Report.selected_kinds` is present only on new ones and is the discriminator.
+CaseKind = Literal["api", "ui", "smoke", "structure", "stack"]
 
 
 def _now() -> str:
@@ -43,9 +58,28 @@ class Case:
     method: str = ""
     path: str = ""
     source_file: str = ""
+    # Non-empty means "planned, but cannot be executed" — and says why, in the words
+    # the step's error will carry. Set by plan.why_unrunnable so the preview, the
+    # runner and the coverage report cannot disagree about which cases can run.
+    skip_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_wire(cls, data: "Case | dict[str, Any]") -> "Case":
+        """Rebuild a Case from a dict, ignoring fields this build does not know.
+
+        A plain `Case(**d)` raises TypeError on an unknown key. That matters because
+        cases cross a network boundary: the API plans server-side and ships them to a
+        self-hosted runner, so a server that gains a field kills every agent already
+        running — uncaught, inside its poll loop. Filtering here makes that class of
+        break impossible in the new-server/old-agent direction.
+        """
+        if isinstance(data, cls):
+            return data
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 @dataclass
@@ -110,6 +144,12 @@ class Report:
     emulators: list[EmulatorRecord] = field(default_factory=list)
     # Graph nodes this run touched, so OntoVerse can colour them.
     covered: list[dict[str, str]] = field(default_factory=list)
+    # What the person asked for, so a reader can tell a partial run from a full one.
+    # A run with selected_kinds == ["api"] that reports 3 cases is not a project with
+    # 3 endpoints.
+    selected_kinds: list[str] = field(default_factory=list)
+    plan_total: int = 0              # cases in the FULL plan, before any filtering
+    coverage: dict[str, Any] = field(default_factory=dict)
     exploratory: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -125,6 +165,9 @@ class Report:
             "cases": [c.as_dict() for c in self.cases],
             "emulators": [e.as_dict() for e in self.emulators],
             "covered": self.covered,
+            "selectedKinds": self.selected_kinds,
+            "planTotal": self.plan_total,
+            "coverage": self.coverage,
             "exploratory": self.exploratory,
         }
 
@@ -142,8 +185,7 @@ class Report:
         Tolerant of missing keys on purpose: an older runner should degrade to a
         partial graph write, not crash the endpoint.
         """
-        cases = [c if isinstance(c, Case) else Case(**c)
-                 for c in (data.get("cases") or [])]
+        cases = [Case.from_wire(c) for c in (data.get("cases") or [])]
         emulators = [e if isinstance(e, EmulatorRecord) else EmulatorRecord(**e)
                      for e in (data.get("emulators") or [])]
         return cls(
@@ -163,5 +205,8 @@ class Report:
             cases=cases,
             emulators=emulators,
             covered=data.get("covered") or [],
+            selected_kinds=list(data.get("selectedKinds") or []),
+            plan_total=int(data.get("planTotal") or 0),
+            coverage=data.get("coverage") or {},
             exploratory=bool(data.get("exploratory")),
         )

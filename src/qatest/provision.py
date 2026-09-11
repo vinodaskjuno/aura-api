@@ -130,10 +130,16 @@ def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
 
 
 def _run(command: list[str], cwd: Path, say) -> bool:
+    from src.qatest import toolpath
+
     say(f"$ {' '.join(command[:4])}… in {cwd.name}/")
     try:
+        # Augmented, so the "not on PATH" message below is only ever printed when the
+        # tool is genuinely absent rather than merely installed somewhere this
+        # process cannot see.
         result = subprocess.run(command, cwd=str(cwd), capture_output=True,
-                                text=True, timeout=INSTALL_TIMEOUT_S)
+                                text=True, timeout=INSTALL_TIMEOUT_S,
+                                env=toolpath.env())
     except subprocess.TimeoutExpired:
         say(f"timed out after {INSTALL_TIMEOUT_S}s: {' '.join(command[:3])}")
         return False

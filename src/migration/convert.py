@@ -183,6 +183,7 @@ def package(session: dict, results: list[dict]) -> tuple[str, int]:
     account of what was skipped, what failed and what still needs a decision is not
     reviewable — and reviewable is what was promised.
     """
+    from src.migration import runtime
     from src.storage import s3_client
 
     buf = io.BytesIO()
@@ -201,6 +202,17 @@ def package(session: dict, results: list[dict]) -> tuple[str, int]:
                 zf.writestr(path, str(f["content"]))
                 written += 1
         zf.writestr("MIGRATION.md", _manifest(session, results))
+
+        # A runnable stack, where the target has one. Without it the download is
+        # reviewable but not testable — nothing in it starts, so the last step of the
+        # migration story ("test it") has nothing to act on. Files already generated
+        # win: a converter that emitted its own compose file meant to.
+        stack = runtime.for_target(session.get("target", ""))
+        if stack:
+            for name, body in stack.files.items():
+                if name not in seen:
+                    zf.writestr(name, body)
+                    written += 1
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     key = (f"migrations/{session['projectId']}/"

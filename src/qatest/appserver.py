@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import socket
+import re
 import subprocess
 import sys
 import time
@@ -46,6 +47,16 @@ class AppSpec:
     port: int
     env: dict[str, str]
     blocked: str = ""         # why it cannot start, when it cannot
+    #: A compose stack rather than a process. Started with `compose up -d` and torn
+    #: down with `compose down -v`, because killing a process group leaves the
+    #: containers running — and a leaked container holds the port for the next run.
+    compose: bool = False
+    #: Compose stacks are slow. Airflow initialises a database on first boot, which
+    #: is minutes, and the default 60s would fail every one of them.
+    ready_timeout: int = READY_TIMEOUT_S
+    #: A path that answers 2xx once the stack is genuinely ready. A compose container
+    #: binds its port long before the application inside it can serve.
+    health_path: str = "/"
 
     @property
     def url(self) -> str:
@@ -134,11 +145,100 @@ def _interpreter(directory: Path) -> str:
     return str(candidate) if candidate.is_file() else sys.executable
 
 
+#: Compose filenames, in the order docker and podman look for them.
+_COMPOSE_FILES = ("docker-compose.yml", "docker-compose.yaml",
+                  "compose.yml", "compose.yaml")
+
+
+def compose_command() -> list[str] | None:
+    """`podman compose`, `docker compose`, or `docker-compose` — whichever is here.
+
+    podman first: the emulators already run under it, so a machine set up for
+    QualityMind has it, and preferring it avoids requiring Docker Desktop as well.
+    """
+    from src.qatest import toolpath
+
+    for exe, sub in (("podman", "compose"), ("docker", "compose")):
+        binary = toolpath.which(exe)
+        if not binary:
+            continue
+        try:
+            probe = subprocess.run([binary, sub, "version"], capture_output=True,
+                                   text=True, timeout=20, env=toolpath.env())
+        except Exception:                                     # noqa: BLE001
+            # A dangling shim — which() succeeds, exec fails. Unguarded, this raised
+            # straight out of detect_compose and killed application detection for the
+            # whole repository, for a probe whose only job is to answer yes or no.
+            continue
+        if probe.returncode == 0:
+            return [binary, sub]
+    standalone = toolpath.which("docker-compose")
+    return [standalone] if standalone else None
+
+
+def detect_compose(root: Path) -> AppSpec | None:
+    """A compose stack in this repository, if there is one.
+
+    This is what makes a migrated project testable: the converter ships a
+    `docker-compose.yml` beside the generated DAGs, and a run starts it rather than
+    reporting that nothing here serves HTTP.
+    """
+    from src.migration import runtime as mig_runtime
+
+    root = Path(root)
+    for directory in [root] + [d for d in sorted(root.iterdir())
+                               if d.is_dir() and d.name not in _SKIP] \
+            if root.exists() else []:
+        for name in _COMPOSE_FILES:
+            compose_file = directory / name
+            if not compose_file.is_file():
+                continue
+
+            body = compose_file.read_text(errors="replace")
+            stack = _stack_for(body, mig_runtime)
+            command = compose_command()
+            blocked = "" if command else (
+                "neither `podman compose` nor `docker compose` is available on this "
+                "machine, so the stack cannot be started")
+            return AppSpec(
+                kind="api", name=directory.name or "stack", directory=directory,
+                command=(command or ["docker", "compose"]) + ["up", "-d"],
+                port=stack.port if stack else _first_published_port(body) or 8080,
+                env={}, blocked=blocked, compose=True,
+                ready_timeout=stack.start_timeout_s if stack else 180,
+                health_path=stack.health_path if stack else "/")
+    return None
+
+
+def _stack_for(compose_body: str, mig_runtime):
+    """Match a compose file to a known runtime, for its port and readiness path.
+
+    Falls back to reading the published port out of the file, so a hand-written
+    compose stack still works — it simply has no health path to check beyond `/`.
+    """
+    for target, stack in mig_runtime.RUNTIMES.items():
+        if target in compose_body.lower():
+            return stack
+    return None
+
+
+def _first_published_port(compose_body: str) -> int | None:
+    match = re.search(r'^\s*-\s*"?(\d{2,5}):\d{2,5}"?\s*$', compose_body, re.M)
+    return int(match.group(1)) if match else None
+
+
 def detect(root: Path) -> list[AppSpec]:
     """Find the applications in a repository. Deepest-first is not needed: a repo
     holds at most one backend and one frontend in the shapes handled here."""
     found: list[AppSpec] = []
     root = Path(root)
+
+    # A compose stack wins outright. When a project ships one it IS the application —
+    # starting a loose uvicorn beside it would test a different thing from the one the
+    # author packaged, on a port the stack may already hold.
+    stack = detect_compose(root)
+    if stack:
+        return [stack]
 
     candidates = [root] + [d for d in sorted(root.iterdir())
                            if d.is_dir() and d.name not in _SKIP] if root.exists() else []
@@ -208,6 +308,34 @@ def detect(root: Path) -> list[AppSpec]:
     return found
 
 
+def _wait_healthy(port: int, path: str = "/", timeout: int = 300) -> bool:
+    """Wait for a 2xx on `path`.
+
+    Stricter than `_wait_ready` on purpose. A compose container publishes its port as
+    soon as it starts, so the socket answers minutes before the application does —
+    Airflow returns 503 on /health for the whole of its first database migration. A
+    socket check would call that ready and every case would then fail against a
+    server that was still booting.
+    """
+    import urllib.error
+    import urllib.request
+
+    deadline = time.monotonic() + timeout
+    url = f"http://127.0.0.1:{port}{path}"
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                if 200 <= resp.status < 300:
+                    return True
+        except urllib.error.HTTPError as exc:
+            if 200 <= exc.code < 300:
+                return True
+        except Exception:                                     # noqa: BLE001
+            pass
+        time.sleep(3)
+    return False
+
+
 def _wait_ready(port: int, timeout: int = READY_TIMEOUT_S,
                 proc: subprocess.Popen | None = None) -> bool:
     """Wait for the app to answer. Any HTTP status counts — a 404 at `/` still means
@@ -245,6 +373,7 @@ class RunningApps:
         self.specs = specs
         self.extra_env = extra_env or {}
         self.procs: dict[str, subprocess.Popen] = {}
+        self._composed: list[AppSpec] = []
         self.started: list[AppSpec] = []
         self.failures: list[tuple[AppSpec, str]] = []
         self.logs: dict[str, Path] = {}
@@ -269,9 +398,15 @@ class RunningApps:
         self.stop()
 
     def _start(self, spec: AppSpec) -> None:
+        if spec.compose:
+            self._start_compose(spec)
+            return
         import tempfile
 
-        env = {**os.environ, **self.extra_env, **spec.env}
+        from src.qatest import toolpath
+
+        # toolpath first, so `npm run dev` finds node wherever it was installed.
+        env = {**toolpath.env(), **self.extra_env, **spec.env}
         log_path = Path(tempfile.gettempdir()) / f"qatest-{spec.kind}-{spec.port}.log"
         handle = log_path.open("w")
         self._handles.append(handle)
@@ -298,6 +433,49 @@ class RunningApps:
         self.started.append(spec)
         log.info("qatest: started %s app on %s", spec.kind, spec.url)
 
+    def _start_compose(self, spec: AppSpec) -> None:
+        """`compose up -d`, then wait for the application inside to answer.
+
+        Detached on purpose: compose forks the containers and returns, so there is no
+        process to hold. Teardown is `compose down -v` — killing a process group would
+        leave them running, and a leaked container holds the port for the next run.
+        """
+        from src.qatest import toolpath
+
+        result = subprocess.run(spec.command, cwd=str(spec.directory),
+                                capture_output=True, text=True, timeout=600,
+                                env=toolpath.env())
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout or "").strip()[-400:]
+            self.failures.append((spec, f"`{' '.join(spec.command)}` failed: {tail}"))
+            return
+
+        self._composed.append(spec)
+        # The port binds long before the application inside is ready, so probe the
+        # health path rather than the socket. Airflow answers 503 on /health while it
+        # is still migrating its database.
+        if not _wait_healthy(spec.port, spec.health_path, spec.ready_timeout):
+            self.failures.append(
+                (spec, f"the stack started but did not become healthy on "
+                       f":{spec.port}{spec.health_path} within {spec.ready_timeout}s. "
+                       f"`{' '.join(spec.command[:2])} logs` on the runner will say why."))
+            return
+
+        self.started.append(spec)
+        log.info("qatest: compose stack ready on %s", spec.url)
+
+    def _stop_compose(self) -> None:
+        for spec in self._composed:
+            from src.qatest import toolpath
+
+            down = spec.command[:-2] + ["down", "-v"]
+            with contextlib.suppress(Exception):
+                subprocess.run(down, cwd=str(spec.directory),
+                               capture_output=True, timeout=180,
+                               env=toolpath.env())
+            log.info("qatest: compose stack stopped (%s)", spec.name)
+        self._composed.clear()
+
     @staticmethod
     def _kill(proc: subprocess.Popen) -> None:
         import signal
@@ -310,6 +488,8 @@ class RunningApps:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
 
     def stop(self) -> None:
+        # Containers first: they hold the published ports, and the next run needs them.
+        self._stop_compose()
         for proc in self.procs.values():
             self._kill(proc)
         self.procs.clear()

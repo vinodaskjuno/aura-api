@@ -42,14 +42,34 @@ def test_every_plan_starts_with_the_application_root():
         assert cases[0].kind == "ui" and cases[0].path == "/"
 
 
-def test_only_a_parameterless_get_is_treated_as_browser_reachable():
-    """A parameterised path has no value to substitute, and inventing one produces a
-    red test that says nothing about the application."""
+def test_kind_says_what_is_being_tested_not_how_it_is_reached():
+    """Every API node is an `api` case, whatever its method or path shape.
+
+    `kind` used to mean browser-openable / not-openable, so `GET /health` was "ui" and
+    `POST /quote` was "api". Once the kinds became a user-facing filter that inverted
+    the choice exactly: ticking "API" selected only the cases that always get skipped,
+    and ticking "UI" selected everything that actually runs.
+    """
     cases = {c.name: c.kind for c in
-             plan.build_plan("p", {"apis": DEMO_APIS, "services": [], "dependencies": []})}
-    assert cases["GET /health"] == "ui"
+             plan.build_plan("p", {"apis": DEMO_APIS, "services": DEMO_SERVICES,
+                                   "dependencies": []})}
+    assert cases["GET /health"] == "api"
     assert cases["GET /products/{sku}"] == "api"
     assert cases["POST /quote"] == "api"
+    assert all(v == "smoke" for k, v in cases.items() if k.startswith("service "))
+
+
+def test_a_parameterless_get_is_the_only_thing_that_actually_runs():
+    """The distinction the old `kind` was carrying now lives in skip_reason, where it
+    can also say WHY — which is what makes a low coverage number actionable."""
+    reasons = {c.name: c.skip_reason for c in
+               plan.build_plan("p", {"apis": DEMO_APIS, "services": DEMO_SERVICES,
+                                     "dependencies": []})}
+    assert reasons["GET /health"] == ""
+    assert "path parameter" in reasons["GET /products/{sku}"]
+    assert "request body" in reasons["POST /quote"]
+    assert all("no HTTP address" in v for k, v in reasons.items()
+               if k.startswith("service "))
 
 
 def test_a_case_with_no_verified_node_is_not_linked_in_the_graph():
@@ -143,12 +163,48 @@ def test_emulator_env_points_the_sdk_at_the_emulator():
 
 
 def test_missing_podman_is_reported_per_emulator_not_raised(monkeypatch):
-    monkeypatch.setattr(emulators, "podman_available", lambda: False)
+    monkeypatch.setattr(emulators, "podman_ready",
+                        lambda: (False, "podman is not installed"))
     aws = next(c for c in emulators.CLOUDS if c.name == "aws")
     with emulators.EmulatorSet([aws], "t") as es:
         assert es.records[0].started is False
         assert "podman" in es.records[0].error
         assert es.env == {}          # nothing started, so nothing to point at
+
+
+def test_a_stopped_podman_machine_says_so_rather_than_failing_obscurely(monkeypatch):
+    """Installed is not usable. On macOS and Windows podman is a client for a VM, so
+    `which` succeeds while every command fails — and the old check was `which`. The
+    run was already claimed and marked running by the time each emulator died with a
+    raw exec error."""
+    monkeypatch.setattr(emulators, "podman_ready", lambda: (
+        False, "podman is installed but not running — on macOS and Windows it needs "
+               "its virtual machine started: `podman machine start`"))
+    aws = next(c for c in emulators.CLOUDS if c.name == "aws")
+    with emulators.EmulatorSet([aws], "t") as es:
+        assert "podman machine start" in es.records[0].error
+
+
+def test_podman_ready_distinguishes_absent_from_not_running(monkeypatch):
+    monkeypatch.setattr(emulators, "podman_path", lambda: None)
+    ok, why = emulators.podman_ready()
+    assert not ok and "not installed" in why
+
+    monkeypatch.setattr(emulators, "podman_path", lambda: "/opt/podman/bin/podman")
+    monkeypatch.setattr(emulators, "_run",
+                        lambda *a, **k: (125, "Cannot connect to Podman. "
+                                              "please check your connection"))
+    ok, why = emulators.podman_ready()
+    assert not ok and "podman machine start" in why
+
+
+def test_podman_ready_reports_an_unexpected_failure_verbatim(monkeypatch):
+    """An error nobody anticipated must reach the reader, not be renamed into the
+    nearest known cause."""
+    monkeypatch.setattr(emulators, "podman_path", lambda: "/usr/bin/podman")
+    monkeypatch.setattr(emulators, "_run", lambda *a, **k: (1, "disk quota exceeded"))
+    ok, why = emulators.podman_ready()
+    assert not ok and "disk quota exceeded" in why
 
 
 # ── Evidence ─────────────────────────────────────────────────────────────────
@@ -506,3 +562,195 @@ def test_a_local_miss_is_not_blamed_on_a_deployed_container(monkeypatch):
     from src.qatest.service import _no_working_copy
     msg = _no_working_copy("p", ["/home/me/ws/p", "/home/me/other/p (recorded on the project)"])
     assert "deployed container" not in msg
+
+
+# ── Every case reports, including the ones that cannot run ───────────────────
+#
+# The headline bug: on_step was called from two of the five branches, so a skipped
+# case advanced the run without advancing the progress bar. A project with several
+# POST routes showed a bar that stalled and never reached 100%.
+
+def _mixed_plan():
+    return plan.build_plan("p", {
+        "apis": [{"eid": "a1", "method": "GET", "path": "/health"},
+                 {"eid": "a2", "method": "POST", "path": "/quote"},
+                 {"eid": "a3", "method": "GET", "path": "/u/{id}"}],
+        "services": [{"eid": "s1", "name": "Pay"}],
+        "dependencies": []})
+
+
+def test_every_case_reports_exactly_one_step(monkeypatch):
+    """Asserted on the COUNT, not the statuses, so a future branch that forgets to
+    report fails here rather than quietly stalling a progress bar."""
+    from src.qatest import runner as run_mod
+
+    cases = _mixed_plan()
+    seen = []
+    monkeypatch.setattr(run_mod, "_playwright_available", lambda: (True, ""))
+    monkeypatch.setattr(run_mod.evidence, "write_steps", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod.evidence, "write_console", lambda *a, **k: None)
+    monkeypatch.setattr(run_mod, "sync_playwright", None, raising=False)
+
+    rec = run_mod._Recorder("p", "r", on_step=lambda s, total: seen.append((s, total)),
+                            total=len(cases))
+    for case in cases:
+        reason = case.skip_reason
+        rec.add(case.name, "t", "skipped" if reason else "passed", 0.0,
+                error=reason, case_id=case.case_id)
+
+    assert len(seen) == len(cases)
+    assert [s.index for s, _ in seen] == list(range(1, len(cases) + 1))
+    assert {t for _, t in seen} == {len(cases)}
+
+
+def test_the_recorder_reports_skipped_steps_too():
+    from src.qatest.runner import _Recorder
+
+    seen = []
+    rec = _Recorder("p", "r", on_step=lambda s, _t: seen.append(s.status), total=2)
+    rec.add("a", "t", "skipped", 0.0, error="no address")
+    rec.add("b", "t", "passed", 0.0)
+    assert seen == ["skipped", "passed"]
+
+
+def test_a_broken_progress_consumer_cannot_fail_a_run():
+    from src.qatest.runner import _Recorder
+
+    def explode(_s, _t):
+        raise RuntimeError("the UI went away")
+
+    rec = _Recorder("p", "r", on_step=explode, total=1)
+    rec.add("a", "t", "passed", 0.0)
+    assert len(rec.steps) == 1
+
+
+# ── Kind filtering ───────────────────────────────────────────────────────────
+
+def test_filtering_to_smoke_still_keeps_the_application_root():
+    """root-001 is the only case a frontend can be tested by, and runner._base_for
+    special-cases its id. A run without it tests nothing at all."""
+    cases = _mixed_plan()
+    kept = plan.filter_by_kind(cases, ["smoke"])
+    assert [c.case_id for c in kept][0] == plan.ROOT_CASE_ID
+    assert {c.kind for c in kept} == {"ui", "smoke"}
+
+
+def test_no_kinds_means_every_kind():
+    cases = _mixed_plan()
+    assert plan.filter_by_kind(cases, None) == cases
+    assert plan.filter_by_kind(cases, []) == cases
+
+
+def test_filtering_twice_is_the_same_as_filtering_once():
+    """Load-bearing: the filter runs server-side at claim AND inside service.execute,
+    so that an agent which has never heard of `kinds` still runs the right subset."""
+    cases = _mixed_plan()
+    once = plan.filter_by_kind(cases, ["api"])
+    assert plan.filter_by_kind(once, ["api"]) == once
+
+
+def test_dropping_unrunnable_cases_leaves_only_what_can_execute():
+    kept = plan.filter_by_kind(_mixed_plan(), None, skip_unrunnable=True)
+    assert [c.name for c in kept] == ["application loads", "GET /health"]
+
+
+def test_an_unknown_kind_is_ignored_rather_than_emptying_the_plan():
+    cases = _mixed_plan()
+    assert plan.filter_by_kind(cases, ["nonsense"]) == cases
+
+
+# ── Coverage nodes reflect results, not intentions ───────────────────────────
+
+def test_covered_nodes_without_statuses_still_lists_what_the_plan_touched():
+    cases = _mixed_plan()
+    nodes = plan.covered_nodes(cases)
+    assert {n["externalId"] for n in nodes} == {"a1", "a2", "a3", "s1"}
+    assert all("result" not in n for n in nodes)
+
+
+def test_covered_nodes_records_the_worst_outcome_per_node():
+    cases = _mixed_plan()
+    statuses = {c.case_id: ("passed" if c.name == "GET /health" else "skipped")
+                for c in cases}
+    by_eid = {n["externalId"]: n for n in plan.covered_nodes(cases, statuses)}
+    assert by_eid["a1"]["result"] == "passed"
+    assert by_eid["a2"]["result"] == "skipped"
+
+
+# ── "Unavailable" has to say why ────────────────────────────────────────────
+#
+# A screen reading `Unavailable` above `No application could be started:` — the
+# sentence ending at the colon — is what a user actually saw. The message was built as
+# `(prefix + joined) or fallback`, and the prefix is always truthy, so the fallback
+# never fired in the one case that needed it most: nothing was even attempted.
+
+def test_nothing_detected_explains_what_is_supported():
+    from pathlib import Path
+    from src.qatest.service import _cannot_start
+
+    reason = _cannot_start(Path("/tmp/does-not-exist-workfusion"), [], [])
+    assert not reason.rstrip().endswith(":"), "the reason trails off"
+    assert "uvicorn" in reason and "npm" in reason
+    assert "Application URL" in reason
+
+
+def test_a_failed_start_lists_the_failures():
+    from src.qatest.service import _cannot_start
+
+    class Spec:
+        kind, name, blocked = "api", "app.main", False
+
+    reason = _cannot_start("root", [Spec()], [(Spec(), "port 8000 already in use")])
+    assert "port 8000 already in use" in reason
+
+
+def test_a_blocked_app_says_its_dependencies_are_missing():
+    from src.qatest.service import _cannot_start
+
+    class Spec:
+        kind, name, blocked = "ui", "frontend", True
+
+    reason = _cannot_start("root", [Spec()], [])
+    assert "dependencies are not installed" in reason
+    assert "frontend" in reason
+
+
+def test_no_branch_of_the_reason_trails_off():
+    """Every path must end in a real sentence — that is the whole point."""
+    from src.qatest.service import _cannot_start
+
+    class Spec:
+        kind, name, blocked = "api", "app", False
+
+    for specs, failures in (([], []), ([Spec()], []),
+                            ([Spec()], [(Spec(), "boom")])):
+        reason = _cannot_start("root", specs, failures)
+        # A trailing colon or a bare prefix is the failure mode: the sentence promises
+        # an explanation and does not deliver one.
+        assert reason and not reason.rstrip().endswith(":")
+        assert reason.rstrip() != "No application could be started:"
+        assert reason.strip().endswith((".", "boom"))
+
+
+def test_the_reason_names_the_file_types_it_actually_found(tmp_path):
+    """"Nothing runnable was found" invites a hunt for a bug. Naming what IS there
+    answers the question in the same breath — this is not a web application."""
+    from src.qatest.service import _cannot_start
+
+    (tmp_path / "claims.bpmn").write_text("<x/>")
+    (tmp_path / "action.groovy").write_text("x")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "junk.js").write_text("x")
+
+    reason = _cannot_start(tmp_path, [], [])
+    assert ".bpmn" in reason and ".groovy" in reason
+    assert ".js" not in reason, "dependency directories are not the project"
+    assert "Application URL" in reason
+
+
+def test_an_empty_working_copy_says_so():
+    from src.qatest.service import _cannot_start
+    import tempfile, pathlib
+
+    with tempfile.TemporaryDirectory() as d:
+        assert "empty" in _cannot_start(pathlib.Path(d), [], [])
