@@ -178,28 +178,61 @@ def _targets():
             yield name, backend, ""
 
 
-def preflight() -> list[str]:
+def preflight(project_id: str = "") -> list[str]:
     """Reasons this must not start. Empty means go.
 
     Refusing beats half-deleting. Clearing one engine of a dual-write pair leaves the
     mirror populated, and the data reappears the moment somebody switches the read
     source — which looks exactly like corruption and is very hard to diagnose.
+
+    **Scoped to THIS project's queued writes, not the outbox as a whole.** The risk is
+    precisely that a pending write for this project is replayed afterwards and puts it
+    back; a queued write for some other project cannot do that. Blocking on total depth
+    read plausible and was wrong in practice: nothing drains the outbox automatically —
+    it is a manual admin action — so a single past outage left every project
+    undeletable for ever, with a message telling the user to do something the UI never
+    offered them.
     """
     problems = [f"graph engine {name!r} is {reason}"
                 for name, backend, reason in _targets() if backend is None]
 
-    from src.graph import outbox
-    try:
-        # depth() returns {backend: count}, not a number.
-        pending = outbox.depth()
-    except Exception:                                         # noqa: BLE001
-        pending = {}
-    for name, count in pending.items():
-        if count:
-            # A queued write for this project, replayed after the delete, resurrects it.
-            problems.append(f"{name} has {count} write(s) pending replay — drain the "
-                            f"outbox first or the delete will be undone")
+    if project_id:
+        queued = count_queued_for(project_id)
+        if queued:
+            problems.append(
+                f"{queued} queued graph write(s) mention this project and would put it "
+                f"back after the delete. An admin can replay or clear them from "
+                f"Settings › Graph, then try again.")
     return problems
+
+
+def _outbox_rows(limit: int = 500):
+    """(backend, row) for everything currently queued."""
+    from src.database import dynamo_client as db
+    from src.graph import backends
+
+    for name in backends.configured_names():
+        try:
+            for row in db.query_items("graph-outbox", "backend", name,
+                                      limit=limit) or []:
+                yield name, row
+        except Exception:                                     # noqa: BLE001
+            continue
+
+
+def count_queued_for(project_id: str, limit: int = 500) -> int:
+    """Queued writes that mention this project — the ones that could resurrect it."""
+    import json
+
+    if not project_id:
+        return 0
+    count = 0
+    for _name, row in _outbox_rows(limit):
+        blob = json.dumps({"c": row.get("cypher", ""), "p": row.get("params") or {}},
+                          default=str)
+        if project_id in blob:
+            count += 1
+    return count
 
 
 def inventory(project_id: str) -> dict:

@@ -587,3 +587,66 @@ def test_capabilities_offers_the_doctor_when_nothing_is_connected(fake_dynamo):
     if not caps["runners"] and not caps["local"]:
         assert any("--doctor" in c for c in caps["commands"])
         assert any("--setup" in c for c in caps["commands"])
+
+
+# ── Cancelling a run ────────────────────────────────────────────────────────
+#
+# The reaper handles a run that goes QUIET. A run whose runner is alive and wedged
+# never goes stale, so before this there was no way to stop one at all — and a stuck
+# run blocks deleting its project for ever. Two were found in Dev, running for nine
+# days.
+
+def test_a_running_run_can_be_cancelled(fake_dynamo):
+    row = queue.enqueue("p1", "", "qa")
+    queue.heartbeat(row["testRunId"], "p1", "step", "laptop", {"totalCases": 3})
+
+    r = client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
+    assert r.status_code == 200 and r.json()["status"] == queue.CANCELLED
+
+
+def test_a_cancelled_run_leaves_the_live_set(fake_dynamo):
+    """That is the whole point: the Results tab stops showing a run that will never
+    finish, and a project delete is no longer blocked by it."""
+    row = queue.enqueue("p1", "", "qa")
+    client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
+
+    live = [r for r in queue.list_for_project("p1") if r.get("status") in queue.LIVE]
+    assert live == []
+    assert client.get(f"{BASE}/active/p1").json()["active"] == []
+
+
+def test_a_queued_run_can_be_cancelled_too(fake_dynamo):
+    """It was never claimed, so it is the likeliest thing to be stuck."""
+    row = queue.enqueue("p1", "", "qa")
+    r = client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
+    assert r.status_code == 200
+
+
+def test_cancelling_a_finished_run_is_refused(fake_dynamo):
+    """A run that finished between the click and the write must keep its real result
+    rather than have it overwritten with "cancelled"."""
+    row = queue.enqueue("p1", "", "qa")
+    queue.finish(row["testRunId"], "p1", {"status": "passed", "totalPassed": 3})
+
+    r = client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
+    assert r.status_code == 409
+    stored = queue.progress(row["testRunId"], "p1")
+    assert stored["status"] == "passed", "a finished result was overwritten"
+
+
+def test_cancelling_records_who_did_it(fake_dynamo):
+    row = queue.enqueue("p1", "", "qa")
+    client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
+    assert "qa" in queue.progress(row["testRunId"], "p1").get("reason", "")
+
+
+def test_a_cancelled_run_no_longer_blocks_deleting_its_project(fake_dynamo):
+    """The reason this exists. A stuck run kept the project undeletable for ever."""
+    row = queue.enqueue("p1", "", "qa")
+    queue.heartbeat(row["testRunId"], "p1", "step", "laptop", {"totalCases": 3})
+
+    from src.routers.projects import _busy_blockers
+    assert _busy_blockers("p1", {"status": "analyzed"}), "expected a blocker first"
+
+    client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
+    assert _busy_blockers("p1", {"status": "analyzed"}) == []

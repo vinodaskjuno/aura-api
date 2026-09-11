@@ -809,6 +809,30 @@ def list_results(project_id: str,
     return out
 
 
+@router.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str, projectId: str = Query(...),
+               user: dict = Depends(require_permission("qa_workspace"))):
+    """Stop a run that is queued or executing.
+
+    Needed because the runner is a poller with no inbound port: there is no way to
+    reach into a laptop and stop the work. What this does is take the run out of the
+    live set, so the Results tab stops showing something that will never finish — and
+    so a project delete is not blocked for ever by a run whose machine went away.
+
+    The reaper does this automatically after 15 minutes of silence, but only for a run
+    that has gone QUIET. A run whose runner is alive and wedged never goes stale, and
+    before this there was no way to stop it at all.
+    """
+    from src.qatest import queue
+
+    row = queue.cancel(run_id, projectId, user.get("username", ""))
+    if not row:
+        raise HTTPException(
+            status_code=409,
+            detail="that run is not queued or running — it may have just finished")
+    return {"ok": True, "runId": run_id, "status": row.get("status")}
+
+
 @router.get("/active/{project_id}")
 def list_active_runs(project_id: str,
                      _: dict = Depends(require_permission("qa_workspace"))):
@@ -838,6 +862,7 @@ def list_active_runs(project_id: str,
         "totalUnemulated": int(r.get("totalUnemulated") or 0),
         "totalCases": int(r.get("totalCases") or 0),
         "phaseDetail": r.get("phaseDetail", ""),
+        "reason": r.get("reason", ""),
         "kinds": list(r.get("kinds") or []),
         # The Floci containers serving this run, as the runner last reported them.
         # `emulatorsStale` means the runner went quiet — the reaper stamps it — so the

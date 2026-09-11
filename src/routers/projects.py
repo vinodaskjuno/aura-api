@@ -201,7 +201,8 @@ def preview_deletion(project_id: str,
 
     project = _owned_or_admin(project_id, user)
     inventory = project_deletion.inventory(project_id)
-    blockers = project_purge.preflight() + _busy_blockers(project_id, project)
+    blockers = (project_purge.preflight(project_id)
+                + _busy_blockers(project_id, project))
     inventory.pop("_rows", None)
 
     return {
@@ -269,7 +270,8 @@ def delete_project(project_id: str, body: DeleteProjectRequest | None = None,
             status_code=400,
             detail=f"type the project name to confirm: {name!r}")
 
-    blockers = project_purge.preflight() + _busy_blockers(project_id, project)
+    blockers = (project_purge.preflight(project_id)
+                + _busy_blockers(project_id, project))
     if blockers:
         raise HTTPException(status_code=409, detail="; ".join(blockers))
 

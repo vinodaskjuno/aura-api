@@ -73,7 +73,7 @@ def two_projects(fake_dynamo, fake_s3, monkeypatch, tmp_path):
 
     monkeypatch.setattr(project_purge, "purge_project",
                         lambda pid: {"ok": True, "results": [], "totalDeleted": 0})
-    monkeypatch.setattr(project_purge, "preflight", lambda: [])
+    monkeypatch.setattr(project_purge, "preflight", lambda pid="": [])
     monkeypatch.setattr(project_purge, "inventory",
                         lambda pid: {"engines": {}, "nodes": 0})
     monkeypatch.setattr(project_purge, "drain_outbox_for", lambda pid, limit=500: 0)
@@ -148,7 +148,7 @@ def test_a_dry_run_changes_nothing(two_projects):
 def test_a_pending_outbox_blocks_the_delete(two_projects, monkeypatch):
     from src.graph import project_purge
     monkeypatch.setattr(project_purge, "preflight",
-                        lambda: ["memgraph has 3 write(s) pending replay"])
+                        lambda pid="": ["memgraph has 3 write(s) pending replay"])
     r = client.request("DELETE", f"{BASE}/p1", json={"confirm": "Project p1"})
     assert r.status_code == 409 and "pending replay" in r.json()["detail"]
 
@@ -315,7 +315,8 @@ def test_the_preview_explains_every_exclusion(two_projects):
 
 def test_the_preview_surfaces_blockers_before_the_user_types(two_projects, monkeypatch):
     from src.graph import project_purge
-    monkeypatch.setattr(project_purge, "preflight", lambda: ["neo4j is not reachable"])
+    monkeypatch.setattr(project_purge, "preflight",
+                        lambda pid="": ["neo4j is not reachable"])
     body = client.get(f"{BASE}/p1/deletion-preview").json()
     assert body["canDelete"] is False and body["blockers"]
 

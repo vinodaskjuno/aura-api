@@ -307,6 +307,36 @@ def finish(run_id: str, project_id: str, report: dict) -> dict | None:
         return None
 
 
+CANCELLED = "cancelled"
+
+
+def cancel(run_id: str, project_id: str, actor: str) -> dict | None:
+    """Stop a run from the UI. Returns the row, or None if it was not cancellable.
+
+    A conditional write per live status, for the same reason `claim` uses one: a run
+    that finishes between the read and the write must keep its real result rather than
+    have it overwritten with "cancelled".
+
+    This does NOT reach the runner — it polls, holds no inbound port, and may be a
+    laptop that is asleep. What it does is stop the queue lying: the run leaves LIVE,
+    so the Results tab stops showing something that will never finish and a project
+    delete is no longer blocked by it. A runner that later wakes and posts a result
+    for a cancelled run writes its evidence to S3 as usual; the queue row stays
+    cancelled, which is the honest record of what the operator asked for.
+    """
+    for status in LIVE:
+        won = db.update_item_if(
+            TABLE, {"testRunId": run_id, "projectId": project_id},
+            {"status": CANCELLED, "phase": CANCELLED, "updatedAt": _now(),
+             "completedAt": _now(),
+             "reason": f"cancelled by {actor}"},
+            expect={"status": status})
+        if won:
+            log.info("QA queue: %s cancelled %s (was %s)", actor, run_id, status)
+            return won
+    return None
+
+
 def reap(stale_after_s: int = 900) -> int:
     """Mark runs whose runner stopped talking as `abandoned`. Returns how many.
 
@@ -632,6 +662,10 @@ def progress(run_id: str, project_id: str) -> dict | None:
         "status": row.get("status", ""),
         "phase": row.get("phase", ""),
         "phaseDetail": row.get("phaseDetail", ""),
+        # Why it ended, when it ended badly — "cancelled by alice", or the reaper's
+        # "the runner stopped reporting". A status with no reason makes the reader
+        # guess.
+        "reason": row.get("reason", ""),
         "runner": row.get("runner", ""),
         "totalPassed": int(row.get("totalPassed") or 0),
         "totalFailed": int(row.get("totalFailed") or 0),

@@ -132,13 +132,39 @@ def test_an_unreachable_engine_is_refused_before_anything_is_deleted(monkeypatch
     assert any("memgraph" in p and "not reachable" in p for p in problems)
 
 
-def test_a_pending_outbox_blocks_the_delete(monkeypatch, engines):
-    """A queued write for this project, replayed afterwards, resurrects it."""
-    from src.graph import outbox
-    monkeypatch.setattr(outbox, "depth", lambda backend=None: {"neo4j": 0, "memgraph": 3})
+def test_a_queued_write_for_THIS_project_blocks_the_delete(fake_dynamo, monkeypatch,
+                                                          engines):
+    """Replayed afterwards, it puts the project back."""
+    from src.graph import backends
+    monkeypatch.setattr(backends, "configured_names", lambda: ["memgraph"])
+    fake_dynamo.put_item("graph-outbox", {"backend": "memgraph", "outboxId": "1",
+                                          "params": {"pid": "p1"}})
 
-    problems = pp.preflight()
-    assert any("pending replay" in p for p in problems)
+    assert any("mention this project" in x for x in pp.preflight("p1"))
+
+
+def test_another_projects_queued_writes_do_not_block(fake_dynamo, monkeypatch, engines):
+    """The check was on TOTAL outbox depth, and nothing drains the outbox
+    automatically — so one past outage left every project undeletable for ever, with a
+    message telling the user to do something the UI never offered them."""
+    from src.graph import backends
+    monkeypatch.setattr(backends, "configured_names", lambda: ["memgraph"])
+    for i in range(500):
+        fake_dynamo.put_item("graph-outbox", {"backend": "memgraph",
+                                              "outboxId": str(i),
+                                              "params": {"pid": "someone-else"}})
+
+    assert pp.preflight("p1") == [], "an unrelated backlog blocked the delete"
+
+
+def test_the_blocker_says_how_to_clear_it(fake_dynamo, monkeypatch, engines):
+    """"drain the outbox first" named no place to do it."""
+    from src.graph import backends
+    monkeypatch.setattr(backends, "configured_names", lambda: ["memgraph"])
+    fake_dynamo.put_item("graph-outbox", {"backend": "memgraph", "outboxId": "1",
+                                          "params": {"pid": "p1"}})
+
+    assert any("Settings" in x for x in pp.preflight("p1"))
 
 
 def test_a_huge_project_is_refused_rather_than_run_in_a_request(engines):
