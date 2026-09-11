@@ -11,6 +11,15 @@ from ..graph import neo4j_client as neo4j
 from ..database import dynamo_client as dynamo
 
 log = logging.getLogger(__name__)
+
+# Three endpoints were removed here: /infrastructure, /applications and
+# /data-landscape. Each was fetched on every dashboard load and referenced zero
+# times in the rendered output, and each counted labels (Container, VM,
+# KubernetesCluster, CloudResource, Table) or properties (primaryLanguage,
+# cloudPlatform, hasSensitiveData) that exist nowhere in this graph — so they
+# would have read 0 forever even had anything rendered them. The label counts
+# worth keeping moved to the ontology_maintainer view in services/role_metrics.py,
+# which is the one role they mean something to.
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
@@ -25,7 +34,8 @@ def get_dashboard_summary(_: dict = Depends(get_current_user)):
     MATCH ()-[r]->() WITH totalNodes, count(r) AS totalRels
     OPTIONAL MATCH (v:SecurityFinding|Vulnerability) WHERE toLower(v.severity) IN ['critical', 'high']
     WITH totalNodes, totalRels, count(v) AS criticalVulns
-    OPTIONAL MATCH (p:Project) WHERE p.status = 'active' OR p.status IS NULL
+    OPTIONAL MATCH (p:Project) WHERE p.projectId IS NOT NULL
+      AND coalesce(p.status, 'active') <> 'archived'
     WITH totalNodes, totalRels, criticalVulns, count(p) AS activeProjects
     OPTIONAL MATCH (i) WHERE i:Infrastructure OR i:Server OR i:VM OR i:Container OR i:KubernetesCluster OR i:CloudResource
     WITH totalNodes, totalRels, criticalVulns, activeProjects, count(DISTINCT i) AS infra
@@ -63,44 +73,6 @@ def get_graph_health(_: dict = Depends(get_current_user)):
     except Exception as exc:
         log.exception("get_graph_health failed")
         return {"available": False, "error": str(exc)}
-
-
-@router.get("/infrastructure")
-def get_infrastructure_overview(_: dict = Depends(get_current_user)):
-    """Real-time infrastructure metrics from Neo4j."""
-    if not neo4j.is_available():
-        return {}
-    cypher = """
-    OPTIONAL MATCH (container:Container) WITH count(container) AS containers
-    OPTIONAL MATCH (vm:VM) WITH containers, count(vm) AS vms
-    OPTIONAL MATCH (k8s:KubernetesCluster) WITH containers, vms, count(k8s) AS k8sClusters
-    OPTIONAL MATCH (cloud:CloudResource) WITH containers, vms, k8sClusters, count(cloud) AS cloudResources
-    OPTIONAL MATCH (i) WHERE i:Infrastructure OR i:CloudResource OR i:Server OR i:VM
-    WITH containers, vms, k8sClusters, cloudResources, i.cloudPlatform AS platform, count(*) AS platformCount
-    WHERE platform IS NOT NULL
-    WITH containers, vms, k8sClusters, cloudResources, collect({platform: platform, count: platformCount}) AS cloudDist
-    OPTIONAL MATCH (e) WHERE e:Infrastructure OR e:CloudResource OR e:Server OR e:VM
-    WITH containers, vms, k8sClusters, cloudResources, cloudDist, e.environment AS env, count(*) AS envCount
-    WHERE env IS NOT NULL
-    WITH containers, vms, k8sClusters, cloudResources, cloudDist, collect({environment: env, count: envCount}) AS envDist
-    OPTIONAL MATCH (r) WHERE r:Infrastructure OR r:CloudResource OR r:Server OR r:VM
-    WITH containers, vms, k8sClusters, cloudResources, cloudDist, envDist, r.region AS region, count(*) AS regionCount
-    WHERE region IS NOT NULL
-    WITH containers, vms, k8sClusters, cloudResources, cloudDist, envDist, collect({region: region, count: regionCount}) AS regionDist
-    OPTIONAL MATCH (h) WHERE h:Infrastructure OR h:CloudResource OR h:Server OR h:VM
-    WITH containers, vms, k8sClusters, cloudResources, cloudDist, envDist, regionDist, h.status AS status, count(*) AS statusCount
-    WHERE status IS NOT NULL
-    RETURN containers, vms, k8sClusters, cloudResources, cloudDist, envDist, regionDist, collect({status: status, count: statusCount}) AS statusDist
-    """
-    try:
-        with neo4j.session() as s:
-            result = s.run(cypher).single()
-            if not result:
-                return {}
-            return {"resourceCounts": {"containers": result["containers"], "vms": result["vms"], "k8sClusters": result["k8sClusters"], "cloudResources": result["cloudResources"]}, "cloudDistribution": result["cloudDist"], "environmentBreakdown": result["envDist"], "regionalDistribution": result["regionDist"], "healthStatus": result["statusDist"]}
-    except Exception as exc:
-        log.exception("get_infrastructure_overview failed")
-        return {"error": str(exc)}
 
 
 @router.get("/security")
@@ -188,58 +160,3 @@ def get_system_health(_: dict = Depends(get_current_user)):
         health_items.append({"label": "AWS Bedrock", "status": "Not Available", "color": "#f59e0b"})
     health_items.append({"label": "REST API", "status": "Operational", "color": "#22c55e"})
     return {"healthItems": health_items}
-
-
-@router.get("/applications")
-def get_application_portfolio(_: dict = Depends(get_current_user)):
-    """Application and service metrics from Neo4j."""
-    if not neo4j.is_available():
-        return {}
-    cypher = """
-    OPTIONAL MATCH (s:Service)
-    WITH s.status AS status, count(*) AS cnt
-    WHERE status IS NOT NULL
-    WITH collect({status: status, count: cnt}) AS serviceStatus
-    OPTIONAL MATCH (r:Repository)
-    WITH serviceStatus, r.primaryLanguage AS lang, count(*) AS langCount
-    WHERE lang IS NOT NULL
-    WITH serviceStatus, collect({language: lang, count: langCount}) AS techStack
-    OPTIONAL MATCH (a:API|APIEndpoint)
-    RETURN serviceStatus, techStack, count(a) AS apiCount
-    """
-    try:
-        with neo4j.session() as s:
-            result = s.run(cypher).single()
-            if not result:
-                return {}
-            return {"servicesByStatus": result["serviceStatus"], "techStack": result["techStack"], "apiCount": result["apiCount"]}
-    except Exception as exc:
-        log.exception("get_application_portfolio failed")
-        return {"error": str(exc)}
-
-
-@router.get("/data-landscape")
-def get_data_landscape(_: dict = Depends(get_current_user)):
-    """Data assets and lineage from Neo4j."""
-    if not neo4j.is_available():
-        return {}
-    cypher = """
-    OPTIONAL MATCH (d:Database)
-    WITH d.type AS dbType, count(*) AS cnt
-    WHERE dbType IS NOT NULL
-    WITH collect({type: dbType, count: cnt}) AS dbTypes
-    OPTIONAL MATCH (t:Table)
-    WITH dbTypes, count(t) AS tableCount
-    OPTIONAL MATCH (sens:Table|Database)
-    WHERE sens.hasSensitiveData = true OR sens.containsPII = true
-    RETURN dbTypes, tableCount, count(sens) AS sensitiveAssets
-    """
-    try:
-        with neo4j.session() as s:
-            result = s.run(cypher).single()
-            if not result:
-                return {}
-            return {"databasesByType": result["dbTypes"], "tableCount": result["tableCount"], "sensitiveDataAssets": result["sensitiveAssets"]}
-    except Exception as exc:
-        log.exception("get_data_landscape failed")
-        return {"error": str(exc)}

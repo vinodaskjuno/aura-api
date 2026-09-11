@@ -528,6 +528,19 @@ TABLE_SCHEMAS = [
     {"name": "auth-config", "pk": "configId", "sk": None},
     # Writes that failed on a secondary engine, awaiting retry. Keyed by backend so
     # a drain is a query rather than a full scan.
+    # What DevMate proposed, and whether the operator took it. Keyed by project
+    # so "what is the acceptance rate here" is a query; the GSI answers the same
+    # question per person. Written on DECISION, not on proposal — an undecided
+    # proposal still lives in the clone's .git staging area, and only a decision
+    # is worth keeping once the file itself is gone.
+    {
+        "name": "devmate-proposals",
+        "pk": "projectId",
+        "sk": "proposalId",          # <proposedAt>#<path hash8>
+        "gsis": [
+            {"index": "userId-proposedAt-index", "pk": "userId", "sk": "proposedAt"},
+        ],
+    },
     {"name": "graph-outbox", "pk": "backend", "sk": "outboxId"},
     {"name": "scheduler-state",   "pk": "jobId",     "sk": None},
     {"name": "services",          "pk": "projectId", "sk": "serviceId"},

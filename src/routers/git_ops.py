@@ -465,9 +465,13 @@ def apply_pending_change(body: PendingActionRequest,
                          user: dict = Depends(get_current_user)):
     """Write one staged change to disk."""
     from src.services.advisor import tools as advisor_tools
-    result = advisor_tools.apply_pending(body.projectId, body.path)
+    result = advisor_tools.apply_pending(body.projectId, body.path,
+                                         decided_by=user.get("username", ""))
     if result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
+    # The log line stays, but it is no longer the only record: apply_pending now
+    # writes a devmate-proposals row, which is queryable. A discard used to
+    # write neither.
     log.info("User %s applied agent change %s in %s",
              user.get("username"), body.path, body.projectId)
     return result
@@ -478,9 +482,12 @@ def discard_pending_change(body: PendingActionRequest,
                            user: dict = Depends(get_current_user)):
     """Drop a staged change without writing it."""
     from src.services.advisor import tools as advisor_tools
-    result = advisor_tools.discard_pending(body.projectId, body.path)
+    result = advisor_tools.discard_pending(body.projectId, body.path,
+                                           decided_by=user.get("username", ""))
     if result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
+    log.info("User %s discarded agent change %s in %s",
+             user.get("username"), body.path, body.projectId)
     return result
 
 

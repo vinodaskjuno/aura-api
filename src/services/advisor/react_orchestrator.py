@@ -176,6 +176,14 @@ def _persist_token_usage(
             "outputTokens": output_tokens,
             "cost": str(cost),
             "timestamp": now,
+            # Without these two, a DevMate turn is indistinguishable from a row
+            # whose origin was never recorded: `get_tool_breakdown` files it
+            # under "other", and no query can say what the advisor costs. Every
+            # other producer tags itself (gateway, claude-code); this one did
+            # not. Rows written before this line stay untagged forever, so any
+            # DevMate spend metric is "since tagging began" and must say so.
+            "source": "dev-mate",
+            "tool": "dev-mate",
         })
     except Exception as exc:
         logger.warning("Failed to persist token usage: %s", exc)
@@ -208,6 +216,37 @@ async def run_advisor(
     project_id: str = "",
     model_override: str = "",
 ) -> str:
+    # A DevMate turn is the only pipeline in the product that produced no run
+    # record: PIPELINE_DEV_MATE existed but the sole writer was the Reverse
+    # Engineering "Analyse" button, so `pipeline='dev-mate'` had zero rows and
+    # the delivery board's "Mapped" column was unreachable through runs.
+    from src.graph import provenance
+    run = provenance.trace_run(
+        provenance.PIPELINE_DEV_MATE,
+        trigger=provenance.TRIGGER_MANUAL,   # a signed-in human asked for it
+        actorId=user_id,
+        projectId=project_id,
+        sessionId=session_id,
+        writtenBy="advisor.run_advisor",
+    )
+    with run as ctx:
+        return await _run_advisor_traced(
+            ws, user_message, session_id, settings, context,
+            user_id, project_id, model_override, ctx,
+        )
+
+
+async def _run_advisor_traced(
+    ws: WebSocket,
+    user_message: str,
+    session_id: str,
+    settings: Any,
+    context: dict | None = None,
+    user_id: str = "",
+    project_id: str = "",
+    model_override: str = "",
+    ctx: Any = None,
+) -> str:
     try:
         system_prompt = _build_system_prompt(context)
         session_memory.append_turn(session_id, "user", user_message)
@@ -236,7 +275,11 @@ async def run_advisor(
                 effective_tool_dispatch.update({
                     "list_files": lambda directory=".": ontology_tools.list_files(_pid, directory),
                     "read_file": lambda file_path: ontology_tools.read_file(_pid, file_path),
-                    "write_file": lambda file_path, content: ontology_tools.write_file(_pid, file_path, content),
+                    # session/user threaded through so the staged proposal can
+                    # say who asked for it — the REST worker that later applies
+                    # or discards it knows only the project and the path.
+                    "write_file": lambda file_path, content: ontology_tools.write_file(
+                        _pid, file_path, content, session_id, user_id),
                     "get_diff": lambda: ontology_tools.get_diff(_pid),
                 })
                 system_prompt += (

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # ── Role definitions ─────────────────────────────────────────────────────────
 
-# The six built-in roles. Two narrow jobs now, and neither is granting access to a
+# The built-in roles. Two narrow jobs now, and neither is granting access to a
 # directory user:
 #   * clone-from templates in the org-role editor, so an admin starts from something
 #     sensible rather than an empty checklist;
@@ -41,6 +41,16 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
         # `connectors` is required so an ops user can configure the observability
         # providers their own page depends on.
         "connectors",
+    ],
+    # Delivery roles. Dashboard ONLY, deliberately: a PM or PO consumes the
+    # picture rather than operating the machinery, and every other menu in this
+    # product can start a run, upload a repository or delete a project. Their
+    # views are read-only projections of what the working roles produced.
+    "project_manager": [
+        "dashboard",
+    ],
+    "product_owner": [
+        "dashboard",
     ],
     "ontology_maintainer": [
         "dashboard", "dev_workspace", "knowledge_graph",
@@ -65,6 +75,8 @@ ROLE_LABELS: dict[str, str] = {
     "user_dev": "User + Dev",
     "user_qa": "User + QA",
     "user_ops": "User + Ops",
+    "project_manager": "Project Manager",
+    "product_owner": "Product Owner",
     "ontology_maintainer": "Ontology Maintainer",
     "admin": "Admin",
     "super_admin": "Super Admin",

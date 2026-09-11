@@ -1,7 +1,10 @@
+import logging
 import os
 import re
 import subprocess
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Must match the value used in git_ops.py.
 def _workspace_root() -> Path:
@@ -73,6 +76,30 @@ def _stage_file(project_id: str, file_path: str) -> Path:
     return _stage_dir(project_id) / f"{digest}.json"
 
 
+def pending_count(project_id: str) -> int:
+    """How many changes are staged, WITHOUT resolving the project in DynamoDB.
+
+    `list_pending` is the honest but expensive answer: it calls
+    `_resolve_project_dir`, which on a cache miss issues a DynamoDB query per
+    project, then reads and diffs every staged file. Ranking a hundred projects
+    with it would mean a hundred queries and a hundred filesystem walks on every
+    page load.
+
+    Ranking does not need the diffs — only whether there is anything waiting. So
+    this takes the well-known clone path only, and a project whose clone lives
+    somewhere unusual simply reports 0 and loses its ranking boost. That is the
+    right trade: a wrong sort order is recoverable, a page that takes ten
+    seconds to load is not.
+    """
+    try:
+        stage = _clone_path(project_id) / ".git" / _STAGE_DIRNAME
+        if not stage.is_dir():
+            return 0
+        return sum(1 for entry in stage.iterdir() if entry.suffix == ".json")
+    except Exception:                                         # noqa: BLE001
+        return 0
+
+
 def _pending_for(project_id: str) -> dict[str, str]:
     """All staged changes for a project, as {path: content}."""
     import json
@@ -89,10 +116,35 @@ def _pending_for(project_id: str) -> dict[str, str]:
     return out
 
 
-def _stage_write(project_id: str, file_path: str, content: str) -> None:
+def _stage_write(project_id: str, file_path: str, content: str,
+                 session_id: str = "", user_id: str = "") -> None:
+    """Stage a proposal, carrying who proposed it and when.
+
+    The provenance is written HERE because this is the only moment it is known:
+    the agent stages from the WebSocket worker, while apply/discard arrive later
+    through a REST worker that knows the project and the path and nothing else.
+    """
     import json
-    _stage_file(project_id, file_path).write_text(
-        json.dumps({"path": file_path, "content": content}), encoding="utf-8")
+    from datetime import datetime, timezone
+    _stage_file(project_id, file_path).write_text(json.dumps({
+        "path": file_path,
+        "content": content,
+        "sessionId": session_id,
+        "userId": user_id,
+        "proposedAt": datetime.now(timezone.utc).isoformat(),
+    }), encoding="utf-8")
+
+
+def _stage_read(project_id: str, file_path: str) -> dict | None:
+    """The staged record, without removing it."""
+    import json
+    f = _stage_file(project_id, file_path)
+    if not f.is_file():
+        return None
+    try:
+        return json.loads(f.read_text())
+    except Exception:                                         # noqa: BLE001
+        return None
 
 
 def _stage_pop(project_id: str, file_path: str) -> str | None:
@@ -105,12 +157,58 @@ def _stage_pop(project_id: str, file_path: str) -> str | None:
     return content
 
 
+def record_decision(project_id: str, file_path: str, decision: str,
+                    staged: dict | None, decided_by: str = "",
+                    additions: int = 0, deletions: int = 0) -> None:
+    """Record that a proposal was applied or discarded.
+
+    Before this existed, `apply_pending` and `discard_pending` both unlinked the
+    stage file and wrote nothing — so the two outcomes were byte-for-byte
+    indistinguishable afterwards and "how much of the agent's advice do people
+    take?" was unanswerable. Apply logged a line; discard logged nothing.
+
+    Best-effort, and deliberately so: a DynamoDB hiccup must never stop a file
+    change the operator asked for. The same reasoning as `_persist_token_usage`.
+    """
+    try:
+        import hashlib
+        from datetime import datetime, timezone
+        from src.database import dynamo_client as db
+
+        staged = staged or {}
+        now = datetime.now(timezone.utc).isoformat()
+        proposed_at = str(staged.get("proposedAt") or now)
+        digest = hashlib.sha256(file_path.encode()).hexdigest()[:8]
+        db.put_item("devmate-proposals", {
+            "projectId": project_id,
+            "proposalId": f"{proposed_at}#{digest}",
+            "sessionId": str(staged.get("sessionId") or ""),
+            "userId": str(staged.get("userId") or decided_by or ""),
+            "path": file_path,
+            "additions": int(additions),
+            "deletions": int(deletions),
+            "proposedAt": proposed_at,
+            "decision": decision,
+            "decidedAt": now,
+            "decidedBy": decided_by,
+        })
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("could not record %s of %s: %s", decision, file_path, exc)
+
+
 def _unified_diff(path: str, before: str, after: str) -> str:
     import difflib
     return "".join(difflib.unified_diff(
         before.splitlines(keepends=True), after.splitlines(keepends=True),
         fromfile=f"a/{path}", tofile=f"b/{path}", n=3,
     ))
+
+
+def _diff_counts(diff: str) -> tuple[int, int]:
+    """(additions, deletions) for a unified diff, ignoring the +++/--- headers."""
+    adds = sum(1 for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++"))
+    dels = sum(1 for l in diff.splitlines() if l.startswith("-") and not l.startswith("---"))
+    return adds, dels
 
 
 def list_pending(project_id: str) -> list[dict]:
@@ -127,25 +225,28 @@ def list_pending(project_id: str) -> list[dict]:
         except Exception:  # noqa: BLE001
             before = ""
         diff = _unified_diff(path, before, content)
-        out.append({
-            "path": path,
-            "diff": diff,
-            "additions": sum(1 for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")),
-            "deletions": sum(1 for l in diff.splitlines() if l.startswith("-") and not l.startswith("---")),
-        })
+        adds, dels = _diff_counts(diff)
+        out.append({"path": path, "diff": diff,
+                    "additions": adds, "deletions": dels})
     return out
 
 
-def apply_pending(project_id: str, file_path: str) -> dict:
-    """Write one staged change to disk."""
+def apply_pending(project_id: str, file_path: str, decided_by: str = "") -> dict:
+    """Write one staged change to disk, and record that it was taken."""
     try:
         clone_dir = _resolve_project_dir(project_id)
         target = _safe_target(clone_dir, file_path)
+        # Read the staged record and measure the diff BEFORE popping: _stage_pop
+        # unlinks the file, and after that there is nothing left to attribute.
+        staged = _stage_read(project_id, file_path)
+        before = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
         content = _stage_pop(project_id, file_path)
         if content is None:
             return {"error": f"No staged change for '{file_path}'"}
+        adds, dels = _diff_counts(_unified_diff(file_path, before, content))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        record_decision(project_id, file_path, "applied", staged, decided_by, adds, dels)
         return {"success": True, "path": file_path}
     except (FileNotFoundError, PermissionError) as exc:
         return {"error": str(exc)}
@@ -153,13 +254,19 @@ def apply_pending(project_id: str, file_path: str) -> dict:
         return {"error": f"Cannot apply change: {exc}"}
 
 
-def discard_pending(project_id: str, file_path: str) -> dict:
-    """Drop a staged change without writing it."""
+def discard_pending(project_id: str, file_path: str, decided_by: str = "") -> dict:
+    """Drop a staged change without writing it, and record that it was refused.
+
+    A discard used to leave exactly as much trace as an apply: none. Recording
+    it is the whole point — advice nobody takes is the more interesting half.
+    """
     try:
+        staged = _stage_read(project_id, file_path)
         if _stage_pop(project_id, file_path) is None:
             return {"error": f"No staged change for '{file_path}'"}
     except FileNotFoundError as exc:
         return {"error": str(exc)}
+    record_decision(project_id, file_path, "discarded", staged, decided_by)
     return {"success": True, "path": file_path}
 
 
@@ -220,7 +327,8 @@ def read_file(project_id: str, file_path: str) -> dict:
         return {"error": f"Cannot read file: {exc}"}
 
 
-def write_file(project_id: str, file_path: str, content: str) -> dict:
+def write_file(project_id: str, file_path: str, content: str,
+               session_id: str = "", user_id: str = "") -> dict:
     """STAGE a change to a file in the cloned repository.
 
     Nothing is written to disk here. The change is held until the operator applies
@@ -234,7 +342,7 @@ def write_file(project_id: str, file_path: str, content: str) -> dict:
         if before == content:
             return {"staged": False, "path": file_path,
                     "message": "No change — the file already has this content."}
-        _stage_write(project_id, file_path, content)
+        _stage_write(project_id, file_path, content, session_id, user_id)
         diff = _unified_diff(file_path, before, content)
         return {
             "staged": True,

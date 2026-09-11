@@ -33,6 +33,19 @@ def clone(tmp_path, monkeypatch):
     return repo
 
 
+@pytest.fixture(autouse=True)
+def _no_proposal_writes(monkeypatch):
+    """Keep apply/discard from recording to a real table.
+
+    `record_decision` is best-effort by design — a file change must not fail
+    because DynamoDB is unreachable — which means a stray write from a test
+    SUCCEEDS silently rather than erroring. This suite exercises apply and
+    discard, so without this it wrote two rows to the live table on every run.
+    """
+    import src.database.dynamo_client as db
+    monkeypatch.setattr(db, "put_item", lambda *a, **k: None)
+
+
 # ── The approval gate ────────────────────────────────────────────────────────
 
 def test_write_file_stages_and_does_not_touch_disk(clone):

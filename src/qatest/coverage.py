@@ -113,6 +113,9 @@ def summarise(report: Report, steps: list[Step],
 
     planned = len(report.cases)
     executed = sum(1 for c in report.cases if c.case_id in statuses)
+    skipped = sum(1 for s in statuses.values() if s == "skipped")
+    unemulated = sum(1 for s in statuses.values() if s == "unemulated")
+    untestable = skipped + unemulated
 
     # Nodes the project has that this run's plan never referenced — because the user
     # excluded their kind, or because the plan was built before they existed. They are
@@ -137,8 +140,14 @@ def summarise(report: Report, steps: list[Step],
         "planned": planned,
         "executed": executed,
         "executionPct": _pct(executed, planned),
-        "skipped": sum(1 for s in statuses.values() if s == "skipped"),
-        "unemulated": sum(1 for s in statuses.values() if s == "unemulated"),
+        "skipped": skipped,
+        "unemulated": unemulated,
+        # The two above, as one number, because they answer the question a
+        # reader actually has: how much of this plan could never have worked.
+        # A run reporting "0 failed" and a run where nothing executed look
+        # identical without it, and the second is the common case.
+        "untestable": untestable,
+        "untestablePct": _pct(untestable, planned),
         "notPlanned": not_planned,
         "denominatorFromPlan": not bool(totals),
         "uncovered": sorted(uncovered, key=lambda n: (n["label"], n["externalId"])),

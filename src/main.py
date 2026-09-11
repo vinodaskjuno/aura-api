@@ -184,6 +184,8 @@ from .routers import metrics as metrics_router
 from .routers import budget as budget_router
 from .routers import credits as credits_router
 from .routers import dashboard as dashboard_router
+from .routers import dashboard_view as dashboard_view_router
+from .routers import devmate_view as devmate_view_router
 
 app.include_router(auth.router)
 app.include_router(connectors.router)
@@ -209,6 +211,8 @@ app.include_router(metrics_router.router)
 app.include_router(budget_router.router)
 app.include_router(credits_router.router)
 app.include_router(dashboard_router.router)
+app.include_router(dashboard_view_router.router)
+app.include_router(devmate_view_router.router)
 from .routers import commands as commands_router
 app.include_router(commands_router.router)
 from .routers import service_loader as service_loader_router
