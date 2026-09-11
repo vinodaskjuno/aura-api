@@ -281,11 +281,44 @@ def fake_s3(monkeypatch):
             return None
         return body if isinstance(body, bytes) else str(body).encode("utf-8")
 
+    def iter_objects(bucket, prefix=""):
+        for full_key in sorted(blobs):
+            if not full_key.startswith(f"{bucket}/"):
+                continue
+            key = full_key[len(bucket) + 1:]
+            if key.startswith(prefix):
+                body = blobs[full_key]
+                size = len(body if isinstance(body, bytes) else str(body).encode())
+                yield {"key": key, "size": size, "last_modified": ""}
+
+    def list_objects(bucket, prefix="", limit=None):
+        out = list(iter_objects(bucket, prefix))
+        return out[:limit] if limit is not None else out
+
+    def delete_prefix(bucket, prefix):
+        # The real one refuses an empty prefix — a fake that did not would let a test
+        # pass while the guard was broken.
+        if not prefix or not prefix.strip():
+            raise ValueError("delete_prefix requires a non-empty prefix")
+        doomed = [f"{bucket}/{o['key']}" for o in iter_objects(bucket, prefix)]
+        size = sum(len(blobs[k] if isinstance(blobs[k], bytes) else str(blobs[k]).encode())
+                   for k in doomed)
+        for k in doomed:
+            blobs.pop(k, None)
+        return {"deleted": len(doomed), "bytes": size, "errors": []}
+
+    def delete_object(bucket, key):
+        blobs.pop(f"{bucket}/{key}", None)
+
     import src.storage.s3_client as s3
     monkeypatch.setattr(s3, "put_json", put_json)
     monkeypatch.setattr(s3, "get_json", get_json)
     monkeypatch.setattr(s3, "put_object", put_object)
     monkeypatch.setattr(s3, "get_object", get_object)
+    monkeypatch.setattr(s3, "iter_objects", iter_objects)
+    monkeypatch.setattr(s3, "list_objects", list_objects)
+    monkeypatch.setattr(s3, "delete_prefix", delete_prefix)
+    monkeypatch.setattr(s3, "delete_object", delete_object)
     return blobs
 
 

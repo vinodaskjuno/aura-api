@@ -67,12 +67,17 @@ PIPELINE_MANUAL = "manual"
 PIPELINE_CORRELATION = "correlation"
 PIPELINE_MIGRATION = "migration"
 PIPELINE_SEED = "seed"
+#: Deleting a project. The first destructive pipeline — without a value of its own a
+#: deletion run lands under `api` and is indistinguishable from an ingestion, which
+#: defeats the one query an operator ever wants: show me every destructive run.
+PIPELINE_DELETION = "deletion"
 PIPELINE_UNKNOWN = "unattributed"
 
 PIPELINES = (
     PIPELINE_GIT, PIPELINE_MCP, PIPELINE_API, PIPELINE_FILE, PIPELINE_DEV_MATE,
     PIPELINE_QA_MIND, PIPELINE_SELF_LEARNING, PIPELINE_MANUAL,
-    PIPELINE_CORRELATION, PIPELINE_MIGRATION, PIPELINE_SEED, PIPELINE_UNKNOWN,
+    PIPELINE_CORRELATION, PIPELINE_MIGRATION, PIPELINE_SEED, PIPELINE_DELETION,
+    PIPELINE_UNKNOWN,
 )
 
 # How the write was initiated. Deliberately separate from `pipeline`: the same Git
@@ -93,8 +98,11 @@ ATTRIBUTION_PRE_TRACE = "pre-trace"
 ATTRIBUTION_NONE = "none"
 
 # Stats keys a run accumulates. Fixed so the UI can render tiles without guessing.
+# `nodesRetired`/`relsArchived` are from the never-delete era, when a removal was
+# always soft. A project delete is the exception, and needs somewhere to report it.
 _STAT_KEYS = ("nodesAdded", "nodesUpdated", "nodesUnchanged", "nodesRetired",
-              "relsAdded", "relsUpdated", "relsArchived")
+              "nodesDeleted", "relsAdded", "relsUpdated", "relsArchived",
+              "relsDeleted")
 
 
 def _now() -> str:

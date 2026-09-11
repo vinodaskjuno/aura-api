@@ -141,34 +141,180 @@ def create_project(req: CreateProjectRequest, user: dict = Depends(require_permi
     return project
 
 
-@router.get("/{project_id}")
-def get_project(project_id: str, user: dict = Depends(require_permission("dev_workspace"))):
+def _owned_or_admin(project_id: str, user: dict) -> dict:
+    """The project, if this caller may act on it. 404 otherwise.
+
+    Every endpoint here used to fetch by id and act, reading `userId` off whatever row
+    came back — so any holder of `dev_workspace` could read, edit, re-analyse or delete
+    another user's project by guessing its id, even though `list_projects` filters by
+    owner.
+
+    **404, not 403**, for a project that exists but is not yours: a 403 confirms the id
+    is real to someone who has no business knowing that. A non-existent id and
+    someone else's id are indistinguishable from outside, which is the point.
+    """
     project = get_item_by_pk("projects", project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    if project.get("userId") == user.get("userId"):
+        return project
+    # `settings` is the admin permission — the same gate the graph wipe uses.
+    if "settings" in (user.get("permissions") or []):
+        return project
+    raise HTTPException(status_code=404, detail="Project not found")
+
+
+@router.get("/{project_id}")
+def get_project(project_id: str, user: dict = Depends(require_permission("dev_workspace"))):
+    return _owned_or_admin(project_id, user)
 
 
 @router.put("/{project_id}")
 def update_project(project_id: str, req: UpdateProjectRequest,
                    user: dict = Depends(require_permission("dev_workspace"))):
-    project = get_item_by_pk("projects", project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    project = _owned_or_admin(project_id, user)
     updates = req.model_dump(exclude_none=True)
     updates["updatedAt"] = datetime.now(timezone.utc).isoformat()
     result = update_item("projects", {"projectId": project_id, "userId": project["userId"]}, updates)
     return result or project
 
 
+class DeleteProjectRequest(BaseModel):
+    """`confirm` must equal the project's NAME.
+
+    A deliberate departure from the graph wipe, which asks for the word "DELETE". A
+    wipe has exactly one possible target, so a constant word is unambiguous. A project
+    delete has as many targets as there are projects, and the realistic accident is
+    deleting the WRONG one — which typing "DELETE" does nothing to prevent and typing
+    the name does.
+    """
+    confirm: str = ""
+    dryRun: bool = False
+
+
+@router.get("/{project_id}/deletion-preview")
+def preview_deletion(project_id: str,
+                     user: dict = Depends(require_permission("dev_workspace"))):
+    """Exactly what deleting this project would remove, and what it would spare."""
+    from src.graph import project_purge
+    from src.services import project_deletion
+
+    project = _owned_or_admin(project_id, user)
+    inventory = project_deletion.inventory(project_id)
+    blockers = project_purge.preflight() + _busy_blockers(project_id, project)
+    inventory.pop("_rows", None)
+
+    return {
+        **inventory,
+        "projectName": project.get("name") or project_id,
+        # Echoed so the dialog does not have to guess what it is asking for.
+        "confirmPhrase": project.get("name") or project_id,
+        "owner": {"userId": project.get("userId"), "username": project.get("username")},
+        "excluded": project_deletion.excluded_notes(project_id, inventory),
+        "blockers": blockers,
+        "canDelete": not blockers,
+    }
+
+
+def _busy_blockers(project_id: str, project: dict) -> list[str]:
+    """Work that would write the project back after it was deleted.
+
+    A QA run finishing, or an analysis in flight, both write rows and graph nodes when
+    they complete — resurrecting a project that was deleted underneath them. Refusing
+    while they run is cheaper than reconciling afterwards.
+    """
+    blockers: list[str] = []
+    if project.get("status") in ("analyzing", "generating"):
+        blockers.append(f"this project is {project['status']} — wait for it to finish")
+    try:
+        from src.qatest import queue as qa_queue
+        live = [r["testRunId"] for r in qa_queue.list_for_project(project_id)
+                if r.get("status") in qa_queue.LIVE]
+        if live:
+            blockers.append("a QA run is still going: " + ", ".join(live[:3])
+                            + " — it would write results back after the delete")
+    except Exception:                                         # noqa: BLE001
+        pass
+    return blockers
+
+
 @router.delete("/{project_id}")
-def delete_project(project_id: str, user: dict = Depends(require_permission("dev_workspace"))):
-    # Need full composite key (projectId + userId) to delete
-    project = get_item_by_pk("projects", project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    delete_item("projects", {"projectId": project_id, "userId": project["userId"]})
-    return {"ok": True}
+def delete_project(project_id: str, body: DeleteProjectRequest | None = None,
+                   user: dict = Depends(require_permission("dev_workspace"))):
+    """Delete a project and everything it owns.
+
+    Returns 200 with `ok: false` on a partial failure rather than a 500 — a 500 tells
+    the caller nothing about what WAS deleted, and the answer to "what is left" is the
+    only useful thing to say at that point.
+    """
+    from src.database import dynamo_client as db
+    from src.graph import project_purge, provenance
+    from src.services import project_deletion
+
+    body = body or DeleteProjectRequest()
+    project = _owned_or_admin(project_id, user)
+    name = project.get("name") or project_id
+
+    reason = project_deletion._reject(project_id)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    if body.dryRun:
+        inventory = project_deletion.inventory(project_id)
+        inventory.pop("_rows", None)
+        return {"ok": True, "dryRun": True, "report": inventory}
+
+    if (body.confirm or "").strip() != name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"type the project name to confirm: {name!r}")
+
+    blockers = project_purge.preflight() + _busy_blockers(project_id, project)
+    if blockers:
+        raise HTTPException(status_code=409, detail="; ".join(blockers))
+
+    # `sourceRecordId`, NOT projectId: this run writes an `ontology-versions` row, and
+    # a row carrying this project's id would be swept by its own deletion — then
+    # resurrected as a stub, because finish_version_record is a bare SET that upserts.
+    with provenance.trace_run(
+        provenance.PIPELINE_DELETION,
+        trigger=provenance.TRIGGER_MANUAL,
+        actor=user.get("username", ""), actorId=user.get("userId", ""),
+        source="project-deletion", sourceRecordId=project_id,
+        sessionId=f"delete:{project_id}",
+        writtenBy="routers.projects.delete_project",
+        notes=f"deleting project {name!r}",
+    ) as ctx:
+        run_id = getattr(ctx, "runId", "") or ""
+        before = project_deletion.inventory(project_id, run_id=run_id)
+        before.pop("_rows", None)
+        project_deletion.record(project_id, project, user.get("username", ""),
+                                "DELETE_PROJECT_STARTED", before, None)
+
+        # `db.update_item`, not the name imported at the top of this module: this file
+        # does `from ... import update_item`, which binds the real function at import
+        # time and is therefore unreachable from a test double patching the module.
+        db.update_item("projects", {"projectId": project_id, "userId": project["userId"]},
+                       {"status": "deleting", "deletionStartedAt":
+                        datetime.now(timezone.utc).isoformat(),
+                        "deletionActor": user.get("username", "")})
+
+        report = project_deletion.delete_project(
+            project_id, user.get("username", ""), run_id=run_id)
+
+    if not report.ok:
+        # The projects row deliberately survives: it is the handle to what is left, and
+        # the only way the half-deleted state is visible or re-runnable.
+        db.update_item("projects", {"projectId": project_id, "userId": project["userId"]},
+                       {"status": "deletion_failed",
+                        "deletionErrors": report.errors[:10]})
+        project_deletion.record(project_id, project, user.get("username", ""),
+                                "DELETE_PROJECT_FAILED", before, report.as_dict())
+        return {"ok": False, "retryable": True, "report": report.as_dict()}
+
+    project_deletion.record(project_id, project, user.get("username", ""),
+                            "DELETE_PROJECT", before, report.as_dict())
+    return {"ok": True, "report": report.as_dict()}
 
 
 @router.get("/{project_id}/connectors")
@@ -283,10 +429,8 @@ async def analyse_project(project_id: str, user: dict = Depends(require_permissi
     from src.orchestrator.agent_registry import get_agent
     from src.graph import provenance
 
-    # Fetch project to get full composite key
-    project = get_item_by_pk("projects", project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+    # Fetch project to get full composite key, and refuse someone else's.
+    project = _owned_or_admin(project_id, user)
 
     composite_key = {"projectId": project_id, "userId": project["userId"]}
     update_item("projects", composite_key, {

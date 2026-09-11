@@ -10,6 +10,7 @@ Buckets used:
 import io
 import json
 import logging
+from collections.abc import Iterator
 from typing import Any
 import boto3
 from botocore.exceptions import ClientError
@@ -108,15 +109,89 @@ def delete_object(bucket_suffix: str, key: str) -> None:
         logger.error("S3 delete_object failed [%s/%s]: %s", bucket, key, e)
 
 
-def list_objects(bucket_suffix: str, prefix: str = "") -> list[dict]:
+def iter_objects(bucket_suffix: str, prefix: str = "") -> Iterator[dict]:
+    """Every object under `prefix`, following the continuation token.
+
+    A generator so a caller counting bytes across a hundred thousand screenshots does
+    not have to hold the listing in memory.
+    """
     bucket = _bucket(bucket_suffix)
+    token: str | None = None
     try:
-        resp = _get_client().list_objects_v2(Bucket=bucket, Prefix=prefix)
-        return [{"key": o["Key"], "size": o["Size"], "last_modified": o["LastModified"].isoformat()}
-                for o in resp.get("Contents", [])]
+        while True:
+            kwargs: dict = {"Bucket": bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = _get_client().list_objects_v2(**kwargs)
+            for o in resp.get("Contents", []):
+                stamp = o.get("LastModified")
+                yield {"key": o["Key"], "size": o.get("Size", 0),
+                       "last_modified": stamp.isoformat() if stamp else ""}
+            if not resp.get("IsTruncated"):
+                return
+            token = resp.get("NextContinuationToken")
+            if not token:
+                return
     except ClientError as e:
-        logger.error("S3 list_objects failed [%s]: %s", bucket, e)
-        return []
+        logger.error("S3 list failed [%s/%s]: %s", bucket, prefix, e)
+        return
+
+
+def list_objects(bucket_suffix: str, prefix: str = "",
+                 limit: int | None = None) -> list[dict]:
+    """Objects under `prefix`, ALL of them unless `limit` says otherwise.
+
+    This used to issue a single `list_objects_v2` and return whatever came back —
+    silently at most 1000 keys, with no indication that there were more. Every caller
+    read that as "the objects", so a run with more than a thousand screenshots listed
+    partially, and a delete driven off it would have deleted partially.
+    """
+    out: list[dict] = []
+    for obj in iter_objects(bucket_suffix, prefix):
+        out.append(obj)
+        if limit is not None and len(out) >= limit:
+            break
+    return out
+
+
+def delete_prefix(bucket_suffix: str, prefix: str) -> dict:
+    """Delete every object under `prefix`. Returns {deleted, bytes, errors}.
+
+    Batched through `delete_objects` in thousands: a screenshot-heavy project is a
+    couple of thousand keys, and a round trip each would take minutes.
+    """
+    if not prefix or not prefix.strip():
+        # `delete_prefix(bucket, "")` matches every key in the bucket. The same
+        # defence `_clone_path` applies to a blank project id, for the same reason:
+        # the empty value is the one that means "everything".
+        raise ValueError("delete_prefix requires a non-empty prefix")
+
+    bucket = _bucket(bucket_suffix)
+    client = _get_client()
+    deleted, total_bytes = 0, 0
+    errors: list[str] = []
+    batch: list[dict] = []
+
+    def flush() -> None:
+        nonlocal deleted, batch
+        if not batch:
+            return
+        try:
+            resp = client.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+            deleted += len(resp.get("Deleted", []))
+            for err in resp.get("Errors", []):
+                errors.append(f"{err.get('Key')}: {err.get('Message')}")
+        except ClientError as e:
+            errors.append(f"{prefix}: {e}")
+        batch = []
+
+    for obj in iter_objects(bucket_suffix, prefix):
+        total_bytes += int(obj.get("size") or 0)
+        batch.append({"Key": obj["key"]})
+        if len(batch) >= 1000:
+            flush()
+    flush()
+    return {"deleted": deleted, "bytes": total_bytes, "errors": errors}
 
 
 def presigned_url(bucket_suffix: str, key: str, expires: int = 3600) -> str:
