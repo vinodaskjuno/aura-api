@@ -41,6 +41,27 @@ from src.services.gateway_service import (
 )
 
 log = logging.getLogger(__name__)
+#: Headers a caller uses to attribute its spend to the work that caused it. The gateway
+#: proxies opaque model traffic and cannot infer either — a request looks the same
+#: whether it came from a chat box or a test run — so attribution has to be declared.
+#: `src/qatest/agent.py` exports the matching AURA_PROJECT_ID / AURA_TEST_RUN_ID into a
+#: run's environment so anything it invokes can set them.
+_PROJECT_HEADER = "X-Aura-Project-Id"
+_RUN_HEADER = "X-Aura-Test-Run-Id"
+
+
+def _attribution(request: Request) -> dict:
+    """projectId / testRunId for this request, empty when not declared.
+
+    Bounded because they are caller-supplied and land in a DynamoDB row that dashboards
+    group by.
+    """
+    return {
+        "project_id": str(request.headers.get(_PROJECT_HEADER) or "")[:64],
+        "test_run_id": str(request.headers.get(_RUN_HEADER) or "")[:64],
+    }
+
+
 router = APIRouter(tags=["gateway"])
 
 
@@ -151,6 +172,7 @@ async def anthropic_messages(
 
     request_id = str(uuid.uuid4())
     user_agent = request.headers.get("User-Agent", "")
+    attribution = _attribution(request)
     client_headers = forwardable_headers(request)
 
     # The caller is otherwise never told its model was swapped mid-conversation.
@@ -214,6 +236,7 @@ async def anthropic_messages(
                     user_agent=user_agent,
                     request_id=request_id,
                     tool_source=user.tool_label,
+                    **attribution,
                     **usage.as_kwargs(),
                 )
 
@@ -242,6 +265,7 @@ async def anthropic_messages(
             latency_ms=int((monotonic() - t_start) * 1000),
             user_agent=user_agent, request_id=request_id,
             tool_source=user.tool_label,
+            **attribution,
         )
         return _passthrough_upstream(exc)
     except HTTPException as exc:
@@ -266,6 +290,7 @@ async def anthropic_messages(
         user_agent=user_agent,
         request_id=request_id,
         tool_source=user.tool_label,
+        **attribution,
     )
     return JSONResponse(content=resp, headers=extra_headers)
 
@@ -340,6 +365,7 @@ async def openai_chat_completions(
 
     request_id = str(uuid.uuid4())
     user_agent = request.headers.get("User-Agent", "")
+    attribution = _attribution(request)
     client_headers = forwardable_headers(request)
     extra_headers: dict[str, str] = {"X-Request-Id": request_id}
     if downgraded_from:
@@ -379,6 +405,7 @@ async def openai_chat_completions(
                     user_agent=user_agent,
                     request_id=request_id,
                     tool_source=user.tool_label,
+                    **attribution,
                     **usage.as_kwargs(),
                 )
 
@@ -486,6 +513,7 @@ async def openai_chat_completions(
         user_agent=user_agent,
         request_id=request_id,
         tool_source=user.tool_label,
+        **attribution,
         **usage.as_kwargs(),
     )
     return JSONResponse(content=result, headers=extra_headers)

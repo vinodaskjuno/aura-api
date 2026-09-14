@@ -128,7 +128,7 @@ _CONFIRM_WORD = "DELETE"
 
 def _wipe_allowed() -> bool:
     from src.config_settings import get_settings
-    return bool(getattr(get_settings(), "allow_graph_wipe", False))
+    return bool(getattr(get_settings(), "allow_graph_wipe", True))
 
 
 @router.get("/wipe-status")

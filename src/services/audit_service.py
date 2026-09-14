@@ -44,6 +44,7 @@ def record(
     latency_ms: int = 0,
     user_agent: str = "",
     project_id: str = "",
+    test_run_id: str = "",
     request_id: str = "",
     tool_source: str = "",
 ) -> None:
@@ -53,6 +54,14 @@ def record(
 
     tool_source: when the caller used a per-tool virtual key the key's toolLabel
     is passed here directly (most accurate). Falls back to User-Agent inference.
+
+    project_id / test_run_id attribute the spend to the work that caused it. Both are
+    supplied by the caller through request headers rather than inferred, because the
+    gateway proxies opaque model traffic and has no other way to know. A QA run spends
+    nothing today — its plan comes from the graph by design, not from a model — so
+    `test_run_id` produces no rows yet; it exists so that the moment exploratory testing
+    or self-healing starts calling a model, the cost is already attributed rather than
+    landing in an untraceable pool.
 
     Cache tokens are recorded and priced separately — cache reads cost ~10% of
     the input rate and cache writes 1.25x-2x, so folding them into input_tokens
@@ -109,6 +118,7 @@ def record(
             "sortKey": sort_key,
             "sessionId": rid,
             "projectId": project_id or "",
+            "testRunId": test_run_id or "",
             "model": canonical,
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,

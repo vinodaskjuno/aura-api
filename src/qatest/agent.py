@@ -105,6 +105,37 @@ def _doctor_command(as_json: bool) -> int:
 
 
 
+class AuthRejected(Exception):
+    """The server refused this runner's gateway key.
+
+    Its own class because it is the one failure that retrying cannot fix. The key is
+    read from argv at startup, so a rotated key cannot be picked up by a running
+    process — an agent that keeps polling on a rejected credential is not resilient,
+    it is silent. One did exactly that against dev for four days: a 401 every five
+    seconds, no runner ever registered, and the UI could only say "no runner
+    connected" because an unauthenticated poll cannot be attributed to anyone.
+    """
+
+    def __init__(self, api: str, status: int) -> None:
+        super().__init__(f"{api} rejected this runner's key ({status})")
+        self.api = api
+        self.status = status
+
+    def advice(self) -> str:
+        """Exactly what to do, with the host already filled in."""
+        return (
+            f"\nThe API at {self.api} rejected this runner's key ({self.status}).\n"
+            "The key was most likely rotated or revoked. A running agent cannot pick up\n"
+            "a new one, so this is fatal rather than something to retry.\n\n"
+            "  1. Mint a replacement (the role must carry qa_workspace —\n"
+            "     admin, super_admin and user_qa do; user_dev gets 403):\n"
+            f"       curl -H \"Authorization: Bearer <your-jwt>\" \\\n"
+            f"            {self.api}/gateway/keys/me/qa-runner\n"
+            "     or use the Onboard tab in the Aura UI.\n\n"
+            "  2. Restart this agent with the new key:\n"
+            "       python -m src.qatest.agent --api <api> --key gw-… --name <machine>\n")
+
+
 class Client:
     """The three calls the runner makes. Thin on purpose."""
 
@@ -127,6 +158,8 @@ class Client:
         response = self._http.get("/api/qa/runner/next")
         if response.status_code == 204:
             return None
+        if response.status_code in (401, 403):
+            raise AuthRejected(str(self._http.base_url), response.status_code)
         response.raise_for_status()
         return response.json()
 
@@ -154,6 +187,8 @@ class Client:
             return {}
         try:
             response = self._http.post("/api/qa/runner/state", json=state)
+            if response.status_code in (401, 403):
+                raise AuthRejected(str(self._http.base_url), response.status_code)
             if response.status_code == 404:
                 self._state_supported = False
                 log.info("this Aura does not accept runner state — "
@@ -161,6 +196,10 @@ class Client:
                 return {}
             response.raise_for_status()
             return response.json() or {}
+        except AuthRejected:
+            # Deliberately NOT swallowed with everything else. This is the startup call,
+            # so it is the earliest point a bad key can be reported at all.
+            raise
         except Exception as exc:                              # noqa: BLE001
             log.debug("state report failed: %s", exc)
             return {}
@@ -246,12 +285,31 @@ def _reset_aws_clients() -> None:
     dynamo_client._resource = None
 
 
+def _apply_run_context(run_id: str, project_id: str) -> None:
+    """Publish which run this is, so anything it invokes can attribute its own spend.
+
+    The Aura gateway proxies opaque model traffic: a request from a test run is
+    indistinguishable from one typed into a chat box, so attribution has to be declared
+    by the caller through the X-Aura-Project-Id / X-Aura-Test-Run-Id headers
+    (routers/gateway.py). Putting the values in the environment means a subprocess or a
+    library picks them up without this module having to know it exists.
+
+    Nothing reads these yet, and that is correct: a run's plan comes from the knowledge
+    graph by design, so executing it costs no tokens at all. This is the pipe, laid
+    before the traffic — the alternative is discovering later that exploratory runs have
+    been spending into an untraceable pool.
+    """
+    os.environ["AURA_TEST_RUN_ID"] = run_id
+    os.environ["AURA_PROJECT_ID"] = project_id
+
+
 def run_one(client: Client, job: dict) -> str:
     """Execute one claimed run. Returns its final status."""
     from src.qatest.service import execute
 
     run_id, project_id = job["runId"], job["projectId"]
     _apply_credentials(job.get("credentials"))
+    _apply_run_context(run_id, project_id)
 
     last_beat = [0.0]
     tally = {"totalPassed": 0, "totalFailed": 0, "totalSkipped": 0,
@@ -522,8 +580,11 @@ def main(argv: list[str] | None = None) -> int:
 
     polls = 0
 
-    def report_state(busy: str = "") -> None:
-        """Send this machine's state and carry out anything the server asked for."""
+    def report_state_strict(busy: str = "") -> None:
+        """Send this machine's state and carry out anything the server asked for.
+
+        Lets AuthRejected out. Only the startup call wants that — see `report_state`.
+        """
         reply = client.report_state(
             _machine_state(busy, args.report_all_containers, allow_logs))
         for command in (reply or {}).get("commands") or []:
@@ -533,15 +594,36 @@ def main(argv: list[str] | None = None) -> int:
                                                   allow_logs),
                                  "commandResults": [_run_command(command, allow_logs)]})
 
-    report_state()          # once at startup, so the panel fills immediately
+    def report_state(busy: str = "") -> None:
+        """The in-loop form. A key revoked mid-life must not end the process here with
+        a traceback: `claim` runs at the top of every iteration and reports it properly.
+        """
+        try:
+            report_state_strict(busy)
+        except AuthRejected as rejected:
+            log.debug("state report rejected: %s", rejected)
+
+    # Once at startup, so the panel fills immediately — and so a rejected key is found
+    # here, before a single poll, rather than never.
+    try:
+        report_state_strict()
+    except AuthRejected as rejected:
+        print(rejected.advice(), file=sys.stderr)
+        return 3
 
     while True:
         polls += 1
         try:
             job = client.claim()
+        except AuthRejected as rejected:
+            # Terminal, unlike every other claim failure. Retrying a credential the
+            # server has already refused cannot succeed, and doing it quietly every few
+            # seconds is how a rotated key went unnoticed for four days.
+            print(rejected.advice(), file=sys.stderr)
+            return 3
         except Exception as exc:                              # noqa: BLE001
-            # Includes a revoked key (401) and the API being redeployed. Keep polling —
-            # the operator's fix is to restore the key, not to restart the agent.
+            # A redeploy, a dropped connection, a 5xx — all genuinely transient, and the
+            # runner should ride them out rather than needing a restart.
             log.warning("claim failed: %s", exc)
             job = None
 

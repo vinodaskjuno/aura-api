@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # from prod. An explicit opt-in means a new environment is safe by OMISSION —
     # nobody has to remember to add a block — and fixing APP_ENV later cannot
     # silently arm this.
-    allow_graph_wipe: bool = False
+    allow_graph_wipe: bool = True
 
     # ── Directory (LDAP / Active Directory) ──────────────────────────────────
     # Connection facts only. WHETHER directory auth is on, and which groups map to

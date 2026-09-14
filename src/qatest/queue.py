@@ -58,6 +58,17 @@ RUNNER_INDEX_ID = "runners:_index"
 #: than current. A sleeping laptop must not leave a panel claiming four are running.
 RUNNER_STALE_S = 90
 
+#: Row counting polls that failed to authenticate. A rejected poll carries no identity
+#: by definition — that is what rejected means — so it cannot be attributed to a runner
+#: row. But it can be COUNTED, and the count is the difference between "no runner is
+#: connected" and "a runner is connected and its key is being refused". Those look
+#: identical in the UI today, and telling them apart took four days of log archaeology.
+UNAUTHORIZED_ID = "runners:_unauthorized"
+
+#: How long a rejected poll stays interesting. Longer than the runner staleness window,
+#: because the point is to explain an ABSENT runner — the evidence has to outlive it.
+UNAUTHORIZED_WINDOW_S = 900
+
 QUEUED = "queued"
 CLAIMED = "claimed"
 RUNNING = "running"
@@ -71,8 +82,65 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _scope() -> str:
+    """Which deployment this queue row belongs to.
+
+    This table is addressed by name, not by endpoint, so every Aura process pointed at
+    the same AWS account shares one queue — and a developer running the API on their
+    laptop shares it with the deployed environment. That is not hypothetical: a run
+    queued from the dev UI was claimed by a localhost backend, executed against a
+    laptop's filesystem, and wrote its report into dev's S3. The reader saw a macOS path
+    in a browser pointed at AWS and had no way to explain it.
+
+    Derived from settings that already exist and already differ — `deployment_env` is
+    "local" on a laptop and "ecs" in every deployed task — so nothing new has to be
+    configured for the isolation to take effect.
+    """
+    try:
+        from src.config_settings import get_settings
+        s = get_settings()
+        return f"{s.deployment_env}/{s.app_env}"
+    except Exception:                                         # noqa: BLE001
+        # A scope that cannot be read must not silently become the empty string, which
+        # would match nothing and stall the queue in a way that looks like "no runner".
+        return "unknown/unknown"
+
+
 def _runner_key(runner: str) -> dict:
     return {"testRunId": f"runner:{runner}", "projectId": RUNNER_SK}
+
+
+def record_unauthorized(hint: str = "") -> None:
+    """Note that someone tried to poll with a credential this server refused.
+
+    Best-effort and deliberately cheap: it rides the rejection path, which an
+    unauthenticated caller controls the rate of, so it must never fail a request and
+    must never grow. One row, two attributes, last-write-wins.
+
+    `hint` is the key's last few characters when available — enough to tell two runners
+    apart when diagnosing, never enough to reconstruct the credential.
+    """
+    try:
+        db.update_item(TABLE, {"testRunId": UNAUTHORIZED_ID, "projectId": RUNNER_SK},
+                       {"type": RUNNER_KIND, "runner": UNAUTHORIZED_ID,
+                        "lastUnauthorizedAt": _now(),
+                        "lastUnauthorizedHint": str(hint or "")[:8]})
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("QA queue: could not record an unauthorized poll: %s", exc)
+
+
+def unauthorized_recently(window_s: int = UNAUTHORIZED_WINDOW_S) -> dict:
+    """Whether a refused poll happened recently, for the UI to explain an absent runner."""
+    try:
+        row = db.get_item(TABLE, {"testRunId": UNAUTHORIZED_ID,
+                                  "projectId": RUNNER_SK}) or {}
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("QA queue: could not read the unauthorized marker: %s", exc)
+        return {}
+    at = str(row.get("lastUnauthorizedAt") or "")
+    if not at or _age_seconds(at) > window_s:
+        return {}
+    return {"at": at, "hint": str(row.get("lastUnauthorizedHint") or "")}
 
 
 def _age_seconds(stamp: str) -> float:
@@ -98,6 +166,8 @@ def enqueue(project_id: str, app_url: str = "", ran_by: str = "",
         "testRunId": run_id or new_run_id(),
         "projectId": project_id,
         "type": KIND,
+        # Only a runner reached through THIS deployment may claim it. See `_scope`.
+        "scope": _scope(),
         "status": QUEUED,
         "appUrl": app_url,
         "userId": ran_by,
@@ -224,6 +294,12 @@ def claim(runner: str, identity: dict | None = None) -> dict | None:
     The machine and owner are STAMPED on the run row, not looked up later against the
     runner list: a finished or abandoned run has to keep saying where it executed long
     after that machine has gone offline and aged out of the index.
+
+    Scoped to this deployment. A row carrying a different scope — or none, which means it
+    predates scoping — is left alone rather than claimed. There is deliberately no
+    `scope.not_exists()` fallback: that is precisely the cross-environment claim this
+    exists to prevent. Pre-existing queued rows are retired by `reap` within its window
+    instead, which is minutes for a queue whose runs last seconds.
     """
     try:
         # FILTERED, not sliced. `test-results` holds every run this deployment has ever
@@ -233,7 +309,9 @@ def claim(runner: str, identity: dict | None = None) -> dict | None:
         # limit counts rows that MATCH, so filtering server-side makes the budget mean
         # what it says and reads less.
         rows = db.scan_items(
-            TABLE, filter_expr=Attr("type").eq(KIND) & Attr("status").eq(QUEUED),
+            TABLE,
+            filter_expr=(Attr("type").eq(KIND) & Attr("status").eq(QUEUED)
+                         & Attr("scope").eq(_scope())),
             limit=200) or []
     except Exception as exc:                                  # noqa: BLE001
         log.warning("QA queue: scan failed while claiming: %s", exc)

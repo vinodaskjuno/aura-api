@@ -13,6 +13,8 @@ forever unless something reaps it.
 """
 from __future__ import annotations
 
+import itertools
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -198,11 +200,39 @@ def test_capabilities_still_true_locally_with_no_runner(fake_dynamo, monkeypatch
 
 def test_post_runs_returns_202_without_executing(fake_dynamo):
     """202, not 200: nothing has run yet. Returning 200 with a report shape would
-    invite the UI to treat a queued run as finished."""
+    invite the UI to treat a queued run as finished.
+
+    An app_url is supplied because without one the run needs a working copy this test
+    server does not have, and the endpoint now refuses that case up front."""
     _as(QA)
-    res = client.post(f"{BASE}/runs", json={"project_id": "p1", "app_url": ""})
+    res = client.post(f"{BASE}/runs",
+                      json={"project_id": "p1", "app_url": "http://localhost:3000"})
     assert res.status_code == 202
     assert res.json()["status"] == queue.QUEUED
+
+
+def test_a_run_that_cannot_find_code_is_refused_at_the_button(fake_dynamo):
+    """It used to be accepted, queued, claimed, and fail on the runner minutes later
+    quoting a filesystem path from a machine the reader has never seen. The condition is
+    knowable here: no app_url means the runner needs the copy this server ships, and
+    this server has none."""
+    _as(QA)
+    res = client.post(f"{BASE}/runs", json={"project_id": "p1", "app_url": ""})
+
+    assert res.status_code == 409
+    detail = res.json()["detail"]
+    assert "No working copy found" in detail
+    # The paths that were checked, so the reader can act rather than guess.
+    assert "Looked in:" in detail
+
+
+def test_an_app_url_makes_the_working_copy_unnecessary(fake_dynamo):
+    """Pointing a run at something already serving needs no code on this machine at
+    all, so the guard must not fire."""
+    _as(QA)
+    res = client.post(f"{BASE}/runs",
+                      json={"project_id": "p1", "app_url": "https://staging.example.com"})
+    assert res.status_code == 202
 
 
 def test_active_runs_have_their_own_endpoint(fake_dynamo):
@@ -982,3 +1012,139 @@ def test_a_runner_is_still_found_on_a_busy_table(fake_dynamo):
         if r.get("testRunId") != queue.RUNNER_INDEX_ID]
 
     assert [r["name"] for r in queue.online_runners()] == ["laptop"]
+
+
+# ── Queue scoping: local development must not claim a deployed run ────────────
+#
+# The queue is a DynamoDB table addressed by NAME, so every Aura process pointed at one
+# AWS account shares it. A developer running the API on their laptop therefore shared
+# dev's queue: a run started from the dev UI was claimed by localhost, executed against
+# a laptop filesystem, and wrote its report into dev's S3 — so the browser showed a
+# macOS path it could not possibly explain.
+
+def test_a_run_is_stamped_with_the_scope_that_queued_it(fake_dynamo):
+    row = queue.enqueue("p1")
+    assert row["scope"] == queue._scope()
+
+
+def test_another_environment_cannot_claim_this_environments_run(fake_dynamo, monkeypatch):
+    """The whole point. A localhost backend polling the shared table must leave a
+    deployed environment's work alone."""
+    # Queued by a deployed environment...
+    monkeypatch.setattr(queue, "_scope", lambda: "ecs/prod")
+    queue.enqueue("p1", run_id="dev-run")
+
+    # ...and polled for by a laptop sharing the same table.
+    monkeypatch.setattr(queue, "_scope", lambda: "local/development")
+    assert queue.claim("laptop") is None, "a foreign scope claimed the run"
+
+    # Still there, untouched, for its own environment to pick up.
+    monkeypatch.setattr(queue, "_scope", lambda: "ecs/prod")
+    won = queue.claim("dev-runner")
+    assert won and won["testRunId"] == "dev-run"
+
+
+def test_a_run_with_no_scope_is_never_claimed(fake_dynamo):
+    """Rows predating scoping. Matching `scope.not_exists()` would reinstate exactly the
+    cross-environment claim this prevents, so they are left for the reaper instead."""
+    from src.database import dynamo_client as db
+
+    db.put_item(queue.TABLE, {"testRunId": "legacy", "projectId": "p1",
+                              "type": queue.KIND, "status": queue.QUEUED,
+                              "createdAt": "2026-01-01T00:00:00+00:00"})
+    assert queue.claim("laptop") is None
+
+
+# ── A refused poll is anonymous, but it is not invisible ─────────────────────
+
+def test_a_rejected_poll_is_counted_so_the_ui_can_explain_it(fake_dynamo, monkeypatch):
+    """"No runner connected" and "a runner is connected and its key is refused" looked
+    identical for four days. A rejected poll carries no identity, so the only thing that
+    can be recorded is that one happened."""
+    from fastapi import HTTPException
+    from src.routers import qa as qa_router
+
+    monkeypatch.setattr(qa_router, "_runner_identity",
+                        qa_router._runner_identity)  # the real one
+    monkeypatch.setattr("src.services.gateway_service.resolve_credential",
+                        lambda _t: (_ for _ in ()).throw(HTTPException(401, "revoked")))
+    monkeypatch.setattr("src.services.gateway_service.extract_credential",
+                        lambda _r: "gw-dead-key")
+
+    res = client.get(f"{BASE}/runner/next")
+    assert res.status_code == 401
+
+    seen = queue.unauthorized_recently()
+    assert seen, "a refused poll left no trace"
+    # Enough to tell two runners apart, never enough to rebuild the credential.
+    assert seen["hint"] == "-key"
+
+
+def test_an_old_rejection_stops_being_reported(fake_dynamo):
+    """The banner explains an absent runner NOW. A rejection from last week would leave
+    it accusing a key that has since been fixed."""
+    from src.database import dynamo_client as db
+
+    db.put_item(queue.TABLE, {"testRunId": queue.UNAUTHORIZED_ID,
+                              "projectId": queue.RUNNER_SK,
+                              "type": queue.RUNNER_KIND, "runner": queue.UNAUTHORIZED_ID,
+                              "lastUnauthorizedAt": "2026-01-01T00:00:00+00:00"})
+    assert queue.unauthorized_recently() == {}
+
+
+# ── Cost attribution ─────────────────────────────────────────────────────────
+#
+# A QA run spends nothing today: the plan comes from the knowledge graph by design and
+# execution is Playwright plus HTTP. These pin the PIPE — that a run's spend would be
+# attributable the moment something in a run calls a model — and that the honest answer
+# meanwhile is "no calls", not "$0.00".
+
+_usage_seq = itertools.count()
+
+
+def _usage_row(run_id: str, project_id: str = "p1", **over):
+    """One usage row. The sort key must be unique — it is `<timestamp>#<id>` in
+    production, and reusing it here would silently overwrite instead of appending."""
+    from src.database import dynamo_client as db
+    row = {"userId": "u1",
+           "sortKey": f"2026-09-14T10:00:0{next(_usage_seq)}#{run_id}",
+           "projectId": project_id, "testRunId": run_id,
+           "model": "claude-sonnet-5", "inputTokens": 100, "outputTokens": 50,
+           "cacheReadTokens": 0, "cacheCreationTokens": 0,
+           "cost": "0.001050", "timestamp": "2026-09-14T10:00:00", "source": "gateway"}
+    row.update(over)
+    db.put_item("token-usage", row)
+    return row
+
+
+def test_a_run_that_called_no_model_says_so_rather_than_zero(fake_dynamo):
+    _as(QA)
+    res = client.get(f"{BASE}/runs/run-x/cost", params={"projectId": "p1"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["calls"] == 0 and body["totalTokens"] == 0
+    assert body["byModel"] == []
+
+
+def test_run_cost_sums_only_that_runs_rows(fake_dynamo):
+    """Attribution is the point. Another run's spend in the same project must not be
+    folded in."""
+    _usage_row("run-a")
+    _usage_row("run-a", inputTokens=200, outputTokens=100, cost="0.002100")
+    _usage_row("run-b", inputTokens=999, outputTokens=999, cost="9.999999")
+
+    _as(QA)
+    body = client.get(f"{BASE}/runs/run-a/cost", params={"projectId": "p1"}).json()
+
+    assert body["calls"] == 2
+    assert body["inputTokens"] == 300 and body["outputTokens"] == 150
+    assert body["costUsd"] == pytest.approx(0.00315)
+    assert [m["model"] for m in body["byModel"]] == ["claude-sonnet-5"]
+
+
+def test_recorded_cost_is_used_rather_than_recomputed(fake_dynamo):
+    """Prices change. Re-pricing an old row would quietly restate history."""
+    _usage_row("run-c", cost="0.777000")
+    _as(QA)
+    body = client.get(f"{BASE}/runs/run-c/cost", params={"projectId": "p1"}).json()
+    assert body["costUsd"] == pytest.approx(0.777)
