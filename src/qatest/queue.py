@@ -136,7 +136,39 @@ def list_for_project(project_id: str, limit: int = 200) -> list[dict]:
     return sorted(rows, key=lambda r: str(r.get("createdAt", "")), reverse=True)
 
 
-def touch_runner(runner: str) -> None:
+#: Who a runner belongs to and what its operator calls the machine. Derived by the API
+#: from the gateway key and the request headers — NEVER from the agent's JSON body, which
+#: is why these are kept apart from `_STATE_FIELDS`.
+_IDENTITY_FIELDS = ("owner", "ownerId", "machine")
+
+
+def _identity_updates(identity: dict | None) -> dict:
+    """The identity attributes worth writing, empty when there is nothing to say.
+
+    An absent or blank value is omitted rather than written as "": these ride on calls
+    that fire every few seconds, and writing an empty machine name over a good one would
+    make the label flicker for readers polling at the same time.
+    """
+    return {k: str(identity.get(k) or "")
+            for k in _IDENTITY_FIELDS if (identity or {}).get(k)}
+
+
+def _run_identity_updates(identity: dict | None) -> dict:
+    """The same provenance, spelled for a RUN row rather than a runner row.
+
+    Prefixed, because a run row already has an `owner`-shaped concept of its own — the
+    `userId` of whoever queued it — and that is a different person from whoever's laptop
+    ended up executing it.
+    """
+    out = {}
+    if (identity or {}).get("machine"):
+        out["runnerMachine"] = str(identity["machine"])
+    if (identity or {}).get("owner"):
+        out["runnerOwner"] = str(identity["owner"])
+    return out
+
+
+def touch_runner(runner: str, identity: dict | None = None) -> None:
     """Record that `runner` is alive, right now.
 
     Called on every poll, including the ones that find nothing to do — and that is the
@@ -145,6 +177,10 @@ def touch_runner(runner: str) -> None:
     so the button stayed disabled, so nothing was ever queued, so it never claimed.
 
     Polling IS the liveness signal, because polling is what the runner actually does.
+
+    The identity is written here rather than in `record_runner_state` because this call
+    is the one every runner makes — a protocol-1 agent never reports state at all, and
+    would otherwise stay unlabelled forever.
     """
     if not runner:
         return
@@ -158,6 +194,7 @@ def touch_runner(runner: str) -> None:
             "type": RUNNER_KIND,
             "runner": runner,
             "updatedAt": _now(),
+            **_identity_updates(identity),
         })
     except Exception as exc:                                  # noqa: BLE001
         # Never fail a poll over this. The worst case is a button that looks disabled.
@@ -176,13 +213,17 @@ def online_runners(stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
             for r in list_runner_state(stale_after_s) if r["online"] and r["name"]]
 
 
-def claim(runner: str) -> dict | None:
+def claim(runner: str, identity: dict | None = None) -> dict | None:
     """Take the oldest queued run, or None.
 
     The claim is a CONDITIONAL write on `status == "queued"`. A read-then-write would
     race: two runners polling a few hundred milliseconds apart would both see the row as
     queued and both execute the same run, doubling the podman containers on fixed host
     ports and writing two sets of evidence over each other.
+
+    The machine and owner are STAMPED on the run row, not looked up later against the
+    runner list: a finished or abandoned run has to keep saying where it executed long
+    after that machine has gone offline and aged out of the index.
     """
     try:
         # FILTERED, not sliced. `test-results` holds every run this deployment has ever
@@ -207,6 +248,7 @@ def claim(runner: str) -> dict | None:
             "runner": runner,
             "claimedAt": _now(),
             "updatedAt": _now(),
+            **_run_identity_updates(identity),
         }, expect={"status": QUEUED})
         if won:
             log.info("QA queue: %s claimed %s", runner, row["testRunId"])
@@ -216,7 +258,8 @@ def claim(runner: str) -> dict | None:
 
 
 def heartbeat(run_id: str, project_id: str, phase: str = "",
-              runner: str = "", counts: dict | None = None) -> dict | None:
+              runner: str = "", counts: dict | None = None,
+              identity: dict | None = None) -> dict | None:
     """Mark progress. Also what keeps `reap` from declaring the run dead.
 
     `counts` carries pass/fail/skip AS THEY HAPPEN. Without them a running remote run
@@ -228,6 +271,10 @@ def heartbeat(run_id: str, project_id: str, phase: str = "",
         updates["phase"] = phase
     if runner:
         updates["runner"] = runner
+    # Re-stamped on every beat as well as at claim time. A run already in flight when
+    # this shipped was claimed by the old code path and carries no machine, so without
+    # this it would stay anonymous for its whole life.
+    updates.update(_run_identity_updates(identity))
     # Applied only when the runner actually knows the plan size. The body model has
     # zero defaults for all four fields, so a heartbeat that carries no real counts
     # would otherwise OVERWRITE good ones with zeros — a progress bar that walks
@@ -507,7 +554,8 @@ def _clean_setup(setup) -> dict | None:
             "log": log}
 
 
-def record_runner_state(runner: str, state: dict) -> dict:
+def record_runner_state(runner: str, state: dict,
+                        identity: dict | None = None) -> dict:
     """Store what a runner just said about itself. Returns any pending command.
 
     Writes the per-runner row AND the aggregate index entry. The index is what makes a
@@ -530,6 +578,9 @@ def record_runner_state(runner: str, state: dict) -> dict:
         "containers": containers,
         "containersAt": _now(),
         "updatedAt": _now(),
+        # Applied AFTER the whitelisted body fields, so a runner cannot claim to be
+        # owned by someone else by putting `owner` in its own state report.
+        **_identity_updates(identity),
     })
     try:
         db.update_item(TABLE, _runner_key(runner), payload)
@@ -559,6 +610,9 @@ def _index_runner(runner: str, payload: dict) -> None:
                             # readers go through the index, so anything missing here is
                             # invisible in the UI even though it was reported correctly.
                             "os": payload.get("os") or "",
+                            "owner": payload.get("owner") or "",
+                            "ownerId": payload.get("ownerId") or "",
+                            "machine": payload.get("machine") or "",
                             "health": payload.get("health") or {},
                             "setup": payload.get("setup") or {},
                             "podmanVersion": payload.get("podmanVersion") or "",
@@ -627,6 +681,12 @@ def list_runner_state(stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
             "podmanVersion": row.get("podmanVersion", ""),
             "browserVersion": row.get("browserVersion", ""),
             "os": row.get("os", ""),
+            # Who this machine belongs to and what they call it. Absent until the
+            # runner's first state report after an upgrade, so every reader falls back
+            # to `name`.
+            "owner": row.get("owner", ""),
+            "ownerId": row.get("ownerId", ""),
+            "machine": row.get("machine", ""),
             "busyRunId": row.get("busyRunId", ""),
             "protocol": int(row.get("protocol") or 1),
             # protocol 1 agents never report state, so an empty container list from
@@ -667,6 +727,8 @@ def progress(run_id: str, project_id: str) -> dict | None:
         # guess.
         "reason": row.get("reason", ""),
         "runner": row.get("runner", ""),
+        "runnerMachine": row.get("runnerMachine", ""),
+        "runnerOwner": row.get("runnerOwner", ""),
         "totalPassed": int(row.get("totalPassed") or 0),
         "totalFailed": int(row.get("totalFailed") or 0),
         "totalSkipped": int(row.get("totalSkipped") or 0),

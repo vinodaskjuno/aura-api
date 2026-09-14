@@ -24,6 +24,8 @@ QA = {"userId": "u-qa", "username": "qa", "role": "user_qa",
       "permissions": ROLE_PERMISSIONS["user_qa"]}
 BASE = "/api/qa"
 RUNNER = "qa/qa-runner"
+#: What the API derives from the gateway key and the agent's own headers.
+IDENTITY = {"owner": "qa", "ownerId": "u1", "machine": "my-laptop"}
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +34,9 @@ def _auth_and_runner(monkeypatch):
     app.dependency_overrides[get_current_user] = lambda: QA
     # The runner authenticates with a gateway key rather than a JWT, so the identity
     # helper is what has to be stubbed — it is called directly, not via Depends.
-    monkeypatch.setattr(qa_router, "_runner_identity", lambda _request: RUNNER)
+    # It returns the label AND who owns the machine, both server-derived.
+    monkeypatch.setattr(qa_router, "_runner_identity",
+                        lambda _request: (RUNNER, dict(IDENTITY)))
     yield
     if previous is None:
         app.dependency_overrides.pop(get_current_user, None)
@@ -106,7 +110,10 @@ def test_a_quiet_runner_is_stale_and_its_containers_are_last_known(fake_dynamo):
 
 def test_two_runners_are_independent(fake_dynamo, monkeypatch):
     client.post(f"{BASE}/runner/state", json=_state())
-    monkeypatch.setattr(qa_router, "_runner_identity", lambda _r: "other/qa-runner")
+    monkeypatch.setattr(qa_router, "_runner_identity",
+                        lambda _r: ("other/qa-runner",
+                                    {"owner": "other", "ownerId": "u2",
+                                     "machine": "build-box"}))
     client.post(f"{BASE}/runner/state", json=_state(podman=False, containers=[]))
 
     names = {r["name"]: r for r in client.get(f"{BASE}/runners").json()["runners"]}
@@ -650,3 +657,84 @@ def test_a_cancelled_run_no_longer_blocks_deleting_its_project(fake_dynamo):
 
     client.post(f"{BASE}/runs/{row['testRunId']}/cancel", params={"projectId": "p1"})
     assert _busy_blockers("p1", {"status": "analyzed"}) == []
+
+
+# ── Whose machine, and what they call it ────────────────────────────────────
+#
+# The panel's whole job is to say that Floci is running on a LOCAL machine. It could
+# not: the agent's own name for its machine was sent on every request and discarded by
+# the server, and the owner was buried inside the `username/tool_label` label. These pin
+# both, and pin that neither can be forged by the runner.
+
+def test_the_machine_name_reaches_the_panel(fake_dynamo):
+    """The one field that lets the UI say "my-laptop" instead of "qa/qa-runner"."""
+    client.post(f"{BASE}/runner/state", json=_state())
+
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["machine"] == "my-laptop"
+    assert me["owner"] == "qa"
+    assert me["ownerId"] == "u1"
+
+
+def test_the_viewer_is_named_so_the_ui_can_say_your_machine(fake_dynamo):
+    """Ownership is decided from one server-stated fact, not inferred in the browser."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    assert client.get(f"{BASE}/runners").json()["you"] == "qa"
+
+
+def test_a_runner_cannot_claim_to_be_owned_by_someone_else(fake_dynamo):
+    """`owner` is derived from the gateway key. A runner putting it in its own state
+    report must not be able to relabel itself as another user's machine — the panel is
+    shared, and "your machine" has to mean something."""
+    client.post(f"{BASE}/runner/state",
+                json=_state(owner="admin", ownerId="u-admin", machine="not-mine"))
+
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["owner"] == "qa"
+    assert me["ownerId"] == "u1"
+    # The machine name IS runner-authored, but it arrives in a header the API sanitises
+    # rather than in the body, so the body value is ignored here too.
+    assert me["machine"] == "my-laptop"
+
+
+def test_a_polling_runner_is_labelled_before_it_ever_reports_state(fake_dynamo):
+    """A protocol-1 agent never calls /runner/state at all, so labelling only there
+    would leave it permanently anonymous."""
+    queue.touch_runner(RUNNER, IDENTITY)
+
+    row = queue.runner_state(RUNNER)
+    assert row["machine"] == "my-laptop"
+    assert row["owner"] == "qa"
+
+
+def test_a_blank_machine_name_never_overwrites_a_good_one(fake_dynamo):
+    """These attributes ride on a call that fires every few seconds. Writing "" over a
+    real name would make the label flicker for anyone polling at the same moment."""
+    queue.touch_runner(RUNNER, IDENTITY)
+    queue.touch_runner(RUNNER, {"owner": "qa", "ownerId": "u1", "machine": ""})
+
+    assert queue.runner_state(RUNNER)["machine"] == "my-laptop"
+
+
+def test_the_machine_name_is_stripped_and_capped(fake_dynamo, monkeypatch):
+    """It is written by whoever holds the gateway key and rendered in front of every
+    other user of the deployment, so it is sanitised rather than trusted."""
+    from starlette.datastructures import Headers
+
+    class _Req:
+        headers = Headers({"X-Aura-Runner-Name": "bad\x07\x00name" + "x" * 200})
+
+    assert qa_router._machine_name(_Req()) == "badname" + "x" * (
+        qa_router._MACHINE_MAX - len("bad\x07\x00name"))
+    assert len(qa_router._machine_name(_Req())) <= qa_router._MACHINE_MAX
+
+
+def test_a_run_records_the_machine_it_executed_on(fake_dynamo):
+    """Stamped on the run row rather than joined against the runner list: a finished run
+    has to keep saying where it ran long after that laptop went offline."""
+    queue.enqueue("proj-1", ran_by="u-qa", run_id="run-loc")
+    assert queue.claim(RUNNER, IDENTITY)
+
+    live = queue.progress("run-loc", "proj-1")
+    assert live["runnerMachine"] == "my-laptop"
+    assert live["runnerOwner"] == "qa"

@@ -391,12 +391,35 @@ class FinishRequest(BaseModel):
     report: dict
 
 
-def _runner_identity(request: Request) -> str:
-    """Authenticate a runner by gateway key and return a label for it.
+#: A hostname is 253 characters at the outside and a display label wants far less.
+_MACHINE_MAX = 64
+
+
+def _machine_name(request: Request) -> str:
+    """The runner's own name for its machine, as the agent reports it.
+
+    The agent has always sent this and the server has always discarded it, so the only
+    name any screen could show was the synthetic `username/tool_label` identity — which
+    is not what anyone calls their laptop.
+
+    Sanitised rather than trusted: it is written by whoever holds the gateway key and is
+    rendered in front of every other user of the deployment.
+    """
+    raw = str(request.headers.get("X-Aura-Runner-Name") or "")[:_MACHINE_MAX]
+    return "".join(ch for ch in raw if ch >= " " and ch != "\x7f").strip()
+
+
+def _runner_identity(request: Request) -> tuple[str, dict]:
+    """Authenticate a runner by gateway key. Returns its label and who owns it.
 
     Reuses the same credential path as the model gateway and the OTLP receiver, so a key
     means the same thing everywhere and there is one place to revoke it. Both helpers
     RAISE HTTPException(401) rather than returning falsy.
+
+    The label stays `username/tool_label`: it is the partition key of the runner's row,
+    so changing its shape would orphan every runner record in the table. The owner and
+    the machine name come back BESIDE it, structured, rather than being recovered later
+    by splitting the label on its slash.
     """
     from src.services.gateway_service import extract_credential, resolve_credential
 
@@ -404,7 +427,10 @@ def _runner_identity(request: Request) -> str:
     if "qa_workspace" not in (user.permissions or []):
         raise HTTPException(status_code=403,
                             detail="this key's role lacks qa_workspace")
-    return f"{user.username}/{getattr(user, 'tool_label', '') or 'qa-runner'}"
+    label = f"{user.username}/{getattr(user, 'tool_label', '') or 'qa-runner'}"
+    return label, {"owner": user.username,
+                   "ownerId": user.user_id,
+                   "machine": _machine_name(request)}
 
 
 @router.post("/runs", status_code=202)
@@ -523,14 +549,14 @@ def post_runner_state(body: dict = Body(...), request: Request = None):  # noqa:
     """
     from src.qatest import queue
 
-    runner = _runner_identity(request)
+    runner, identity = _runner_identity(request)
 
     # Results first: the runner may be handing back the output of the command it was
     # given last time.
     for result in (body.get("commandResults") or [])[:4]:
         _store_command_result(runner, result)
 
-    queue.record_runner_state(runner, body)
+    queue.record_runner_state(runner, body, identity)
     command = queue.take_command(runner)
     return {"ok": True,
             "pollSeconds": 15,
@@ -565,15 +591,21 @@ def _store_command_result(runner: str, result: dict) -> None:
 
 
 @router.get("/runners")
-def list_runners(_: dict = Depends(require_permission("qa_workspace"))):
+def list_runners(user: dict = Depends(require_permission("qa_workspace"))):
     """Every known runner, with the Floci containers it last reported.
 
     `stale` is the field that matters: a sleeping laptop must not leave a panel
     claiming four emulators are running.
+
+    EVERY runner, not just this user's. The queue has no affinity — a teammate's machine
+    claiming your run is normal — so hiding theirs would leave the reader unable to
+    explain where their own run went. `you` is returned instead, so the UI can say whose
+    machine it is from one server-stated fact rather than inferring it.
     """
     from src.qatest import emulators, queue
 
     return {"runners": queue.list_runner_state(),
+            "you": user.get("username", ""),
             "staleAfterSeconds": queue.RUNNER_STALE_S,
             "clouds": [{"name": c.name, "port": c.port, "image": c.image}
                        for c in emulators.CLOUDS]}
@@ -656,13 +688,17 @@ def runner_next(request: Request):
     from src.qatest import (appserver, credentials, emulators, plan, queue,
                             workspace)
 
-    runner = _runner_identity(request)
+    runner, identity = _runner_identity(request)
     # Before claiming, and unconditionally: a poll that finds nothing is still proof
     # that this runner is alive, and it is the ONLY proof available before it has ever
     # picked up work.
-    queue.touch_runner(runner)
+    #
+    # The identity rides along because this is the call EVERY runner makes every few
+    # seconds, including a protocol-1 agent that never reports state — so labelling here
+    # is the only placement that covers all of them.
+    queue.touch_runner(runner, identity)
 
-    row = queue.claim(runner)
+    row = queue.claim(runner, identity)
     if not row:
         return Response(status_code=204)
 
@@ -726,8 +762,9 @@ def runner_heartbeat(run_id: str, request: Request, projectId: str = Query(...),
     """
     from src.qatest import queue
 
-    runner = _runner_identity(request)
-    queue.heartbeat(run_id, projectId, phase or body.phase, runner, body.model_dump())
+    runner, identity = _runner_identity(request)
+    queue.heartbeat(run_id, projectId, phase or body.phase, runner, body.model_dump(),
+                    identity)
     return {"ok": True}
 
 
@@ -743,7 +780,7 @@ def runner_finish(run_id: str, body: FinishRequest, request: Request,
     from src.qatest import evidence, graph_writeback, queue
     from src.qatest.types import Report
 
-    _runner_identity(request)
+    _runner_identity(request)          # authenticate; the run row is already labelled
     report = body.report or {}
     queue.finish(run_id, projectId, report)
 
@@ -853,6 +890,10 @@ def list_active_runs(project_id: str,
         "status": r.get("status"),
         "phase": r.get("phase", ""),
         "runner": r.get("runner", ""),
+        # Where this is actually executing. Stamped on the row at claim time, so it
+        # survives the machine going offline mid-run.
+        "runnerMachine": r.get("runnerMachine", ""),
+        "runnerOwner": r.get("runnerOwner", ""),
         "appUrl": r.get("appUrl", ""),
         "createdAt": r.get("createdAt", ""),
         "updatedAt": r.get("updatedAt", ""),
