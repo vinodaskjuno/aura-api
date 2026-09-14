@@ -449,6 +449,13 @@ def _runner_identity(request: Request) -> tuple[str, dict]:
                    "machine": _machine_name(request)}
 
 
+def service_no_working_copy(project_id: str, checked: list) -> str:
+    """The one explanation of a missing working copy, shared by every caller."""
+    from src.qatest import service
+
+    return service._no_working_copy(project_id, checked)
+
+
 def _no_workspace_detail(project_id: str) -> str:
     """Why a run cannot start, phrased for whoever pressed the button.
 
@@ -574,6 +581,46 @@ def get_plan_preview(project_id: str, refresh: bool = Query(False),
     from src.qatest import plan
 
     return plan.preview(project_id, refresh=refresh)
+
+
+@router.get("/projects/{project_id}/policy")
+def get_project_policy(project_id: str,
+                       _: dict = Depends(require_permission("qa_workspace"))):
+    """NIST controls over this project's IaC, evaluated right now.
+
+    Answered HERE rather than by the runner, and that is the whole point: these checks
+    read files, and this server already has the working copy on its workspace volume. So
+    unlike everything else on the DevMate screen there is no parked command, no poll and
+    no podman — it is a synchronous read that works whether or not anyone has a runner.
+
+    Reports `applicable: false` rather than "0 of 0 passing" when a project ships no IaC.
+    A project that was never assessed and a project that passed everything are different
+    facts, and only one of them is reassuring.
+    """
+    from src.qatest import appserver, policy
+
+    root, checked = appserver.locate(project_id)
+    if root is None:
+        raise HTTPException(
+            status_code=409,
+            detail=service_no_working_copy(project_id, checked))
+
+    checks = policy.plan_checks(root)
+    if not checks:
+        return {"applicable": False, "controls": [], "passed": 0, "total": 0,
+                "reason": "This project declares no infrastructure-as-code, so there is "
+                          "nothing for these controls to read."}
+
+    controls = []
+    for check in checks:
+        ok, detail = policy.run_check(root, check)
+        controls.append({"id": check.check_id, "name": check.name,
+                         "file": check.rel_path, "control": check.validator,
+                         "passed": ok, "detail": detail})
+    return {"applicable": True,
+            "controls": controls,
+            "passed": sum(1 for c in controls if c["passed"]),
+            "total": len(controls)}
 
 
 @router.get("/projects/{project_id}/coverage")

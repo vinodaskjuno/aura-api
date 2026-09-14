@@ -107,7 +107,20 @@ def _scope() -> str:
 
 
 def _runner_key(runner: str) -> dict:
-    return {"testRunId": f"runner:{runner}", "projectId": RUNNER_SK}
+    """The row holding one runner's liveness — scoped to the deployment it polls.
+
+    WITHOUT the scope this key is identical across environments, because a runner is
+    named `<username>/<toolLabel>` and the same person has the same name everywhere. Two
+    Auras sharing an AWS account therefore wrote the SAME row: a laptop agent polling
+    localhost kept a row that made the deployed environment report a runner it does not
+    have, so `canRun` stayed true, the Start button stayed enabled, and the run it queued
+    sat waiting for a machine that was never listening to it. Observed on dev: a run
+    queued for 884 seconds while the panel showed a healthy runner.
+
+    Scoping the KEY rather than filtering on read, because the two environments were also
+    overwriting each other's podman state, not merely reading it.
+    """
+    return {"testRunId": f"runner:{_scope()}:{runner}", "projectId": RUNNER_SK}
 
 
 def record_unauthorized(hint: str = "") -> None:
@@ -713,8 +726,14 @@ def _index_runner(runner: str, payload: dict) -> None:
 
 
 def _index_attr(runner: str) -> str:
-    """Attribute name for a runner inside the index row."""
-    return f"r_{runner}"
+    """Attribute name for a runner inside the index row.
+
+    Scoped for the same reason as `_runner_key`: the index is ONE shared row with an
+    attribute per runner, so an unscoped name let one environment's entry overwrite the
+    other's — and `list_runner_state` reads the index first, so that is the copy the UI
+    actually shows.
+    """
+    return f"r_{_scope()}:{runner}"
 
 
 def runner_state(runner: str) -> dict | None:
@@ -737,16 +756,20 @@ def list_runner_state(stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
     try:
         index = db.get_item(TABLE, {"testRunId": RUNNER_INDEX_ID,
                                     "projectId": RUNNER_SK}) or {}
+        prefix = f"r_{_scope()}:"
         rows = [v for k, v in index.items()
-                if k.startswith("r_") and isinstance(v, dict) and v.get("runner")]
+                if k.startswith(prefix) and isinstance(v, dict) and v.get("runner")]
     except Exception as exc:                                  # noqa: BLE001
         log.debug("QA queue: runner index unreadable: %s", exc)
 
     if not rows:
         try:
+            # Same scope filter as the index path above — a fallback that answered
+            # differently would make the bug reappear whenever the index was cold.
             rows = [r for r in db.scan_items(
                         TABLE, filter_expr=Attr("type").eq(RUNNER_KIND), limit=500)
-                    if r.get("runner") and r.get("testRunId") != RUNNER_INDEX_ID]
+                    if r.get("runner") and r.get("testRunId") != RUNNER_INDEX_ID
+                    and str(r.get("testRunId", "")).startswith(f"runner:{_scope()}:")]
         except Exception as exc:                              # noqa: BLE001
             log.warning("QA queue: could not list runners: %s", exc)
             return []

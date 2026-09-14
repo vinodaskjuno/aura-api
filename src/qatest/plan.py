@@ -21,7 +21,8 @@ from src.qatest.types import Case
 # Cases the user did not select are still PLANNED — they are simply not run. Keeping
 # the distinction is what lets coverage say "not covered because you excluded it"
 # rather than blaming the application.
-ALL_KINDS: tuple[str, ...] = ("ui", "api", "smoke", "structure", "stack")
+ALL_KINDS: tuple[str, ...] = ("ui", "api", "smoke", "structure", "stack",
+                              "policy")
 
 # The application-root case survives every filter. It is the only case a frontend can
 # be tested by (code analysis extracts server-side route tables; a React SPA has none),
@@ -50,7 +51,7 @@ def why_unrunnable(case: Case) -> str:
     `_PARAM` regex. The plan is what the preview shows the user, so the plan is the
     authority and the runner now reads this field.
     """
-    if case.kind in ("structure", "stack"):
+    if case.kind in ("structure", "stack", "policy"):
         # A file check needs nothing started; a stack check needs the stack, which the
         # runner starts for it. Neither is ever "planned but unrunnable".
         return ""
@@ -129,6 +130,21 @@ def structure_cases(root) -> list[Case]:
             # ships, and adding one to Case is a wire break for older agents.
             method=check.validator))
     return out
+
+
+def policy_cases(root) -> list[Case]:
+    """NIST controls over this project's IaC, as cases.
+
+    Same shape as `structure_cases`, including carrying the validator name in `method`:
+    `Case` has no spare structured field and adding one is a wire break for every
+    deployed runner.
+    """
+    from src.qatest import policy
+
+    return [Case(case_id=check.check_id, kind="policy", name=check.name,
+                 path=check.rel_path, source_file=check.rel_path,
+                 method=check.validator)
+            for check in policy.plan_checks(root)]
 
 
 def stack_cases(root) -> list[Case]:
@@ -211,6 +227,7 @@ def build_plan(project_id: str, facts: dict | None = None, root=None) -> list[Ca
     # the only thing that can be asserted about a project which does not have one.
     if root is not None:
         cases.extend(structure_cases(root))
+        cases.extend(policy_cases(root))
         # And, for a project that ships a runnable stack, what can only be asked of
         # it once it is up.
         cases.extend(stack_cases(root))
@@ -306,7 +323,20 @@ def preview(project_id: str, refresh: bool = False) -> dict:
         return hit[1]
 
     facts = fetch_facts(project_id)
-    cases = build_plan(project_id, facts)
+    # WITH the working copy, like the claim path does. Without it `build_plan` skips
+    # every check that reads files, so the preview under-reported the run: structure has
+    # always shown 0 here while a real run executed them, and the picker offered a kind
+    # with a count of zero that nobody would ever select.
+    #
+    # Best-effort: an API that cannot see the code still previews the graph-derived
+    # cases, which is what this did before.
+    try:
+        from src.qatest import appserver
+        root, _checked = appserver.locate(project_id)
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("qa plan preview: no working copy for %s: %s", project_id, exc)
+        root = None
+    cases = build_plan(project_id, facts, root=root)
     totals = graph_totals(facts)
 
     from src.qatest import emulators

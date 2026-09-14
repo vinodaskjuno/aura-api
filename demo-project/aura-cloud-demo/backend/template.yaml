@@ -1,0 +1,95 @@
+# Infrastructure for aura-cloud-demo.
+#
+# This file is the subject of the NIST policy checks, so it is written to produce a MIX
+# of passes and failures: a demo where everything passes proves the checks are running
+# but not that they discriminate, and one where everything fails looks like a broken
+# project. Each violation below has a compliant sibling declaring the same kind of
+# resource correctly.
+#
+# Two controls fail here and two pass, on purpose. The two failures are the ones a
+# security team recognises on sight — a credential sitting in an environment variable and
+# a wildcard IAM statement. The violations are marked; fixing one and re-running is the
+# shortest way to watch a check change its mind.
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Aura cloud demo — two Lambdas over S3, DynamoDB, SQS and SNS
+
+Resources:
+
+  # ── Lambdas ───────────────────────────────────────────────────────────────
+  PricingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aura-demo-pricing
+      Handler: pricing.handler
+      Runtime: python3.12                     # current — passes SI-2
+      Timeout: 30
+      Environment:
+        Variables:
+          FLOCI_ENDPOINT: http://floci:4566
+          CATALOG_TABLE: !Ref CatalogTable
+          # VIOLATION — IA-5(1): a literal credential in an environment variable.
+          # The compliant form is the reference used by AuditFunction below.
+          DB_PASSWORD: s3cr3t-demo-password
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:Scan
+              Resource: !GetAtt CatalogTable.Arn
+
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aura-demo-audit
+      Handler: audit.handler
+      Runtime: python3.12                     # current — passes SI-2
+      Timeout: 30
+      Environment:
+        Variables:
+          FLOCI_ENDPOINT: http://floci:4566
+          MEDIA_BUCKET: !Ref MediaBucket
+          # Compliant: a reference, not a literal. This is what IA-5(1) wants to see.
+          API_TOKEN: '{{resolve:secretsmanager:aura-demo/api-token}}'
+      Policies:
+        - Statement:
+            # VIOLATION — AC-6(1): wildcard action and resource.
+            - Effect: Allow
+              Action: '*'
+              Resource: '*'
+
+  # ── Data ──────────────────────────────────────────────────────────────────
+  CatalogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aura-demo-catalog
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      # Compliant: encryption declared, like MediaBucket and EventsQueue below.
+      SSESpecification:
+        SSEEnabled: true
+
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: aura-demo-media
+      # Compliant: encryption declared. The sibling CatalogTable is not.
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  EventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: aura-demo-events
+      SqsManagedSseEnabled: true
+
+  NotifyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: aura-demo-notify

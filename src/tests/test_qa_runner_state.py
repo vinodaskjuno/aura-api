@@ -993,3 +993,52 @@ def test_a_local_users_row_still_wins(monkeypatch):
     monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
 
     assert gw.resolve_credential("gw-anything").role == "super_admin"
+
+
+# ── Runner liveness must be scoped too ───────────────────────────────────────
+#
+# Scoping the QUEUE stopped one environment claiming another's runs. It did not stop them
+# sharing runner rows — a runner is named `<username>/<toolLabel>`, identical everywhere,
+# so two Auras on one AWS account wrote the SAME row. A laptop agent polling localhost
+# kept a row that made DEV report a runner it did not have: canRun stayed true, the Start
+# button stayed enabled, and the queued run waited 884 seconds for a machine that was
+# never listening to it.
+
+def test_a_runners_row_is_scoped_to_the_environment_it_polls(fake_dynamo, monkeypatch):
+    from src.qatest import queue as q
+
+    monkeypatch.setattr(q, "_scope", lambda: "ecs/prod")
+    assert "ecs/prod" in q._runner_key("admin/qa-runner")["testRunId"]
+    monkeypatch.setattr(q, "_scope", lambda: "local/development")
+    assert "local/development" in q._runner_key("admin/qa-runner")["testRunId"]
+
+
+def test_one_environments_runner_is_invisible_to_another(fake_dynamo, monkeypatch):
+    """The assertion that matters. An identically-named runner on a laptop must not make
+    a deployed environment believe it can execute anything."""
+    from src.qatest import queue as q
+
+    monkeypatch.setattr(q, "_scope", lambda: "local/development")
+    q.touch_runner("admin/qa-runner", {"owner": "admin", "machine": "laptop"})
+    assert [r["name"] for r in q.list_runner_state()] == ["admin/qa-runner"]
+
+    monkeypatch.setattr(q, "_scope", lambda: "ecs/prod")
+    assert q.list_runner_state() == [], "dev can see a runner attached to localhost"
+    assert q.online_runners() == [], "canRun would be true with no runner listening"
+
+
+def test_the_two_do_not_overwrite_each_others_state(fake_dynamo, monkeypatch):
+    """They shared a row, so this was not only a display problem — each poll clobbered
+    the other's reported podman state."""
+    from src.qatest import queue as q
+
+    monkeypatch.setattr(q, "_scope", lambda: "local/development")
+    q.record_runner_state("admin/qa-runner", _state(podman=True),
+                          {"machine": "laptop"})
+    monkeypatch.setattr(q, "_scope", lambda: "ecs/prod")
+    q.record_runner_state("admin/qa-runner", _state(podman=False),
+                          {"machine": "ec2-box"})
+
+    monkeypatch.setattr(q, "_scope", lambda: "local/development")
+    mine = q.list_runner_state()[0]
+    assert mine["machine"] == "laptop" and mine["podman"] is True

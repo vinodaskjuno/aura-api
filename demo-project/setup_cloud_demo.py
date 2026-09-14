@@ -8,16 +8,21 @@ execute it.
 
     create project -> add connector -> clone the code -> analyse
 
-The clone uses a `file:///` URL pointing at this repository, which is what makes the demo
-runnable with no network and no git host.
+The code is UPLOADED rather than cloned, so the same command works against a laptop
+backend and a deployed one — a deployed API cannot read a path on your disk.
 
-    python demo-project/setup_cloud_demo.py --api http://localhost:8000 \\
-                                            --user admin --password <pw>
+    export AURA_PASSWORD=…                       # once per shell
+    python demo-project/setup_cloud_demo.py --api http://localhost:8000 --user admin
+
+The password is read from --password, then $AURA_PASSWORD, then a no-echo prompt. It is
+never defaulted to a literal: a credential in a tracked file outlives every rotation.
 """
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -114,61 +119,30 @@ def upload_folder(api: str, token: str, project_id: str, root: Path,
                          f"{exc.read().decode()[:400]}")
 
 
-def is_local(api: str) -> bool:
-    """Whether the API runs on this machine, and can therefore read local paths.
-
-    Decides between cloning `file:///…` — fast, and what the existing demos document —
-    and uploading the bytes, which is the only thing that works against a deployed API.
-    """
-    host = urllib.parse.urlparse(api).hostname or ""
-    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
-
-
-def ensure_git_repo(path: Path) -> None:
-    """Make `path` cloneable over file://.
-
-    `git clone file:///…` needs a real repository at the far end, and the demo app is a
-    plain directory. Initialised here rather than committed as a nested repo, so the
-    outer checkout stays clean and the demo works from a fresh clone of Aura.
-
-    Idempotent: an existing repo is left alone apart from committing anything new, so
-    editing the demo app and re-running this picks the changes up.
-    """
-    import subprocess
-
-    def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", str(path), *args],
-                              capture_output=True, text=True)
-
-    if not (path / ".git").is_dir():
-        print(f"▶ initialising {path.name} as a git repository (file:// needs one)")
-        git("init", "-q", "-b", "main")
-        # Local identity only — never touches the user's global config.
-        git("config", "user.email", "demo@aura.local")
-        git("config", "user.name", "Aura Demo")
-
-    git("add", "-A")
-    committed = git("commit", "-q", "-m", "aura-cloud-demo")
-    if committed.returncode != 0 and "nothing to commit" not in (
-            committed.stdout + committed.stderr):
-        raise SystemExit(f"could not commit the demo app: "
-                         f"{(committed.stdout + committed.stderr)[:300]}")
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--api", default="http://localhost:8000")
     ap.add_argument("--user", default="admin")
-    ap.add_argument("--password", required=True)
+    # Not required, and never defaulted to a literal. A password written into a tracked
+    # file lives in git history permanently — rotating it later does not remove it — and
+    # it is the exact pattern this demo's own IA-5(1) control exists to flag.
+    ap.add_argument("--password", default="",
+                    help="defaults to $AURA_PASSWORD; prompts if neither is set")
     ap.add_argument("--name", default="Aura Cloud Demo")
     args = ap.parse_args()
+
+    args.password = args.password or os.environ.get("AURA_PASSWORD", "")
+    if not args.password:
+        if not sys.stdin.isatty():
+            raise SystemExit(
+                "no password: pass --password, or set AURA_PASSWORD. Refusing to prompt "
+                "because stdin is not a terminal — in CI, set the variable.")
+        # getpass, not input(): it does not echo and does not reach shell history.
+        args.password = getpass.getpass(f"Password for {args.user}: ")
 
     if not (APP / "backend" / "app" / "main.py").exists():
         raise SystemExit(f"demo app not found at {APP}")
 
-    # Only the clone path needs a repository at the far end; an upload sends bytes.
-    if is_local(args.api):
-        ensure_git_repo(APP)
 
     print(f"▶ signing in to {args.api} as {args.user}")
     auth = call(args.api, "/auth/login",
@@ -194,34 +168,21 @@ def main() -> int:
         raise SystemExit(f"no projectId in the response: {list(project)}")
     print(f"  projectId = {project_id}")
 
-    # Two ways in, and which one works depends on whether the API can read this disk.
-    #
-    #   local  -> clone file:///… . Fast, no upload, and what the existing demos document.
-    #   remote -> stream the bytes. A deployed API on Fargate cannot open a path on this
-    #             laptop, so a file:// clone there fails on a directory that does not
-    #             exist over there — with an error that points at the path rather than at
-    #             the reason.
-    if is_local(args.api):
-        print("▶ cloning the code into the workspace (local API)")
-        cloned = call(args.api, "/api/git/clone", token, {
-            "repoUrl": f"file://{APP}", "branch": "main", "projectId": project_id})
-        root = cloned.get("clonedPath") or ""
-        if not root:
-            raise SystemExit(f"clone returned no path: {cloned}")
-        backend = f"{root.rstrip('/')}/backend"
-    else:
-        print("▶ uploading the code (remote API — it cannot read this disk)")
-        uploaded = upload_folder(args.api, token, project_id, APP / "backend", "backend")
-        # The server rebuilds the tree under <workspace>/<projectId>/<label> and tells us
-        # where. Asking it beats assuming: the workspace root differs between a container
-        # and a laptop, and guessing would produce a connector pointing nowhere.
-        # `localPath` is where the server rebuilt the tree. Asking beats assuming: the
-        # workspace root is /workspace in a container and ./data/workspace on a laptop,
-        # so a computed path would produce a connector pointing nowhere.
-        backend = uploaded.get("localPath") or ""
-        if not backend:
-            raise SystemExit(f"upload-folder returned no localPath: {uploaded}")
-        print(f"  uploaded {uploaded.get('fileCount', '?')} file(s) to {backend}")
+    # ALWAYS upload, never clone. `git clone file:///…` only works when the API can read
+    # this disk — true for a laptop backend, false for one on Fargate — so it needed a
+    # second code path AND a git repo inside the demo app. That nested repo made the outer
+    # checkout record the demo as a gitlink, which stores no contents: a fresh clone of
+    # aura-api got an empty directory. Uploading works everywhere, so the fork and the
+    # repo both go.
+    print("▶ uploading the code")
+    uploaded = upload_folder(args.api, token, project_id, APP / "backend", "backend")
+    # `localPath` is where the server rebuilt the tree. Asking beats assuming: the
+    # workspace root is /workspace in a container and ./data/workspace on a laptop, so a
+    # computed path would produce a connector pointing nowhere.
+    backend = uploaded.get("localPath") or ""
+    if not backend:
+        raise SystemExit(f"upload-folder returned no localPath: {uploaded}")
+    print(f"  uploaded {uploaded.get('fileCount', '?')} file(s) to {backend}")
 
     # Now the connector, pointing at the BACKEND directory inside the clone — the shape
     # the analyser actually reads: repoType "local", and repoUrl AND localPath both set

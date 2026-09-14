@@ -124,6 +124,27 @@ def _run_structure(rec: "_Recorder", cases: list[Case], root) -> None:
             rec.steps[-1].action = f"{case.name} — {detail}"
 
 
+def _run_policy(rec: "_Recorder", cases: list[Case], root) -> None:
+    """NIST controls over the project's IaC.
+
+    Needs no app, no browser and no emulator — it reads files — so it runs in the same
+    early pass as the structure checks, before Playwright is even looked for.
+    """
+    from src.qatest import policy
+
+    for case in cases:
+        started = time.monotonic()
+        check = policy.Check(check_id=case.case_id, name=case.name,
+                             rel_path=case.path, validator=case.method)
+        ok, detail = policy.run_check(root, check)
+        rec.add(case.name, case.path, "passed" if ok else "failed", started,
+                error="" if ok else detail, case_id=case.case_id)
+        if ok and detail:
+            # A passing control has to say what it verified, and what it did not. The
+            # step text is the only place a reader sees that.
+            rec.steps[-1].action = f"{case.name} — {detail}"
+
+
 def _run_stack(rec: "_Recorder", cases: list[Case], urls: dict[str, str]) -> None:
     """Ask the running stack the questions only it can answer."""
     from src.qatest import stack as stack_mod
@@ -194,12 +215,19 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
     # nothing else it can be asked, so gating these behind Playwright would put the
     # only answerable questions behind a requirement they do not have.
     structural = [c for c in cases if c.kind == "structure"]
+    policy_cases = [c for c in cases if c.kind == "policy"]
     stack_cases = [c for c in cases if c.kind == "stack"]
-    web = [c for c in cases if c.kind not in ("structure", "stack")]
+    # A DENYLIST, so any kind not named here is treated as a URL to navigate to. Adding a
+    # kind without adding it here sends it to the browser runner, which fails it with a
+    # navigation error that says nothing about the real problem.
+    web = [c for c in cases if c.kind not in ("structure", "stack", "policy")]
 
-    if structural and root is not None:
+    if (structural or policy_cases) and root is not None:
         rec_early = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
-        _run_structure(rec_early, structural, root)
+        if structural:
+            _run_structure(rec_early, structural, root)
+        if policy_cases:
+            _run_policy(rec_early, policy_cases, root)
         if not web and not stack_cases:
             return _finish(report, rec_early, project_id, run_id, started_wall)
 

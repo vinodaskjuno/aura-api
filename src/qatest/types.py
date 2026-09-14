@@ -38,7 +38,7 @@ RunStatus = Literal["passed", "failed", "unavailable"]
 # what anyone reading a filter labelled "API" expects, so the meaning was corrected
 # when the kinds became user-selectable. Reports written before that carry the old
 # meaning; `Report.selected_kinds` is present only on new ones and is the discriminator.
-CaseKind = Literal["api", "ui", "smoke", "structure", "stack"]
+CaseKind = Literal["api", "ui", "smoke", "structure", "stack", "policy"]
 
 
 def _now() -> str:

@@ -284,6 +284,15 @@ class EmulatorSet:
             # "adopted" and "started" are different facts and the reader acts on them
             # differently — one of them means this run will clean up afterwards and the
             # other means it will not.
+            # Said once, on the first cloud, and only when it is actually a limitation:
+            # a run whose project needs no Lambda should not be told about sockets.
+            reason = socket_unavailable_reason()
+            if reason and rec.started:
+                self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
+                           started=True,
+                           message=f"container-backed services unavailable — {reason}. "
+                                   f"Lambda cases will be recorded unemulated.")
+
             if rec.adopted:
                 message = (f"{rec.cloud} emulator already running on :{rec.port} — "
                            f"adopted, and will be left alone")
@@ -463,6 +472,17 @@ def _runtime_socket() -> str:
         "unix://") else ""
 
 
+#: Why container-backed services are off, when they are. Read by EmulatorSet so the
+#: reason reaches the run rather than only the runner's log — a one-slot list because
+#: `_socket_args` is a module function called from a method.
+_socket_unavailable: list[str] = [""]
+
+
+def socket_unavailable_reason() -> str:
+    """Why Lambda and friends cannot run, or "" when they can."""
+    return _socket_unavailable[0]
+
+
 def _socket_args(cloud: "Cloud") -> list[str]:
     """Flags that let Floci start containers of its own, or [] when not enabled.
 
@@ -482,18 +502,47 @@ def _socket_args(cloud: "Cloud") -> list[str]:
 
     socket = _runtime_socket()
     if not socket:
-        log.info("qatest: container-backed services are enabled but podman reports no "
-                 "socket — Lambda and friends will be unavailable")
+        # Returned [] in silence before. A Lambda case then failed as `unemulated` with
+        # no cause anywhere in the run, which is the same shape as "we did not try".
+        log.warning("qatest: container-backed services are enabled but podman reports "
+                    "no socket — Lambda and friends will be unavailable")
+        _socket_unavailable[0] = (
+            "podman reports no container runtime socket, so Floci cannot start Lambda "
+            "containers")
         return []
+    _socket_unavailable[0] = ""
 
     # Idempotent: `network create` fails when it already exists, and that is fine.
     _run(["network", "create", CONTAINER_NETWORK])
-    return ["--network", CONTAINER_NETWORK,
-            # Lowercase :z — shared relabel. :Z is private and breaks the mount for a
-            # second container.
-            "-v", f"{socket}:/var/run/docker.sock:z",
-            "-e", f"FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK={CONTAINER_NETWORK}",
-            "-e", "FLOCI_HOSTNAME=floci"]
+    return [
+        "--network", CONTAINER_NETWORK,
+        # The function reaches Floci by the hostname FLOCI_HOSTNAME advertises, but that
+        # variable only tells Floci what to SAY — it creates no DNS. Aura's containers
+        # are named aura-qa-aws-<runId>, so without this alias the function resolves
+        # nothing and fails with EndpointConnectionError from inside the handler, which
+        # looks like the function's own bug rather than a networking gap.
+        "--network-alias", "floci",
+        # Required, and not a precaution. Measured on rootless podman 5.x / macOS:
+        # default caps and `--user root` both fail with
+        # `java.net.BindException: Permission denied` when Floci binds its Lambda
+        # Runtime API; only --privileged succeeds.
+        #
+        # This is a LARGE grant on a developer's machine — combined with the socket
+        # below, code inside Floci can drive the host's container engine. It is why
+        # `qatest_container_backed_services` is opt-in and off by default, and why the
+        # demo must never depend on it.
+        "--privileged",
+        # Lowercase :z — shared relabel. :Z is private and breaks the mount for a
+        # second container.
+        "-v", f"{socket}:/var/run/docker.sock:z",
+        # Mounting the socket is not enough: without this Floci's Docker client falls
+        # back to `unix://localhost:2375` and tries to BIND it. The log even says
+        # "Creating DockerClient for host: unix:///var/run/docker.sock" and then ignores
+        # it, so the mount looks correct while nothing uses it.
+        "-e", "DOCKER_HOST=unix:///var/run/docker.sock",
+        "-e", f"FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK={CONTAINER_NETWORK}",
+        "-e", "FLOCI_HOSTNAME=floci",
+    ]
 
 
 def start_container(name: str, cloud: "Cloud") -> tuple[bool, str]:

@@ -16,6 +16,7 @@ Two constraints from Aura's planner shape every route here, and both are load-be
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -118,26 +119,79 @@ def notify() -> dict:
 
 @app.get("/pricing")
 def pricing() -> dict:
-    """Invoke a Lambda.
+    """Invoke the pricing Lambda.
 
-    The flagged extension. Lambda is one of Floci's container-backed services and needs a
-    container runtime socket, which Aura mounts only when explicitly enabled — so this
+    Lambda is one of Floci's container-backed services and needs a container runtime
+    socket, which Aura mounts only when the operator enables it on the runner. So this
     route reports unavailable far more often than the others, and does so deliberately
-    rather than failing. A run where only this case is `unemulated` is a healthy run.
+    rather than failing — a run where only the Lambda cases are `unemulated` is a healthy
+    run, and `unemulated` already means "we could not check" rather than "this is broken".
     """
+    return _invoke("aura-demo-pricing")
+
+
+@app.get("/audit")
+def audit() -> dict:
+    """Invoke the audit Lambda, which WRITES to S3.
+
+    Deliberately a different service from /pricing: together they show a Lambda reading
+    and a Lambda writing, so the resource panel visibly changes after a run rather than
+    reporting the same rows it did before.
+    """
+    return _invoke("aura-demo-audit")
+
+
+#: Floci's signature for "I cannot start a container". Matched on substrings rather than
+#: an error code because Floci reports it as a generic Lambda.InitError carrying a Java
+#: exception, and the code alone cannot be told apart from a genuine init failure in the
+#: function's own module-level code.
+_NO_RUNTIME = ("failed to start lambda container", "socketexception",
+               "no such file or directory", "cannot connect to the docker daemon")
+
+
+def _is_missing_runtime(detail: str) -> bool:
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _NO_RUNTIME)
+
+
+def _invoke(name: str) -> dict:
+    """Invoke one function and report honestly when it is not there.
+
+    Shared by both routes so they cannot drift into explaining the same absence two
+    different ways.
+    """
+    if "lambda" in PROBLEMS:
+        return {"service": "lambda", "function": name, "available": False,
+                "reason": f"Lambda is not available on this emulator: "
+                          f"{PROBLEMS['lambda'][:160]}. It needs a container runtime "
+                          f"socket — set QATEST_CONTAINER_BACKED_SERVICES=true on the "
+                          f"runner and restart the agent."}
     try:
-        functions = cloud.client("lambda").list_functions().get("Functions", [])
+        response = cloud.client("lambda").invoke(FunctionName=name)
+        payload = json.loads(response["Payload"].read() or b"{}")
     except Exception as exc:                                  # noqa: BLE001
-        return {"service": "lambda", "available": False, "reason": str(exc)[:200]}
-    names = [f["FunctionName"] for f in functions]
-    if cloud.FUNCTION not in names:
-        return {"service": "lambda", "available": False,
-                "reason": f"{cloud.FUNCTION} is not deployed — Lambda needs a container "
-                          f"runtime socket, which is off by default",
-                "functions": names}
-    payload = cloud.client("lambda").invoke(FunctionName=cloud.FUNCTION)
-    return {"service": "lambda", "available": True, "function": cloud.FUNCTION,
-            "status": payload.get("StatusCode")}
+        return {"service": "lambda", "function": name, "available": False,
+                "reason": str(exc)[:200]}
+    if response.get("FunctionError"):
+        detail = str(payload)
+        if _is_missing_runtime(detail):
+            # Floci accepted create_function but cannot START the container: the runtime
+            # socket is not mounted. That is the EMULATOR lacking a capability, not the
+            # application misbehaving, so it must read as "could not check" — the run
+            # records unemulated and stays green. Discovered by running it: deployment
+            # succeeds without the socket and only invocation fails, so checking at
+            # startup (as this first did) never sees the problem.
+            return {"service": "lambda", "function": name, "available": False,
+                    "reason": "this Floci cannot start Lambda containers — it has no "
+                              "container runtime socket. Set "
+                              "QATEST_CONTAINER_BACKED_SERVICES=true on the runner and "
+                              "restart the agent."}
+        # The function ran and raised. That IS a failure, distinct from not being
+        # runnable, and it must not be dressed up as unavailable.
+        return {"service": "lambda", "function": name, "available": True,
+                "ok": False, "error": detail[:300]}
+    return {"service": "lambda", "function": name, "available": True, "ok": True,
+            "result": payload}
 
 
 @app.get("/assets")
