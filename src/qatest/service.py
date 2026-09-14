@@ -49,6 +49,20 @@ def _no_working_copy(project_id: str, checked: list[str]) -> str:
     return " ".join(lines)
 
 
+def _endpoints(emus) -> dict[str, str]:
+    """{cloud: endpoint} for the emulators that actually started.
+
+    Built from the same env the application under test was given, so the inventory reads
+    exactly the endpoint the app wrote to — not one reconstructed from the port, which
+    would drift the moment a cloud changed its variable.
+    """
+    urls = {"aws": "AWS_ENDPOINT_URL", "gcp": "STORAGE_EMULATOR_HOST",
+            "azure": "AZURE_ENDPOINT_URL", "oci": "OCI_ENDPOINT_URL"}
+    env = emus.env
+    return {rec.cloud: env.get(urls.get(rec.cloud, ""), "")
+            for rec in emus.records if rec.started and urls.get(rec.cloud)}
+
+
 @contextlib.contextmanager
 def _maybe_apps(app_url: str, specs: list, env: dict, emit):
     """Start the given applications, unless a URL was supplied.
@@ -285,6 +299,19 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
                                   "step", index=s.index, total=total,
                                   action=s.action, status=s.status,
                                   caseId=s.case_id))
+
+            # Read the emulators back BEFORE the `with` unwinds and removes them. This
+            # is the only moment both things are true: the tests have finished, so the
+            # resources are whatever they left behind, and the containers are still up,
+            # so they can be asked. `evidence.write_report` runs after the block, so the
+            # inventory rides the existing write rather than adding one.
+            #
+            # A green test says the application answered; this says what it reached.
+            from src.qatest import inventory
+
+            report.resources = inventory.collect(_endpoints(emus))
+            for line in inventory.summarise(report.resources):
+                emit("evidence", message=line)
 
     from src.qatest import coverage as cov
 

@@ -29,6 +29,28 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT_S = 30
 
+#: Container names Aura considers its own. TWO prefixes, because an emulator now has two
+#: possible lifetimes: `aura-qa-<cloud>-<runId>` lives and dies with one test run, while
+#: `aura-dev-<cloud>-<projectId>` is started by a developer from DevMate and lives until
+#: they stop it. Every "is this ours" decision must accept both — the same tuple is
+#: enforced independently on the server (queue.MANAGED_PREFIXES), because one side
+#: trusting the other is how a laptop ends up reading out arbitrary container logs.
+MANAGED_PREFIXES = ("aura-qa-", "aura-dev-")
+
+#: Project-scoped containers, started from DevMate and stopped only on request.
+DEV_PREFIX = "aura-dev-"
+
+#: The named network Floci's container-backed services need. Rootless podman's default
+#: bridge gives containers no reachable IPs for each other, so Lambda's Runtime API
+#: callback never arrives without this.
+CONTAINER_NETWORK = "aura-floci"
+
+
+def dev_container(cloud: str, project_id: str) -> str:
+    """The name of a project-scoped emulator. Stable, so Start is idempotent and Stop
+    can find what Start created without recording anything."""
+    return f"{DEV_PREFIX}{cloud}-{project_id}"
+
 
 def _ready_timeout() -> int:
     """How long to wait for an emulator to answer. Settings-backed so a slow machine
@@ -164,6 +186,27 @@ def _run(args: list[str], timeout: int = _TIMEOUT_S) -> tuple[int, str]:
         return 1, str(exc)
 
 
+def _container_on_port(port: int) -> dict:
+    """The container publishing `port`, as {name, image}. Empty when none is found.
+
+    `--filter publish=` is NOT used: podman rejects it as an invalid filter on the
+    versions this has to run against. Parsing the Ports column is uglier and works.
+    """
+    code, out = _run(["ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Ports}}"])
+    if code != 0:
+        return {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, image, ports = parts[0], parts[1], parts[2]
+        # Matches "0.0.0.0:4566->4566/tcp" and "[::]:4566->4566/tcp" without also
+        # matching a container that merely EXPOSES 4566 without publishing it.
+        if f":{port}->" in ports:
+            return {"name": name.strip(), "image": image.strip()}
+    return {}
+
+
 def image_digest(image: str) -> str:
     """The pinned digest of a local image.
 
@@ -235,13 +278,20 @@ class EmulatorSet:
             self._emit(cloud=cloud.name, image=cloud.image, port=cloud.port,
                        container=f"aura-qa-{cloud.name}-{self.run_id}",
                        starting=True, started=False,
-                       message=f"starting the {cloud.name} emulator on :{cloud.port}")
+                       message=f"bringing up the {cloud.name} emulator on :{cloud.port}")
             rec = self._start(cloud)
             self.records.append(rec)
-            self._emit(**rec.as_dict(),
-                       message=(f"{rec.cloud} emulator ready on :{rec.port}"
-                                if rec.started else
-                                f"{rec.cloud} emulator failed: {rec.error[:160]}"))
+            # "adopted" and "started" are different facts and the reader acts on them
+            # differently — one of them means this run will clean up afterwards and the
+            # other means it will not.
+            if rec.adopted:
+                message = (f"{rec.cloud} emulator already running on :{rec.port} — "
+                           f"adopted, and will be left alone")
+            elif rec.started:
+                message = f"{rec.cloud} emulator ready on :{rec.port}"
+            else:
+                message = f"{rec.cloud} emulator failed: {rec.error[:160]}"
+            self._emit(**rec.as_dict(), message=message)
         return self
 
     def __exit__(self, *_exc) -> None:
@@ -261,20 +311,36 @@ class EmulatorSet:
             rec.error = why
             return rec
 
-        # A container left behind by an interrupted run holds the name and the port.
-        _run(["rm", "-f", name])
-
-        code, out = _run(["run", "-d", "--name", name,
-                          "-p", f"{cloud.port}:{cloud.port}", cloud.image], timeout=120)
-        if code != 0:
-            rec.error = out.strip()[-400:]
+        # Something is ALREADY serving this port: adopt it instead of colliding.
+        #
+        # Floci's ports are fixed and are Floci's own, so a developer who ran
+        # `floci start`, or who started one from DevMate, is holding exactly the port
+        # this run wants. Until this existed the run simply died — podman answers
+        # "proxy already running" — which made running your own emulator and running
+        # tests mutually exclusive.
+        #
+        # Probed BEFORE `podman run`, with a short timeout: the full readiness wait
+        # belongs after a start we actually performed, not in front of every run.
+        if _ready(cloud.port, timeout=2):
+            found = _container_on_port(cloud.port)
+            rec.container = found.get("name", "")
+            # The image that is REALLY there, not the one this run would have used.
+            # They differ whenever the operator pinned a version, and reporting ours
+            # would make the report describe a container that never existed.
+            rec.image = found.get("image", "") or cloud.image
+            rec.digest = image_digest(rec.image)
+            rec.adopted = True
+            rec.started = True
+            log.info("qatest: adopted the %s emulator already on :%s (%s)",
+                     cloud.name, cloud.port, rec.container or "unknown container")
             return rec
 
-        if not _ready(cloud.port):
-            logs = _run(["logs", "--tail", "20", name])[1]
-            rec.error = (f"did not answer on :{cloud.port} within "
-                         f"{_ready_timeout()}s. {logs[-300:]}")
-            _run(["rm", "-f", name])
+        # Through the shared helper, so a run and a DevMate start bring a container up
+        # exactly the same way — the container-runtime socket included. Two code paths
+        # for "start Floci" is two paths for them to drift.
+        ok, why = start_container(name, cloud)
+        if not ok:
+            rec.error = why
             return rec
 
         rec.started = True
@@ -284,6 +350,16 @@ class EmulatorSet:
 
     def stop(self) -> None:
         for rec in self.records:
+            # Never remove what this run did not start. An adopted emulator belongs to
+            # whoever started it — `floci-cli` or DevMate — and they stop it when they
+            # choose. Tearing it down here would make "run the tests" a destructive act
+            # on someone's working environment.
+            if rec.adopted:
+                self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
+                           started=True, stopped=False, adopted=True,
+                           message=f"{rec.cloud} emulator left running "
+                                   f"(started outside this run)")
+                continue
             if rec.container:
                 _run(["rm", "-f", rec.container])
                 self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
@@ -333,7 +409,7 @@ def list_containers(include_unmanaged: bool = False) -> list[dict]:
     for item in raw if isinstance(raw, list) else []:
         names = item.get("Names") or item.get("names") or []
         name = (names[0] if isinstance(names, list) and names else str(names or ""))
-        if not include_unmanaged and not name.startswith("aura-qa-"):
+        if not include_unmanaged and not name.startswith(MANAGED_PREFIXES):
             continue
         ports = item.get("Ports") or []
         containers.append({
@@ -349,7 +425,12 @@ def list_containers(include_unmanaged: bool = False) -> list[dict]:
 
 
 def _cloud_of(container_name: str) -> str:
-    """The cloud a container serves, from `aura-qa-<cloud>-<runId>`."""
+    """The cloud a container serves, from `aura-<qa|dev>-<cloud>-<id>`.
+
+    Both prefixes put the cloud in the same position, so one index covers them — but a
+    name that does not match is reported as unknown rather than guessed at, which is why
+    the membership test against _BY_NAME stays.
+    """
     parts = container_name.split("-")
     return parts[2] if len(parts) > 3 and parts[2] in _BY_NAME else ""
 
@@ -369,14 +450,104 @@ def _format_ports(ports) -> str:
     return ", ".join(out)[:120]
 
 
+def _runtime_socket() -> str:
+    """The container runtime socket, or "" when there is none to give.
+
+    Read from podman rather than assembled from a uid: it is /run/user/501/... on this
+    Mac and /run/user/1000/... on a typical Linux box, and a hardcoded path fails on
+    whichever one you did not test.
+    """
+    code, out = _run(["info", "--format", "{{.Host.RemoteSocket.Path}}"])
+    path = out.strip() if code == 0 else ""
+    return path.replace("unix://", "") if path.startswith("/") or path.startswith(
+        "unix://") else ""
+
+
+def _socket_args(cloud: "Cloud") -> list[str]:
+    """Flags that let Floci start containers of its own, or [] when not enabled.
+
+    Floci's container-backed services — Lambda above all — need a Docker-compatible
+    socket, a NAMED network (the rootless default bridge assigns no reachable
+    inter-container IPs), and a stable hostname for the Lambda Runtime API callback.
+
+    Returns [] rather than raising when unavailable: a run without Lambda is a run with
+    one `unemulated` case, which is a far better outcome than a run that will not start.
+    """
+    try:
+        from src.config_settings import get_settings
+        if not get_settings().qatest_container_backed_services:
+            return []
+    except Exception:                                         # noqa: BLE001
+        return []
+
+    socket = _runtime_socket()
+    if not socket:
+        log.info("qatest: container-backed services are enabled but podman reports no "
+                 "socket — Lambda and friends will be unavailable")
+        return []
+
+    # Idempotent: `network create` fails when it already exists, and that is fine.
+    _run(["network", "create", CONTAINER_NETWORK])
+    return ["--network", CONTAINER_NETWORK,
+            # Lowercase :z — shared relabel. :Z is private and breaks the mount for a
+            # second container.
+            "-v", f"{socket}:/var/run/docker.sock:z",
+            "-e", f"FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK={CONTAINER_NETWORK}",
+            "-e", "FLOCI_HOSTNAME=floci"]
+
+
+def start_container(name: str, cloud: "Cloud") -> tuple[bool, str]:
+    """Bring up one Floci container under an explicit name. (ok, reason).
+
+    Shared by the run path and the DevMate path so there is ONE definition of how a
+    Floci container is started — the container-runtime socket included. Two ways to
+    start a container is two ways for them to drift.
+    """
+    if not name.startswith(MANAGED_PREFIXES):
+        return False, "refusing to start a container outside Aura's own namespace"
+    ready, why = podman_ready()
+    if not ready:
+        return False, why
+
+    _run(["rm", "-f", name])
+    code, out = _run(["run", "-d", "--name", name,
+                      "-p", f"{cloud.port}:{cloud.port}",
+                      *_socket_args(cloud), cloud.image], timeout=120)
+    if code != 0:
+        return False, out.strip()[-400:] or f"podman run exited {code}"
+    if not _ready(cloud.port):
+        logs = _run(["logs", "--tail", "20", name])[1]
+        _run(["rm", "-f", name])
+        return False, (f"did not answer on :{cloud.port} within {_ready_timeout()}s. "
+                       f"{logs[-300:]}")
+    return True, ""
+
+
+def remove_container(name: str) -> tuple[bool, str]:
+    """Remove one of Aura's own containers. (ok, reason).
+
+    Prefix-checked like every other operation that names a container: this one DELETES,
+    so the consequence of accepting an arbitrary name is worse than for reading logs.
+    """
+    if not name.startswith(MANAGED_PREFIXES):
+        return False, "refusing to stop a container Aura did not start"
+    if not podman_available():
+        return False, "podman not found on PATH"
+    code, out = _run(["rm", "-f", name], timeout=60)
+    if code != 0:
+        return False, out.strip()[-300:] or f"podman rm exited {code}"
+    return True, ""
+
+
 def container_logs(name: str, tail: int = 200) -> tuple[bool, str]:
     """`podman logs --tail N` for one of Aura's own containers.
 
-    Refuses anything not named `aura-qa-*`, on the RUNNER side as well as the server's.
+    Refuses anything outside MANAGED_PREFIXES, on the RUNNER side as well as the
+    server's.
     The check is cheap and the failure mode is severe: without it, a bug or a
     compromised server could read arbitrary container output off a developer's laptop.
     """
-    if not name.startswith("aura-qa-"):
+    if not name.startswith(MANAGED_PREFIXES):
         return False, "refusing to read logs for a container Aura did not start"
     if not podman_available():
         return False, "podman not found on PATH"

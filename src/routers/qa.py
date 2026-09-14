@@ -1,6 +1,7 @@
 """QA Workspace API — test generation, execution, results, activity."""
 from __future__ import annotations
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -736,7 +737,7 @@ def request_container_logs(body: LogsRequest,
     """
     from src.qatest import queue
 
-    if not body.container.startswith(queue.MANAGED_PREFIX):
+    if not body.container.startswith(queue.MANAGED_PREFIXES):
         # Enforced here as well as on the runner. The failure mode — reading arbitrary
         # container output off someone's laptop — is severe enough to check twice.
         raise HTTPException(400, "logs are only available for containers Aura started")
@@ -769,6 +770,91 @@ def get_container_logs(command_id: str, runner: str = Query(...),
             "fetchedAt": record.get("resultAt", ""),
             "truncated": len(raw) >= _LOG_MAX_BYTES,
             "lines": text.splitlines()}
+
+
+class InventoryRequest(BaseModel):
+    runner: str
+    cloud: str
+
+
+@router.post("/runners/inventory")
+def request_emulator_inventory(body: InventoryRequest,
+                               _: dict = Depends(require_permission("qa_workspace"))):
+    """Ask a runner what is inside one of its running emulators.
+
+    Same round trip as `logs` and for the same reason: this server is on Fargate and can
+    never reach a laptop's :4566, so the only thing that can answer is the runner, on
+    its next poll. One poll interval of latency, which the UI has to say out loud.
+    """
+    from src.qatest import emulators, queue
+
+    if body.cloud not in {c.name for c in emulators.CLOUDS}:
+        # The cloud name reaches podman and boto3 on someone's machine. Whitelist it
+        # against the four we know rather than passing a free string through.
+        raise HTTPException(400, f"unknown cloud {body.cloud!r}")
+    return queue.request_command(body.runner, "inventory", body.cloud)
+
+
+@router.get("/runners/inventory/{command_id}")
+def get_emulator_inventory(command_id: str, runner: str = Query(...),
+                           _: dict = Depends(require_permission("qa_workspace"))):
+    """The inventory a runner produced, once it has answered."""
+    from src.qatest import queue
+    from src.storage.s3_client import get_object
+
+    record = queue.command_result(runner, command_id)
+    if not record:
+        raise HTTPException(404, "no such inventory request")
+    if record.get("error"):
+        return {"status": "failed", "error": record["error"],
+                "cloud": record.get("container", "")}
+    if not record.get("resultKey"):
+        return {"status": "pending", "cloud": record.get("container", ""),
+                "requestedAt": record.get("requestedAt", "")}
+    try:
+        raw = get_object(_ARTIFACT_BUCKET, record["resultKey"]) or b""
+    except Exception as exc:                                  # noqa: BLE001
+        raise HTTPException(502, f"could not read the stored inventory: {exc}")
+    try:
+        resources = json.loads(raw.decode("utf-8", errors="replace") or "{}")
+    except ValueError:
+        resources = {}
+    return {"status": "ready", "cloud": record.get("container", ""),
+            "fetchedAt": record.get("resultAt", ""), "resources": resources}
+
+
+class EmulatorRequest(BaseModel):
+    runner: str
+
+
+@router.post("/emulators/{project_id}/{action}")
+def control_project_emulators(project_id: str, action: str, body: EmulatorRequest,
+                              _: dict = Depends(require_permission("dev_workspace"))):
+    """Start or stop this project's emulators, from DevMate.
+
+    The clouds are DERIVED from the project's own dependency graph — the same
+    `clouds_for()` a run uses — so the emulators a developer gets are the ones their
+    code implies, and the control cannot drift from what a run would start.
+
+    Project-scoped and named `aura-dev-<cloud>-<projectId>`: a test run that finds one
+    already serving adopts it and leaves it alone, so starting an emulator here and then
+    running tests does not turn "run the tests" into a destructive act.
+    """
+    from src.qatest import emulators, plan, queue
+
+    if action not in ("start", "stop"):
+        raise HTTPException(404, "no such action")
+
+    facts = plan.fetch_facts(project_id)
+    clouds = [c.name for c in emulators.clouds_for(facts.get("dependencies") or [])]
+    if not clouds:
+        raise HTTPException(
+            409,
+            "This project declares no cloud dependencies, so there is no emulator to "
+            "start. Aura derives them from the packages your code imports.")
+    return {**queue.request_command(body.runner, f"emulator-{action}", project_id,
+                                    clouds=",".join(clouds)),
+            "clouds": clouds}
 
 
 @router.get("/results/{project_id}/{run_id}/console")

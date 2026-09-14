@@ -738,3 +738,192 @@ def test_a_run_records_the_machine_it_executed_on(fake_dynamo):
     live = queue.progress("run-loc", "proj-1")
     assert live["runnerMachine"] == "my-laptop"
     assert live["runnerOwner"] == "qa"
+
+
+# ── Adoption: Aura must not stop what it did not start ───────────────────────
+#
+# Floci's ports are fixed and are Floci's own, so a developer running `floci start`, or
+# starting an emulator from DevMate, holds exactly the port a run wants. Until adoption
+# existed the run simply died on "proxy already running" — reproduced by hand before
+# this was written. These pin the behaviour that replaced it.
+
+def test_an_already_running_emulator_is_adopted_not_restarted(monkeypatch):
+    from src.qatest import emulators
+
+    monkeypatch.setattr(emulators, "podman_ready", lambda: (True, ""))
+    monkeypatch.setattr(emulators, "_ready", lambda port, timeout=None: True)
+    monkeypatch.setattr(emulators, "_container_on_port",
+                        lambda port: {"name": "floci", "image": "floci/floci:1.7.0"})
+    monkeypatch.setattr(emulators, "image_digest", lambda image: "sha256:abc")
+    ran = []
+    monkeypatch.setattr(emulators, "_run", lambda args, **kw: ran.append(args) or (0, ""))
+
+    rec = emulators.EmulatorSet([], "run1")._start(emulators._BY_NAME["aws"])
+
+    assert rec.adopted is True and rec.started is True
+    assert rec.container == "floci"
+    # The image REALLY there, not the one this run would have used.
+    assert rec.image == "floci/floci:1.7.0"
+    assert not any("run" in a for a in ran), "it started a container anyway"
+
+
+def test_an_adopted_emulator_is_never_removed(monkeypatch):
+    """The single assertion that makes running your own emulator safe."""
+    from src.qatest import emulators
+    from src.qatest.types import EmulatorRecord
+
+    removed = []
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, **kw: removed.append(args) or (0, ""))
+
+    es = emulators.EmulatorSet([], "run1")
+    es.records = [EmulatorRecord(cloud="aws", image="i", digest="d", port=4566,
+                                 container="floci", started=True, adopted=True)]
+    es.stop()
+
+    assert removed == [], "it removed a container it did not start"
+
+
+def test_a_container_aura_started_is_still_removed(monkeypatch):
+    """Adoption must not turn into a leak for the normal path."""
+    from src.qatest import emulators
+    from src.qatest.types import EmulatorRecord
+
+    removed = []
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, **kw: removed.append(args) or (0, ""))
+
+    es = emulators.EmulatorSet([], "run1")
+    es.records = [EmulatorRecord(cloud="aws", image="i", digest="d", port=4566,
+                                 container="aura-qa-aws-run1", started=True)]
+    es.stop()
+
+    assert removed == [["rm", "-f", "aura-qa-aws-run1"]]
+
+
+# ── The managed-prefix widening ──────────────────────────────────────────────
+
+def test_a_devmate_container_counts_as_aura_managed(fake_dynamo):
+    """`aura-dev-` is the project-scoped lifetime. Three independent checks decide
+    "is this ours"; missing one makes such a container invisible rather than broken."""
+    client.post(f"{BASE}/runner/state", json=_state(containers=[
+        {"id": "1", "name": "aura-dev-aws-proj1", "image": "floci/floci",
+         "status": "Up", "ports": "4566", "cloud": "aws"}]))
+
+    row = client.get(f"{BASE}/runners").json()["runners"][0]["containers"][0]
+    assert row["managed"] is True
+
+
+def test_logs_are_accepted_for_a_devmate_container(fake_dynamo):
+    res = client.post(f"{BASE}/runners/logs",
+                      json={"runner": RUNNER, "container": "aura-dev-aws-proj1"})
+    assert res.status_code == 200
+
+
+def test_logs_are_still_refused_for_a_foreign_container(fake_dynamo):
+    """Widening the prefix must not widen it to everything."""
+    res = client.post(f"{BASE}/runners/logs",
+                      json={"runner": RUNNER, "container": "someones-postgres"})
+    assert res.status_code == 400
+
+
+# ── The inventory command ────────────────────────────────────────────────────
+
+def test_inventory_is_refused_for_an_unknown_cloud(fake_dynamo):
+    """The value reaches podman and boto3 on someone's machine."""
+    res = client.post(f"{BASE}/runners/inventory",
+                      json={"runner": RUNNER, "cloud": "../etc/passwd"})
+    assert res.status_code == 400
+
+
+def test_inventory_is_requested_and_answered(fake_dynamo):
+    res = client.post(f"{BASE}/runners/inventory",
+                      json={"runner": RUNNER, "cloud": "aws"})
+    assert res.status_code == 200
+    command_id = res.json()["commandId"]
+
+    # Before the runner answers, it is pending — not an error and not empty.
+    pending = client.get(f"{BASE}/runners/inventory/{command_id}",
+                         params={"runner": RUNNER}).json()
+    assert pending["status"] == "pending"
+
+
+# ── Container-backed services (Lambda) ───────────────────────────────────────
+#
+# Mounting the container runtime socket into Floci lets anything inside it start
+# containers on the host. That is a real privilege escalation, so it is opt-in and the
+# demo must never depend on it.
+
+def test_the_runtime_socket_is_not_mounted_by_default(monkeypatch):
+    from src.qatest import emulators
+    assert emulators._socket_args(emulators._BY_NAME["aws"]) == []
+
+
+def test_enabling_it_mounts_the_socket_and_a_named_network(monkeypatch):
+    from src.config_settings import get_settings
+    from src.qatest import emulators
+
+    monkeypatch.setenv("QATEST_CONTAINER_BACKED_SERVICES", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(emulators, "_runtime_socket", lambda: "/run/user/1000/x.sock")
+    monkeypatch.setattr(emulators, "_run", lambda args, **kw: (0, ""))
+
+    args = emulators._socket_args(emulators._BY_NAME["aws"])
+    get_settings.cache_clear()
+
+    # Lowercase :z — :Z is a PRIVATE relabel and breaks the mount for a second container.
+    assert "/run/user/1000/x.sock:/var/run/docker.sock:z" in args
+    # The named network: rootless podman's default bridge gives no reachable
+    # inter-container IPs, so the Lambda Runtime API callback never arrives without it.
+    assert emulators.CONTAINER_NETWORK in args
+    assert "FLOCI_HOSTNAME=floci" in args
+
+
+def test_no_socket_degrades_rather_than_failing(monkeypatch):
+    """A run without Lambda is a run with one `unemulated` case. A run that will not
+    start is worse."""
+    from src.config_settings import get_settings
+    from src.qatest import emulators
+
+    monkeypatch.setenv("QATEST_CONTAINER_BACKED_SERVICES", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(emulators, "_runtime_socket", lambda: "")
+
+    args = emulators._socket_args(emulators._BY_NAME["aws"])
+    get_settings.cache_clear()
+    assert args == []
+
+
+def test_the_socket_path_is_never_hardcoded(monkeypatch):
+    """It is /run/user/501/... on a Mac and /run/user/1000/... on a typical Linux box.
+    A hardcoded path fails on whichever one you did not test."""
+    from src.qatest import emulators
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, **kw: (0, "/run/user/4242/podman/podman.sock"))
+    assert emulators._runtime_socket() == "/run/user/4242/podman/podman.sock"
+
+
+def test_a_second_command_is_actually_dispatched(fake_dynamo):
+    """`take_command` refuses while cmdTakenAt is set — that is what makes dispatch
+    exactly-once. `request_command` therefore has to clear it, or only the FIRST command
+    in a runner's life is ever collected and every later one times out as "the runner
+    did not answer", which reads as a dead runner rather than a stuck row.
+
+    Found when an emulator-start sat untouched behind an inventory command that had
+    completed minutes earlier."""
+    first = queue.request_command(RUNNER, "logs", "aura-qa-aws-1")["commandId"]
+    assert queue.take_command(RUNNER)["id"] == first
+    queue.record_command_result(RUNNER, first, key="k")
+
+    second = queue.request_command(RUNNER, "inventory", "aws")["commandId"]
+    taken = queue.take_command(RUNNER)
+
+    assert taken is not None, "the second command was never dispatched"
+    assert taken["id"] == second and taken["kind"] == "inventory"
+
+
+def test_the_clouds_list_reaches_the_runner(fake_dynamo):
+    """emulator-start needs to know WHICH emulators, and the list is derived server-side
+    from the project's dependencies."""
+    queue.request_command(RUNNER, "emulator-start", "proj-1", clouds="aws,gcp")
+    assert queue.take_command(RUNNER)["clouds"] == "aws,gcp"

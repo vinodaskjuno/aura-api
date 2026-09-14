@@ -118,11 +118,28 @@ class EmulatorRecord:
     container: str = ""
     started: bool = False
     error: str = ""
+    #: Already running when the run began — started by `floci-cli` or from DevMate, not
+    #: by this run. Aura must never stop one of these.
+    adopted: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {"cloud": self.cloud, "image": self.image, "digest": self.digest,
                 "port": self.port, "container": self.container,
-                "started": self.started, "error": self.error}
+                "started": self.started, "error": self.error,
+                "adopted": self.adopted}
+
+    @classmethod
+    def from_wire(cls, data: dict[str, Any]) -> "EmulatorRecord":
+        """Rebuild from a stored or transmitted report, dropping keys we do not know.
+
+        `EmulatorRecord(**data)` raises TypeError on an unknown key, so a report written
+        by a NEWER runner would crash an older server reading it — the failure landing
+        after the run had already succeeded and stored its evidence. Filtering instead
+        means a field added later degrades to "not shown" rather than to an exception.
+        Same reasoning, and the same shape, as `Case.from_wire`.
+        """
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in (data or {}).items() if k in known})
 
 
 @dataclass
@@ -151,6 +168,11 @@ class Report:
     plan_total: int = 0              # cases in the FULL plan, before any filtering
     coverage: dict[str, Any] = field(default_factory=dict)
     exploratory: bool = False
+    # What was actually inside the emulators when the run finished — {cloud: {service:
+    # [{name, count, items}]}}. On the REPORT rather than on each EmulatorRecord,
+    # because `from_dict` rebuilds records positionally and an unknown key there is
+    # fatal; see EmulatorRecord.from_wire.
+    resources: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +191,7 @@ class Report:
             "planTotal": self.plan_total,
             "coverage": self.coverage,
             "exploratory": self.exploratory,
+            "resources": self.resources,
         }
 
     @classmethod
@@ -186,7 +209,7 @@ class Report:
         partial graph write, not crash the endpoint.
         """
         cases = [Case.from_wire(c) for c in (data.get("cases") or [])]
-        emulators = [e if isinstance(e, EmulatorRecord) else EmulatorRecord(**e)
+        emulators = [e if isinstance(e, EmulatorRecord) else EmulatorRecord.from_wire(e)
                      for e in (data.get("emulators") or [])]
         return cls(
             run_id=data.get("runId", ""),
@@ -209,4 +232,7 @@ class Report:
             plan_total=int(data.get("planTotal") or 0),
             coverage=data.get("coverage") or {},
             exploratory=bool(data.get("exploratory")),
+            # Absent from every report written before this existed, which is exactly
+            # what the default covers.
+            resources=data.get("resources") or {},
         )

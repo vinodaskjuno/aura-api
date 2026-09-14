@@ -549,7 +549,7 @@ def _prune_runner_index(rows: list[dict]) -> None:
 #: Attributes a runner reports about itself. Whitelisted rather than stored wholesale
 #: so a future agent cannot grow the row without this module agreeing.
 _STATE_FIELDS = ("podman", "browser", "podmanVersion", "browserVersion",
-                 "os", "busyRunId", "protocol")
+                 "os", "busyRunId", "protocol", "flociUi")
 
 #: Findings kept per runner. Every runner's state shares ONE DynamoDB item under a
 #: 400 KB limit, so this is a real bound rather than tidiness. Re-capped here as well
@@ -560,6 +560,12 @@ HEALTH_MAX_TEXT = 400
 #: A developer's machine runs their employer's containers. Only Aura's own are ever
 #: reported, and the agent enforces the same rule on its side.
 MANAGED_PREFIX = "aura-qa-"
+
+#: Both lifetimes Aura manages: run-scoped (`aura-qa-`) and project-scoped
+#: (`aura-dev-`, started from DevMate and stopped only on request). Kept in step with
+#: emulators.MANAGED_PREFIXES; enforced here independently rather than trusting the
+#: agent's copy of the rule.
+MANAGED_PREFIXES = ("aura-qa-", "aura-dev-")
 
 #: Cap so the 400 KB item limit is unreachable no matter how many containers exist.
 _MAX_CONTAINERS = 25
@@ -579,7 +585,7 @@ def _clean_containers(containers: list | None) -> list[dict]:
             "ports": str(c.get("ports") or "")[:120],
             "createdAt": str(c.get("createdAt") or "")[:40],
             "cloud": str(c.get("cloud") or "")[:20],
-            "managed": name.startswith(MANAGED_PREFIX),
+            "managed": name.startswith(MANAGED_PREFIXES),
         })
     return out
 
@@ -691,6 +697,7 @@ def _index_runner(runner: str, payload: dict) -> None:
                             "owner": payload.get("owner") or "",
                             "ownerId": payload.get("ownerId") or "",
                             "machine": payload.get("machine") or "",
+                            "flociUi": payload.get("flociUi") or {},
                             "health": payload.get("health") or {},
                             "setup": payload.get("setup") or {},
                             "podmanVersion": payload.get("podmanVersion") or "",
@@ -765,6 +772,7 @@ def list_runner_state(stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
             "owner": row.get("owner", ""),
             "ownerId": row.get("ownerId", ""),
             "machine": row.get("machine", ""),
+            "flociUi": dict(row.get("flociUi") or {}),
             "busyRunId": row.get("busyRunId", ""),
             "protocol": int(row.get("protocol") or 1),
             # protocol 1 agents never report state, so an empty container list from
@@ -839,8 +847,15 @@ ACTIVITY_MAX = 80
 COMMAND_DEDUPE_S = 30
 
 
-def request_command(runner: str, kind: str, container: str, tail: int = 200) -> dict:
-    """Queue one command for a runner. Returns {commandId, status}."""
+def request_command(runner: str, kind: str, container: str, tail: int = 200,
+                    clouds: str = "") -> dict:
+    """Queue one command for a runner. Returns {commandId, status}.
+
+    `container` is the command's free-text slot and means whatever the kind needs: a
+    container name for `logs`, a cloud name for `inventory`, a project id for
+    `emulator-start`/`emulator-stop`. `clouds` is a comma-separated list, used only by
+    the emulator kinds.
+    """
     row = runner_state(runner) or {}
     existing = row.get("cmdId")
     if existing and not row.get("cmdResultAt") \
@@ -852,11 +867,20 @@ def request_command(runner: str, kind: str, container: str, tail: int = 200) -> 
         "cmdId": command_id,
         "cmdKind": kind,
         "cmdContainer": container,
+        "cmdClouds": str(clouds or ""),
         "cmdTail": int(tail),
         "cmdRequestedAt": _now(),
         # Flat attributes rather than a nested map: update_item builds only top-level
         # SETs, and keeping them flat also means the state writer and this writer touch
         # disjoint attributes and cannot clobber each other.
+        #
+        # cmdTakenAt MUST be cleared with the rest. `take_command` refuses to dispatch
+        # while it is set — that is what makes dispatch exactly-once — so leaving the
+        # previous command's value behind means the runner never collects this one, or
+        # any command after it. The first request in a runner's life worked and every
+        # later one timed out as "the runner did not answer", which reads as a dead
+        # runner rather than a stuck row.
+        "cmdTakenAt": "",
         "cmdResultKey": "",
         "cmdResultAt": "",
         "cmdError": "",
@@ -881,6 +905,7 @@ def take_command(runner: str) -> dict | None:
         return None
     return {"id": command_id, "kind": row.get("cmdKind", "logs"),
             "container": row.get("cmdContainer", ""),
+            "clouds": row.get("cmdClouds", ""),
             "tail": int(row.get("cmdTail") or 200)}
 
 

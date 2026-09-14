@@ -1148,3 +1148,42 @@ def test_recorded_cost_is_used_rather_than_recomputed(fake_dynamo):
     _as(QA)
     body = client.get(f"{BASE}/runs/run-c/cost", params={"projectId": "p1"}).json()
     assert body["costUsd"] == pytest.approx(0.777)
+
+
+# ── The resource inventory ───────────────────────────────────────────────────
+#
+# A green test says the application answered. It does not say the application reached
+# anything — a route returning a literal passes identically with no emulator running.
+# The inventory is what closes that gap, so it must never be able to close the run.
+
+def test_inventory_never_raises_when_the_emulator_is_unreachable():
+    from src.qatest import inventory
+    # Nothing is listening here. An inventory failure must cost the panel, not the run.
+    assert inventory.collect({"aws": "http://127.0.0.1:1"}) == {}
+
+
+def test_inventory_skips_clouds_with_no_endpoint():
+    from src.qatest import inventory
+    assert inventory.collect({"aws": "", "gcp": None}) == {}
+
+
+def test_inventory_summarises_for_the_console():
+    from src.qatest import inventory
+    lines = inventory.summarise({"aws": {
+        "s3": [{"name": "media", "count": 3}],
+        "dynamodb": [{"name": "catalog", "count": 1}],
+        "sns": [{"name": "notify"}],
+    }})
+    assert "aws/s3: media — 3 items" in lines
+    # Singular, because "1 items" is the kind of detail a demo audience notices.
+    assert "aws/dynamodb: catalog — 1 item" in lines
+    # No count is not the same as a count of zero.
+    assert "aws/sns: notify" in lines
+
+
+def test_a_truncated_bucket_is_not_reported_as_a_wrong_number():
+    """list_objects_v2 returns a PAGE. Reporting the page size as the total would
+    understate a large bucket, which is worse than admitting the cap."""
+    from src.qatest import inventory
+    lines = inventory.summarise({"aws": {"s3": [{"name": "big", "count": -1}]}})
+    assert "50+" in lines[0]

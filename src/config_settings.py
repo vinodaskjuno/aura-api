@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # lru_cached, and which emulators a run needs is derived from the project's
     # dependency nodes rather than configured.
     qatest_emulator_timeout_s: int = 60
+    #: Give Floci a container runtime socket, so its container-backed services — Lambda,
+    #: RDS, ElastiCache, OpenSearch, MSK, ECS — can start containers of their own.
+    #:
+    #: OFF by default, and deliberately. Mounting the runtime socket into a container
+    #: lets anything inside Floci start containers on the host: a real privilege
+    #: escalation, and not something to hand every run by default. The in-process
+    #: services (S3, DynamoDB, SQS, SNS, and ~35 more) need none of it.
+    qatest_container_backed_services: bool = False
     # Self-hosted QA runner. Empty disables scoped-credential minting, which is the
     # correct default: a developer running the backend locally already has their own
     # AWS credentials, and no other environment should hand any out.

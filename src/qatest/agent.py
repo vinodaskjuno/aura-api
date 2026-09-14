@@ -50,6 +50,12 @@ ACTIVITY_KEEP = 80
 #: through the API on someone else's behalf.
 LOG_MAX_BYTES = 128 * 1024
 
+#: Which env var carries each cloud's endpoint. Taken from the Cloud's own env template
+#: rather than rebuilt from the port, so a cloud that changes its variable cannot leave
+#: the inventory quietly reading the wrong address.
+_ENDPOINT_VAR = {"aws": "AWS_ENDPOINT_URL", "gcp": "STORAGE_EMULATOR_HOST",
+                 "azure": "AZURE_ENDPOINT_URL", "oci": "OCI_ENDPOINT_URL"}
+
 #: Report what podman is running every Nth poll. The machine's state changes far more
 #: slowly than the queue does, and this is a request per interval per runner.
 STATE_EVERY_N_POLLS = 3
@@ -437,6 +443,25 @@ def run_one(client: Client, job: dict) -> str:
     return status
 
 
+#: Where Floci's own console listens. Fixed, like the emulator ports.
+FLOCI_UI_PORT = 4500
+
+
+def _floci_ui() -> dict:
+    """Whether Floci's dashboard is reachable on this machine.
+
+    Cheap and short: this runs on every state report, and an absent dashboard is the
+    normal case — it must cost a refused connection, not a timeout.
+    """
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", FLOCI_UI_PORT), timeout=0.3):
+            return {"running": True, "port": FLOCI_UI_PORT}
+    except OSError:
+        return {"running": False, "port": FLOCI_UI_PORT}
+
+
 def _machine_state(busy_run_id: str = "", include_unmanaged: bool = False,
                    allow_logs: bool = True) -> dict:
     """What this machine looks like right now, for the Floci panel.
@@ -460,24 +485,121 @@ def _machine_state(busy_run_id: str = "", include_unmanaged: bool = False,
         "browserVersion": diag.version_of("browser.binary"),
         "health": diag.as_dict(),
         "os": f"{platform.system().lower()}/{platform.machine()}",
+        # Floci's own dashboard, if the operator runs it. Probed HERE rather than from
+        # the browser: a page served over HTTPS cannot fetch http://localhost without
+        # tripping mixed-content, and this process is already on the machine.
+        "flociUi": _floci_ui(),
         "busyRunId": busy_run_id,
         "acceptsLogCommands": allow_logs,
         "containers": emulators.list_containers(include_unmanaged),
     }
 
 
-def _run_command(command: dict, allow_logs: bool) -> dict:
-    """Carry out one command the server left for this runner.
+def _command_inventory(command: dict, result: dict) -> dict:
+    """What is inside a running emulator, right now.
 
-    Only `logs`, and only for containers Aura started. The server enforces the same
-    rule; both sides check because the failure mode — reading arbitrary container
-    output off someone's laptop — is severe and the check costs nothing.
+    Uses the SAME collector the end-of-run snapshot uses, so the live drawer and the
+    stored report can never disagree about what a resource looks like. Output is JSON
+    because the server parks it in S3 verbatim and the UI renders it structured.
+    """
+    from src.qatest import emulators, inventory
+
+    cloud = str(command.get("container") or "")      # the command's free-text slot
+    known = emulators._BY_NAME.get(cloud)
+    if not known:
+        result["error"] = f"unknown cloud {cloud!r}"
+        return result
+    if not emulators._ready(known.port, timeout=2):
+        result["error"] = (f"nothing is answering on :{known.port} — the {cloud} "
+                           f"emulator is not running")
+        return result
+
+    found = inventory.collect({cloud: known.env()[_ENDPOINT_VAR[cloud]]})
+    result["ok"] = True
+    result["output"] = json.dumps(found)
+    return result
+
+
+def _command_emulator(command: dict, result: dict) -> dict:
+    """Start or stop this project's emulators, on request from DevMate.
+
+    Project-scoped: named `aura-dev-<cloud>-<projectId>` so they are told apart from a
+    run's own, and so a run that finds them adopts and leaves them rather than tearing
+    down someone's working environment.
     """
     from src.qatest import emulators
 
+    kind = command.get("kind")
+    project_id = str(command.get("container") or "")
+    clouds = [c for c in str(command.get("clouds") or "").split(",") if c]
+    if not project_id:
+        result["error"] = "no project"
+        return result
+
+    done, problems = [], []
+    for cloud in clouds:
+        known = emulators._BY_NAME.get(cloud)
+        if not known:
+            problems.append(f"unknown cloud {cloud}")
+            continue
+        name = emulators.dev_container(cloud, project_id)
+        if kind == "emulator-stop":
+            ok, why = emulators.remove_container(name)
+            (done if ok else problems).append(name if ok else f"{name}: {why}")
+            continue
+
+        # Start. Refuse rather than collide: the ports are fixed, so something already
+        # there is either this project's emulator (already running — nothing to do) or
+        # another project's, which the operator has to stop first.
+        if emulators._ready(known.port, timeout=2):
+            holder = emulators._container_on_port(known.port).get("name", "")
+            if holder == name:
+                done.append(f"{name} (already running)")
+            else:
+                problems.append(
+                    f"port {known.port} is already held by {holder or 'another process'}. "
+                    f"Floci's ports are fixed, so only one {cloud} emulator can run at a "
+                    f"time — stop that one first.")
+            continue
+        ok, why = emulators.start_container(name, known)
+        (done if ok else problems).append(name if ok else f"{name}: {why}")
+
+    result["ok"] = not problems
+    result["output"] = json.dumps({"started" if kind == "emulator-start" else "stopped":
+                                   done, "problems": problems})
+    if problems:
+        result["error"] = "; ".join(problems)[:400]
+    return result
+
+
+def _run_command(command: dict, allow_logs: bool) -> dict:
+    """Carry out one command the server left for this runner.
+
+    The server cannot touch this machine — it is on Fargate and this is a laptop with no
+    inbound port — so anything it wants done here arrives as a parked command and is
+    collected on the next poll. Four kinds:
+
+      logs            `podman logs` for one container
+      inventory       what is inside a running emulator, right now
+      emulator-start  bring up this project's emulators (from DevMate)
+      emulator-stop   take them down again
+
+    Every kind that names a container checks it against MANAGED_PREFIXES here as well as
+    on the server. Both sides check because the failure mode — reading or killing
+    arbitrary containers on a developer's machine — is severe and the check costs
+    nothing.
+    """
+    from src.qatest import emulators
+
+    kind = command.get("kind")
     result = {"id": command.get("id", ""), "output": "", "ok": False, "error": ""}
-    if command.get("kind") != "logs":
-        result["error"] = f"unknown command {command.get('kind')!r}"
+
+    if kind == "inventory":
+        return _command_inventory(command, result)
+    if kind in ("emulator-start", "emulator-stop"):
+        return _command_emulator(command, result)
+    if kind != "logs":
+        result["error"] = f"unknown command {kind!r}"
         return result
     if not allow_logs:
         result["error"] = "this runner was started with --no-container-logs"
