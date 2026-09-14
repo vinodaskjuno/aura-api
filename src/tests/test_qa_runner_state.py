@@ -927,3 +927,69 @@ def test_the_clouds_list_reaches_the_runner(fake_dynamo):
     from the project's dependencies."""
     queue.request_command(RUNNER, "emulator-start", "proj-1", clouds="aws,gcp")
     assert queue.take_command(RUNNER)["clouds"] == "aws,gcp"
+
+
+# ── A directory user's gateway key must actually work ───────────────────────
+#
+# `authenticate` resolves a directory user's role from their LDAP groups on every login
+# and stores nothing, so their userId is "ldap:<name>" and `users` holds no row for them.
+# resolve_credential looked the role up there and defaulted to "user_dev", which carries
+# no qa_workspace — so a key minted by anyone signed in through the directory was dead on
+# arrival and stayed dead however many times it was rotated. A dev QA runner sat 403-ing
+# for four days on exactly this, and rotating the key (twice) could not have helped.
+
+def test_a_directory_users_key_keeps_the_role_it_was_minted_with(monkeypatch):
+    from src.services import gateway_service as gw
+
+    minted = gw.generate_api_key("ldap:admin", tool_label="qa-runner",
+                                 role_id="super_admin")
+    stored = {}
+
+    def fake_get_item(table, key):
+        if table == "users":
+            return None          # a directory user has no row here. That is the point.
+        return stored.get(key.get("keyId"))
+
+    from src.database import dynamo_client as db
+    stored[minted["keyId"]] = {
+        "keyId": minted["keyId"], "userId": "ldap:admin", "active": True,
+        "toolLabel": "qa-runner", "roleId": "super_admin"}
+    monkeypatch.setattr(db, "get_item", fake_get_item)
+    monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
+
+    user = gw.resolve_credential(minted["key"])
+
+    assert user.role == "super_admin"
+    assert "qa_workspace" in user.permissions, (
+        "a directory user's runner key cannot authenticate — this is the bug that made "
+        "the dev runner unfixable by rotation")
+
+
+def test_a_key_minted_before_this_still_resolves(monkeypatch):
+    """Old rows carry no roleId. They must keep behaving exactly as they did."""
+    from src.database import dynamo_client as db
+    from src.services import gateway_service as gw
+
+    monkeypatch.setattr(db, "get_item", lambda table, key: (
+        None if table == "users" else
+        {"keyId": key.get("keyId"), "userId": "ldap:someone", "active": True,
+         "toolLabel": "qa-runner"}))          # no roleId
+    monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
+
+    assert gw.resolve_credential("gw-anything").role == "user_dev"
+
+
+def test_a_local_users_row_still_wins(monkeypatch):
+    """A user WITH a row keeps getting their current role, so a later promotion or
+    demotion takes effect without re-minting every key."""
+    from src.database import dynamo_client as db
+    from src.services import gateway_service as gw
+
+    monkeypatch.setattr(db, "get_item", lambda table, key: (
+        {"userId": "u1", "username": "admin", "roleId": "super_admin"}
+        if table == "users" else
+        {"keyId": key.get("keyId"), "userId": "u1", "active": True,
+         "toolLabel": "qa-runner", "roleId": "user_dev"}))   # stale, must lose
+    monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
+
+    assert gw.resolve_credential("gw-anything").role == "super_admin"

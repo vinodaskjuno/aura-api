@@ -72,7 +72,8 @@ def _key_id(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode()).hexdigest()[:32]
 
 
-def generate_api_key(user_id: str, label: str = "", tool_label: str = "") -> dict:
+def generate_api_key(user_id: str, label: str = "", tool_label: str = "",
+                     role_id: str = "") -> dict:
     """Create a new gateway API key. Returns the plain-text key (shown once).
 
     tool_label identifies which AI tool will use this key
@@ -93,13 +94,18 @@ def generate_api_key(user_id: str, label: str = "", tool_label: str = "") -> dic
         "createdAt": now,
         "lastUsedAt": "",
         "active": True,
+        # Recorded HERE because this is the only moment it is reliably known. A
+        # directory user has no row in `users`, so resolving the role at USE time finds
+        # nothing and falls back — see `_directory_role`.
+        "roleId": role_id or "",
     }
     db.put_item(s.gateway_keys_table, item)
     log.info("Created gateway API key %s for user %s (tool=%s)", kid, user_id, tool_label)
     return {"keyId": kid, "key": raw_key, "label": item["label"], "toolLabel": item["toolLabel"], "createdAt": now}
 
 
-def get_or_create_tool_key(user_id: str, tool_label: str) -> dict:
+def get_or_create_tool_key(user_id: str, tool_label: str,
+                           role_id: str = "") -> dict:
     """Return the existing active key for this (user, tool_label) pair, or create one.
 
     Used by the VS Code plugin on login to provision per-tool virtual keys without
@@ -127,10 +133,11 @@ def get_or_create_tool_key(user_id: str, tool_label: str) -> dict:
                 "exists": True,
             }
     # No existing key — create one
-    return {**generate_api_key(user_id, label=tool_label, tool_label=tool_label), "exists": False}
+    return {**generate_api_key(user_id, label=tool_label, tool_label=tool_label,
+                               role_id=role_id), "exists": False}
 
 
-def rotate_tool_key(user_id: str, tool_label: str) -> dict:
+def rotate_tool_key(user_id: str, tool_label: str, role_id: str = "") -> dict:
     """Revoke any existing key for this (user, tool) pair and issue a fresh one.
 
     Needed because the plaintext key is only ever returned at creation time.
@@ -166,7 +173,8 @@ def rotate_tool_key(user_id: str, tool_label: str) -> dict:
         except Exception as exc:
             log.warning("rotate_tool_key: could not revoke %s: %s", item.get("keyId"), exc)
 
-    created = generate_api_key(user_id, label=tool_label, tool_label=tool_label)
+    created = generate_api_key(user_id, label=tool_label, tool_label=tool_label,
+                               role_id=role_id)
     log.info("Rotated gateway key for %s/%s (revoked %d)", user_id, tool_label, revoked)
     return {**created, "rotated": True, "revokedCount": revoked}
 
@@ -255,6 +263,34 @@ def extract_credential(request: Request) -> str:
     )
 
 
+def _directory_role(user_id: str, item: dict) -> str:
+    """The role for a key whose owner has no row in `users`.
+
+    A directory-authenticated user never gets one: `authenticate` resolves their role
+    from their LDAP groups on every login and stores nothing, so `userId` is
+    "ldap:<name>" and `get_item("users", …)` finds nothing.
+
+    That silently defaulted to "user_dev", which carries no `qa_workspace` — so a
+    gateway key minted by anyone signed in through the directory was DEAD ON ARRIVAL,
+    and stayed dead however many times it was rotated. It presented as a runner that
+    could authenticate but was always refused, which reads like a revoked key and
+    invites exactly the rotation that cannot fix it. A QA runner sat 403-ing for four
+    days on that.
+
+    The role is recorded on the key at mint time instead, where the minting request DID
+    know it. Falling back to the old default keeps a key minted before this change
+    working exactly as it did.
+    """
+    recorded = str(item.get("roleId") or "")
+    if recorded:
+        return recorded
+    if user_id.startswith("ldap:"):
+        log.warning(
+            "gateway key for directory user %s has no stored role — falling back to "
+            "user_dev. Re-mint the key to record it.", user_id)
+    return "user_dev"
+
+
 def resolve_credential(token: str) -> GatewayUser:
     """Resolve a raw credential string to a GatewayUser.
 
@@ -298,7 +334,7 @@ def resolve_credential(token: str) -> GatewayUser:
 
     user_id = item.get("userId", "")
     user_record = db.get_item("users", {"userId": user_id}) or {}
-    role = user_record.get("roleId", "user_dev")
+    role = user_record.get("roleId", "") or _directory_role(user_id, item)
 
     return GatewayUser(
         user_id=user_id,

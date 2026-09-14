@@ -20,6 +20,7 @@ import argparse
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -47,6 +48,80 @@ def call(api: str, path: str, token: str = "", body: dict | None = None,
         raise SystemExit(f"\n{method or 'POST'} {path} failed ({exc.code}): {detail}")
     except urllib.error.URLError as exc:
         raise SystemExit(f"\nCould not reach {url}: {exc.reason}")
+
+
+#: Never shipped. Dependencies are reinstalled on the runner and history is not needed
+#: to run anything — the same exclusions qatest/workspace.py applies when it packages a
+#: working copy for a runner.
+UPLOAD_SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
+               ".pytest_cache", ".mypy_cache", ".ruff_cache", ".DS_Store"}
+
+
+def upload_folder(api: str, token: str, project_id: str, root: Path,
+                  label: str) -> dict:
+    """Stream a directory to the API as multipart form data.
+
+    The remote path. `git clone file:///…` only works when the API can read that path
+    itself, which is true for a backend on this laptop and false for one on Fargate —
+    it would try to clone a directory that does not exist over there. This sends the
+    bytes instead, so it works wherever the API is.
+
+    Built by hand rather than with `requests` so the script keeps to the standard
+    library, like the rest of it.
+    """
+    import mimetypes
+    import uuid as _uuid
+
+    files = [f for f in sorted(root.rglob("*"))
+             if f.is_file() and not (set(f.relative_to(root).parts) & UPLOAD_SKIP)]
+    if not files:
+        raise SystemExit(f"nothing to upload from {root}")
+
+    boundary = f"----aura{_uuid.uuid4().hex}"
+    parts: list[bytes] = []
+
+    def field(name: str, value: str) -> None:
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+            f"{value}\r\n".encode())
+
+    field("projectId", project_id)
+    field("label", label)
+    for f in files:
+        # `paths` and `files` are positional partners: the Nth path names the Nth file,
+        # which is what lets the server rebuild the tree. POSIX separators regardless of
+        # platform, because the far side joins them onto its own workspace path.
+        field("paths", f.relative_to(root).as_posix())
+    for f in files:
+        ctype = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; "
+            f"filename=\"{f.name}\"\r\nContent-Type: {ctype}\r\n\r\n".encode())
+        parts.append(f.read_bytes())
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+
+    request = urllib.request.Request(
+        f"{api.rstrip('/')}/api/git/upload-folder", data=b"".join(parts), method="POST")
+    request.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            raw = response.read().decode() or "{}"
+            return json.loads(raw) if raw.strip().startswith("{") else {}
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"\nupload-folder failed ({exc.code}): "
+                         f"{exc.read().decode()[:400]}")
+
+
+def is_local(api: str) -> bool:
+    """Whether the API runs on this machine, and can therefore read local paths.
+
+    Decides between cloning `file:///…` — fast, and what the existing demos document —
+    and uploading the bytes, which is the only thing that works against a deployed API.
+    """
+    host = urllib.parse.urlparse(api).hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
 
 
 def ensure_git_repo(path: Path) -> None:
@@ -91,7 +166,9 @@ def main() -> int:
     if not (APP / "backend" / "app" / "main.py").exists():
         raise SystemExit(f"demo app not found at {APP}")
 
-    ensure_git_repo(APP)
+    # Only the clone path needs a repository at the far end; an upload sends bytes.
+    if is_local(args.api):
+        ensure_git_repo(APP)
 
     print(f"▶ signing in to {args.api} as {args.user}")
     auth = call(args.api, "/auth/login",
@@ -117,20 +194,40 @@ def main() -> int:
         raise SystemExit(f"no projectId in the response: {list(project)}")
     print(f"  projectId = {project_id}")
 
-    # file:// works and needs no git host — the same trick aura-demo-shop/DEMO.md uses.
-    print("▶ cloning the code into the workspace (this is what a run needs)")
-    cloned = call(args.api, "/api/git/clone", token, {
-        "repoUrl": f"file://{APP}", "branch": "main", "projectId": project_id})
-    root = cloned.get("clonedPath") or ""
-    if not root:
-        raise SystemExit(f"clone returned no path: {cloned}")
+    # Two ways in, and which one works depends on whether the API can read this disk.
+    #
+    #   local  -> clone file:///… . Fast, no upload, and what the existing demos document.
+    #   remote -> stream the bytes. A deployed API on Fargate cannot open a path on this
+    #             laptop, so a file:// clone there fails on a directory that does not
+    #             exist over there — with an error that points at the path rather than at
+    #             the reason.
+    if is_local(args.api):
+        print("▶ cloning the code into the workspace (local API)")
+        cloned = call(args.api, "/api/git/clone", token, {
+            "repoUrl": f"file://{APP}", "branch": "main", "projectId": project_id})
+        root = cloned.get("clonedPath") or ""
+        if not root:
+            raise SystemExit(f"clone returned no path: {cloned}")
+        backend = f"{root.rstrip('/')}/backend"
+    else:
+        print("▶ uploading the code (remote API — it cannot read this disk)")
+        uploaded = upload_folder(args.api, token, project_id, APP / "backend", "backend")
+        # The server rebuilds the tree under <workspace>/<projectId>/<label> and tells us
+        # where. Asking it beats assuming: the workspace root differs between a container
+        # and a laptop, and guessing would produce a connector pointing nowhere.
+        # `localPath` is where the server rebuilt the tree. Asking beats assuming: the
+        # workspace root is /workspace in a container and ./data/workspace on a laptop,
+        # so a computed path would produce a connector pointing nowhere.
+        backend = uploaded.get("localPath") or ""
+        if not backend:
+            raise SystemExit(f"upload-folder returned no localPath: {uploaded}")
+        print(f"  uploaded {uploaded.get('fileCount', '?')} file(s) to {backend}")
 
     # Now the connector, pointing at the BACKEND directory inside the clone — the shape
     # the analyser actually reads: repoType "local", and repoUrl AND localPath both set
     # to an absolute path that exists. Anything else analyses to an empty graph, and an
     # empty graph means no dependencies, so no emulator, so nothing to demonstrate.
     print("▶ registering the backend as a local connector")
-    backend = f"{root.rstrip('/')}/backend"
     call(args.api, f"/api/projects/{project_id}/connectors", token, {
         "repoType": "local", "sourceType": "local",
         "repoUrl": backend, "localPath": backend, "branch": "main"})

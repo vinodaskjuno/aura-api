@@ -59,7 +59,11 @@ class CreateKeyRequest(BaseModel):
 def create_gateway_key(body: CreateKeyRequest, user: dict = Depends(get_current_user)):
     """Generate a new gateway API key for the calling user."""
     user_id = user.get("userId", "")
-    return generate_api_key(user_id, label=body.label, tool_label=body.tool_label)
+    # The role travels from the JWT, which resolved it — for a directory user from
+    # their LDAP groups. Resolving it again at USE time finds no `users` row and
+    # falls back to user_dev; see gateway_service._directory_role.
+    return generate_api_key(user_id, label=body.label, tool_label=body.tool_label,
+                            role_id=user.get("role", ""))
 
 
 @router.get("/keys/me/{tool_label}")
@@ -83,7 +87,7 @@ def get_or_create_my_tool_key(tool_label: str, user: dict = Depends(get_current_
     if tool_label not in _VALID_TOOL_LABELS:
         raise HTTPException(status_code=400, detail=f"Unknown tool_label '{tool_label}'")
     user_id = user.get("userId", "")
-    return get_or_create_tool_key(user_id, tool_label)
+    return get_or_create_tool_key(user_id, tool_label, role_id=user.get("role", ""))
 
 
 @router.post("/keys/me/{tool_label}/rotate")
@@ -102,7 +106,7 @@ def rotate_my_tool_key(tool_label: str, user: dict = Depends(get_current_user)):
     if tool_label not in _VALID_TOOL_LABELS:
         raise HTTPException(status_code=400, detail=f"Unknown tool_label '{tool_label}'")
     user_id = user.get("userId", "")
-    return rotate_tool_key(user_id, tool_label)
+    return rotate_tool_key(user_id, tool_label, role_id=user.get("role", ""))
 
 
 @router.get("/keys")
