@@ -802,6 +802,12 @@ def get_container_logs(command_id: str, runner: str = Query(...),
     record = queue.command_result(runner, command_id)
     if not record:
         raise HTTPException(404, "no such log request")
+    if record.get("superseded"):
+        # A newer request replaced this one. Saying so lets the caller re-ask
+        # immediately instead of polling a dead id until it times out and accuses the
+        # runner of silence.
+        return {"status": "superseded",
+                "reason": "a newer request replaced this one"}
     if record.get("error"):
         return {"status": "failed", "error": record["error"],
                 "container": record.get("container", "")}
@@ -852,6 +858,12 @@ def get_emulator_inventory(command_id: str, runner: str = Query(...),
     record = queue.command_result(runner, command_id)
     if not record:
         raise HTTPException(404, "no such inventory request")
+    if record.get("superseded"):
+        # A newer request replaced this one. Saying so lets the caller re-ask
+        # immediately instead of polling a dead id until it times out and accuses the
+        # runner of silence.
+        return {"status": "superseded",
+                "reason": "a newer request replaced this one"}
     if record.get("error"):
         return {"status": "failed", "error": record["error"],
                 "cloud": record.get("container", "")}

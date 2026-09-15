@@ -939,9 +939,22 @@ def record_command_result(runner: str, command_id: str, key: str = "",
 
 
 def command_result(runner: str, command_id: str) -> dict | None:
+    """This command's outcome, or None when the runner is unknown.
+
+    Returns `superseded` rather than None when the row holds a DIFFERENT command. The
+    runner row carries exactly one command slot, so a later request overwrites the
+    previous one — and the caller still polling the old id then got a bare 404 forever,
+    gave up after its timeout, and reported "the runner did not answer". It had
+    answered; the question had been replaced. Blaming the runner for a server-side
+    overwrite sends the reader to check a machine that is working fine.
+    """
     row = runner_state(runner) or {}
-    if row.get("cmdId") != command_id:
+    if not row:
         return None
+    if row.get("cmdId") != command_id:
+        return {"commandId": command_id, "superseded": True,
+                "container": "", "resultKey": "", "resultAt": "", "error": "",
+                "requestedAt": ""}
     return {"commandId": command_id,
             "container": row.get("cmdContainer", ""),
             "resultKey": row.get("cmdResultKey", ""),

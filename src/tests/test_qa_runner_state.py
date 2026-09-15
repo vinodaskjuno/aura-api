@@ -1073,3 +1073,38 @@ def test_a_local_users_row_still_supplies_the_name(monkeypatch):
               "toolLabel": "qa-runner"}))
     monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
     assert gw.resolve_credential("gw-anything").username == "someone"
+
+
+def test_a_superseded_command_says_so_instead_of_vanishing(fake_dynamo):
+    """The runner row holds ONE command slot, so a later request overwrites the previous
+    one. The caller still polling the old id used to get a bare 404 forever, time out,
+    and report "the runner did not answer" — about a runner that had answered, to a
+    question that had been replaced. That sends the reader to inspect a healthy machine.
+    """
+    first = queue.request_command(RUNNER, "inventory", "aws")["commandId"]
+    # Past the dedupe window, so this genuinely replaces rather than returning `first`.
+    queue.record_command_result(RUNNER, first, key="k")
+    second = queue.request_command(RUNNER, "inventory", "aws")["commandId"]
+    assert second != first
+
+    stale = queue.command_result(RUNNER, first)
+    assert stale is not None, "a superseded command must not look like an unknown runner"
+    assert stale["superseded"] is True
+
+    live = queue.command_result(RUNNER, second)
+    assert not live.get("superseded")
+
+
+def test_an_unknown_runner_is_still_a_miss(fake_dynamo):
+    """`superseded` must not swallow the genuine not-found case."""
+    assert queue.command_result("nobody/qa-runner", "cmd-x") is None
+
+
+def test_the_endpoint_reports_superseded_rather_than_404(fake_dynamo):
+    first = queue.request_command(RUNNER, "inventory", "aws")["commandId"]
+    queue.record_command_result(RUNNER, first, key="k")
+    queue.request_command(RUNNER, "inventory", "aws")
+
+    res = client.get(f"{BASE}/runners/inventory/{first}", params={"runner": RUNNER})
+    assert res.status_code == 200
+    assert res.json()["status"] == "superseded"
