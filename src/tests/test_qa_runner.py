@@ -1187,3 +1187,37 @@ def test_a_truncated_bucket_is_not_reported_as_a_wrong_number():
     from src.qatest import inventory
     lines = inventory.summarise({"aws": {"s3": [{"name": "big", "count": -1}]}})
     assert "50+" in lines[0]
+
+
+# ── Non-web cases must survive a run that also has web cases ─────────────────
+
+def test_policy_results_are_not_dropped_when_web_cases_exist(monkeypatch, tmp_path):
+    """Structure and policy run in an EARLY pass, into their own recorder, before
+    Playwright is even looked for. Three later branches carry that pass forward and each
+    tested `structural` alone — so the policy kind's results were computed and then
+    thrown away for any project that also had API cases. Observed on dev: a run reported
+    11 of 15 cases with nothing said about the other four."""
+    from src.qatest import runner as qa_runner
+    from src.qatest.types import Case
+
+    (tmp_path / "template.yaml").write_text(
+        "Resources:\n  T:\n    Type: AWS::DynamoDB::Table\n"
+        "    Properties:\n      SSESpecification:\n        SSEEnabled: true\n")
+
+    cases = [
+        Case(case_id="policy-000", kind="policy", name="SC-13 · encryption",
+             path="template.yaml", method="encryption_declared"),
+        Case(case_id="root-001", kind="ui", name="GET /", path="/"),
+    ]
+
+    # No browser in the test environment: the run takes the "playwright unavailable"
+    # branch, which is one of the three that must carry the early pass forward.
+    monkeypatch.setattr(qa_runner, "_playwright_available",
+                        lambda: (False, "no browser here"))
+    monkeypatch.setattr(qa_runner.evidence, "write_steps", lambda *a, **k: None)
+    monkeypatch.setattr(qa_runner.evidence, "write_console", lambda *a, **k: None)
+
+    report = qa_runner.run_plan("p1", "r1", {"api": "http://x"}, cases, root=tmp_path)
+
+    ids = {s.case_id for s in report.__dict__.get("_steps", [])}
+    assert "policy-000" in ids, "the policy result was computed and then discarded"

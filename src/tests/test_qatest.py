@@ -754,3 +754,31 @@ def test_an_empty_working_copy_says_so():
 
     with tempfile.TemporaryDirectory() as d:
         assert "empty" in _cannot_start(pathlib.Path(d), [], [])
+
+
+def test_detects_an_app_inside_a_single_wrapper_directory(tmp_path):
+    """A folder uploaded through the UI keeps its own name, putting the app one level
+    below where a clone leaves it. Three real projects reached a run in this shape and
+    were told "no runnable application found" about code that was plainly there."""
+    from src.qatest import appserver
+    _demo_layout(tmp_path / "aura-cloud-demo")
+    specs = {s.kind: s for s in appserver.detect(tmp_path)}
+    assert set(specs) == {"api", "ui"}
+    assert specs["api"].directory == tmp_path / "aura-cloud-demo" / "backend"
+
+
+def test_two_sibling_directories_are_never_unwrapped(tmp_path):
+    """The unwrap is deliberately limited to a SINGLE child. With two, descending would
+    make the choice between them arbitrary, so nothing is detected rather than guessed."""
+    from src.qatest import appserver
+    _demo_layout(tmp_path / "services")
+    _demo_layout(tmp_path / "tools")
+    assert appserver.detect(tmp_path) == []
+
+
+def test_unwrapping_is_bounded(tmp_path):
+    """A chain of single directories must not recurse to the bottom of the tree."""
+    from src.qatest import appserver
+    deep = tmp_path / "a" / "b" / "c" / "d"
+    _demo_layout(deep)
+    assert appserver.detect(tmp_path) == []

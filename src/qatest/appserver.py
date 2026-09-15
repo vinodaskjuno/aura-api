@@ -33,6 +33,11 @@ READY_TIMEOUT_S = 60
 STOP_GRACE_S = 5
 
 # Directories that never contain an application worth starting.
+#: How many single wrapper directories `detect` will step through. One covers a folder
+#: upload; two covers a folder uploaded from inside another. Past that, a tree that deep
+#: with nothing runnable in it is not a layout worth guessing at.
+_MAX_UNWRAP = 2
+
 _SKIP = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
          ".next", "target", "vendor", ".pytest_cache"}
 
@@ -227,9 +232,13 @@ def _first_published_port(compose_body: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def detect(root: Path) -> list[AppSpec]:
+def detect(root: Path, _unwrapped: int = 0) -> list[AppSpec]:
     """Find the applications in a repository. Deepest-first is not needed: a repo
-    holds at most one backend and one frontend in the shapes handled here."""
+    holds at most one backend and one frontend in the shapes handled here.
+
+    Searches the root and its immediate children. `_unwrapped` counts how many single
+    wrapper directories have been stepped through — see the tail of this function.
+    """
     found: list[AppSpec] = []
     root = Path(root)
 
@@ -305,8 +314,26 @@ def detect(root: Path) -> list[AppSpec]:
                              "--strictPort", "--host", "127.0.0.1"],
                     port=port, env={}, blocked=blocked))
 
-    return found
+    # Uploading a FOLDER through the UI keeps the folder itself, so the app lands one
+    # level below where a clone would have put it — `<workspace>/my-app/backend` rather
+    # than `<workspace>/backend`. The loops above look at the root and its immediate
+    # children only, so the whole project reads as healthy (the analyser walks the tree
+    # recursively, so the graph, the cloud dependencies and the case list all come out
+    # correct) right up until a run needs something to start, and then reports "no
+    # runnable application found" about code that is plainly there.
+    #
+    # Step through that wrapper — but ONLY when it is the single directory present.
+    # Searching two levels unconditionally would let `services/api` and `tools/api` both
+    # match and make the choice of app arbitrary; with exactly one candidate there is
+    # nothing to be ambiguous about. Bounded, because a chain of single directories
+    # would otherwise recurse as deep as the tree goes.
+    if not found and _unwrapped < _MAX_UNWRAP and root.exists():
+        children = [d for d in sorted(root.iterdir())
+                    if d.is_dir() and d.name not in _SKIP]
+        if len(children) == 1:
+            return detect(children[0], _unwrapped + 1)
 
+    return found
 
 def _wait_healthy(port: int, path: str = "/", timeout: int = 300) -> bool:
     """Wait for a 2xx on `path`.

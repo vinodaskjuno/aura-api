@@ -882,6 +882,33 @@ def get_emulator_inventory(command_id: str, runner: str = Query(...),
             "fetchedAt": record.get("resultAt", ""), "resources": resources}
 
 
+@router.get("/runners/command/{command_id}")
+def get_command_status(command_id: str, runner: str = Query(...),
+                       _: dict = Depends(require_permission("qa_workspace"))):
+    """The outcome of any parked command, without its payload.
+
+    `logs` and `inventory` each have a reader that returns their RESULT. The emulator
+    start/stop commands had none, so a UI that issued one could only guess: it watched
+    for the container list to change and, when a command FAILED, waited forever on a
+    spinner while a perfectly good explanation sat unread on the runner's row.
+
+    Observed exactly that — a Start refused in four seconds because another project held
+    :4566, presented to the operator as "taking a long time".
+    """
+    from src.qatest import queue
+
+    record = queue.command_result(runner, command_id)
+    if not record:
+        raise HTTPException(404, "no such command")
+    if record.get("superseded"):
+        return {"status": "superseded", "reason": "a newer request replaced this one"}
+    if record.get("error"):
+        return {"status": "failed", "error": record["error"]}
+    if not record.get("resultAt"):
+        return {"status": "pending", "requestedAt": record.get("requestedAt", "")}
+    return {"status": "ready", "finishedAt": record.get("resultAt", "")}
+
+
 class EmulatorRequest(BaseModel):
     runner: str
 

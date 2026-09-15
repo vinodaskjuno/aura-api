@@ -222,7 +222,14 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
     # navigation error that says nothing about the real problem.
     web = [c for c in cases if c.kind not in ("structure", "stack", "policy")]
 
-    if (structural or policy_cases) and root is not None:
+    # Everything that runs BEFORE the browser, in one flag. Three later branches carry
+    # this pass's steps forward and each used to test `structural` alone — so adding the
+    # policy kind made its results vanish for any project that also had web cases: the
+    # checks ran, and `_finish` was handed a different recorder. The run reported 11 of
+    # 15 cases with no explanation for the other four.
+    ran_early = bool(structural or policy_cases) and root is not None
+
+    if ran_early:
         rec_early = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
         if structural:
             _run_structure(rec_early, structural, root)
@@ -233,10 +240,10 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
 
     ok, why = _playwright_available()
     if not ok:
-        if structural and root is not None:
-            # The file checks already ran and mean what they say. Reporting the whole
-            # run as `unavailable` would throw away real results because a DIFFERENT
-            # kind of case could not run.
+        if ran_early:
+            # The file and policy checks already ran and mean what they say. Reporting
+            # the whole run as `unavailable` would throw away real results because a
+            # DIFFERENT kind of case could not run.
             report = _finish(report, rec_early, project_id, run_id, started_wall)
             report.reason = (f"{len(web)} case(s) needed a browser and were not run: "
                              f"{why}")
@@ -258,13 +265,13 @@ def run_plan(project_id: str, run_id: str, urls: dict[str, str] | str,
         # A converted project: a stack to ask questions of, and no graph-derived
         # routes to browse. No browser needed at all.
         rec_only = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
-        if structural and root is not None:
+        if ran_early:
             rec_only.steps.extend(rec_early.steps)
         _run_stack(rec_only, stack_cases, urls)
         return _finish(report, rec_only, project_id, run_id, started_wall)
 
     rec = _Recorder(project_id, run_id, on_step=on_step, total=len(cases))
-    if structural and root is not None:
+    if ran_early:
         # Keep the numbering continuous across both passes.
         rec.steps.extend(rec_early.steps)
         rec.console.extend(rec_early.console)
