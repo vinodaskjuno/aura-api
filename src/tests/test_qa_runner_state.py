@@ -1042,3 +1042,34 @@ def test_the_two_do_not_overwrite_each_others_state(fake_dynamo, monkeypatch):
     monkeypatch.setattr(q, "_scope", lambda: "local/development")
     mine = q.list_runner_state()[0]
     assert mine["machine"] == "laptop" and mine["podman"] is True
+
+
+def test_a_directory_users_key_reports_the_name_everything_else_uses(monkeypatch):
+    """`owner` is compared against the JWT's username to decide "is this my machine".
+    A directory userId is "ldap:admin" while the JWT says "admin", so a runner the
+    operator started appeared to belong to someone else and DevMate refused to offer
+    Start on it."""
+    from src.database import dynamo_client as db
+    from src.services import gateway_service as gw
+
+    monkeypatch.setattr(db, "get_item", lambda table, key: (
+        None if table == "users" else
+        {"keyId": key.get("keyId"), "userId": "ldap:admin", "active": True,
+         "toolLabel": "qa-runner", "roleId": "super_admin"}))
+    monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
+
+    user = gw.resolve_credential("gw-anything")
+    assert user.username == "admin", "the runner would look like someone else's machine"
+    assert user.user_id == "ldap:admin", "the id itself must not be rewritten"
+
+
+def test_a_local_users_row_still_supplies_the_name(monkeypatch):
+    from src.database import dynamo_client as db
+    from src.services import gateway_service as gw
+
+    monkeypatch.setattr(db, "get_item", lambda table, key: (
+        {"userId": "u1", "username": "someone", "roleId": "user_qa"} if table == "users"
+        else {"keyId": key.get("keyId"), "userId": "u1", "active": True,
+              "toolLabel": "qa-runner"}))
+    monkeypatch.setattr(db, "update_item", lambda *a, **k: None)
+    assert gw.resolve_credential("gw-anything").username == "someone"

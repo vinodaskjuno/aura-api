@@ -263,6 +263,19 @@ def extract_credential(request: Request) -> str:
     )
 
 
+def _directory_username(user_id: str) -> str:
+    """The name a directory user is known by, from their userId.
+
+    Same missing `users` row as `_directory_role`, with a quieter symptom. The raw id is
+    "ldap:admin" while every other surface — the JWT, the UI, anything comparing "is this
+    mine" — says "admin". So a runner registered through a directory key was owned by
+    someone who appeared not to exist: the DevMate control found a connected runner,
+    failed `owner === you`, and reported it as belonging to another person. The machine
+    was the operator's own.
+    """
+    return user_id.split(":", 1)[1] if user_id.startswith("ldap:") else user_id
+
+
 def _directory_role(user_id: str, item: dict) -> str:
     """The role for a key whose owner has no row in `users`.
 
@@ -338,7 +351,7 @@ def resolve_credential(token: str) -> GatewayUser:
 
     return GatewayUser(
         user_id=user_id,
-        username=user_record.get("username", user_id),
+        username=user_record.get("username") or _directory_username(user_id),
         role=role,
         permissions=_permissions_for_role(role),
         tool_label=item.get("toolLabel", "unknown"),
