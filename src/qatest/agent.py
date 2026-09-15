@@ -505,6 +505,10 @@ def _command_inventory(command: dict, result: dict) -> dict:
     from src.qatest import emulators, inventory
 
     cloud = str(command.get("container") or "")      # the command's free-text slot
+    # The emulator is shared by every project on the machine, so an inventory has to say
+    # WHOSE resources it wants. Without this it reads the default account and reports
+    # either nothing or another project's — the panel would be confidently wrong.
+    project_id = str(command.get("projectId") or "")
     known = emulators._BY_NAME.get(cloud)
     if not known:
         result["error"] = f"unknown cloud {cloud!r}"
@@ -514,7 +518,8 @@ def _command_inventory(command: dict, result: dict) -> dict:
                            f"emulator is not running")
         return result
 
-    found = inventory.collect({cloud: known.env()[_ENDPOINT_VAR[cloud]]})
+    found = inventory.collect({cloud: known.env(project_id)[_ENDPOINT_VAR[cloud]]},
+                              account=emulators.account_for(project_id))
     result["ok"] = True
     result["output"] = json.dumps(found)
     return result
@@ -629,9 +634,10 @@ def _command_populate(command: dict, result: dict) -> dict:
                            f"here whose startup could create cloud resources")
         return result
 
-    # The emulator must be THIS project's. `_ready` alone is satisfied by another
-    # project's emulator on the same fixed port, and populating someone else's is the
-    # worst failure available here.
+    # The emulator is SHARED — one per cloud for every project on the machine — so what
+    # matters is that it is Aura's, not whose it is. Projects are kept apart inside it by
+    # AWS account (`emulators.account_for`), which is why populating an emulator another
+    # project is also using is now safe rather than the worst failure available.
     env: dict[str, str] = {}
     endpoints: dict[str, str] = {}
     for cloud in clouds:
@@ -639,18 +645,21 @@ def _command_populate(command: dict, result: dict) -> dict:
         if not known:
             problems.append(f"unknown cloud {cloud}")
             continue
-        expected = emulators.dev_container(cloud, project_id)
         if not emulators._ready(known.port, timeout=2):
             problems.append(f"the {cloud} emulator is not running — press Start first")
             continue
         holder = emulators._container_on_port(known.port).get("name", "")
-        if holder != expected:
+        if holder and not holder.startswith(emulators.MANAGED_PREFIXES):
+            # Something Aura did not start is on the port — a hand-run `floci start`, or
+            # an unrelated service. Refuse rather than provision into it.
             problems.append(
-                f"port {known.port} is held by {holder or 'another process'}, not this "
-                f"project's emulator — populating it would write into someone else's")
+                f"port {known.port} is held by {holder}, which Aura did not start. "
+                f"Stop it, or start the emulator from DevMate.")
             continue
-        env.update(known.env())
-        endpoints[cloud] = known.env()[_ENDPOINT_VAR[cloud]]
+        # Scoped to THIS project's account, so its resources are invisible to the others
+        # sharing the container.
+        env.update(known.env(project_id))
+        endpoints[cloud] = known.env(project_id)[_ENDPOINT_VAR[cloud]]
 
     if not endpoints:
         result["error"] = "; ".join(problems)[:400] or "no usable emulator for this project"
@@ -665,7 +674,7 @@ def _command_populate(command: dict, result: dict) -> dict:
         result["error"] = f"the app did not start: {type(exc).__name__}: {exc}"[:400]
         return result
 
-    found = inventory.collect(endpoints)
+    found = inventory.collect(endpoints, account=emulators.account_for(project_id))
     # `collect` nests per cloud: {"aws": {"s3": [...], "lambda": [...]}}. Counting the
     # outer level finds dicts, not lists, and silently reports zero — which turned a
     # perfectly good populate into "the app created no resources".
@@ -708,24 +717,31 @@ def _command_emulator(command: dict, result: dict) -> dict:
         if not known:
             problems.append(f"unknown cloud {cloud}")
             continue
-        name = emulators.dev_container(cloud, project_id)
+        name = emulators.dev_container(cloud)
         if kind == "emulator-stop":
+            # Shared: this stops the emulator for EVERY project on the machine, and
+            # Floci keeps state in memory, so their resources go with it. The UI says so
+            # before asking; this is the other half of that contract.
             ok, why = emulators.remove_container(name)
             (done if ok else problems).append(name if ok else f"{name}: {why}")
             continue
 
-        # Start. Refuse rather than collide: the ports are fixed, so something already
-        # there is either this project's emulator (already running — nothing to do) or
-        # another project's, which the operator has to stop first.
+        # Start. The emulator is SHARED — one per cloud for the whole machine — so an
+        # emulator already up is the answer, not a collision. This used to refuse,
+        # because a per-project container could never get the fixed port a moment after
+        # another project took it; projects are now separated by AWS account inside one
+        # container instead, so attaching is correct.
         if emulators._ready(known.port, timeout=2):
             holder = emulators._container_on_port(known.port).get("name", "")
-            if holder == name:
-                done.append(f"{name} (already running)")
+            if not holder or holder.startswith(emulators.MANAGED_PREFIXES):
+                done.append(f"{holder or name} (already running — shared)")
             else:
+                # Something Aura did not start. Still refuse: Aura has no idea what it
+                # is and must not hand a project's tests to it.
                 problems.append(
-                    f"port {known.port} is already held by {holder or 'another process'}. "
-                    f"Floci's ports are fixed, so only one {cloud} emulator can run at a "
-                    f"time — stop that one first.")
+                    f"port {known.port} is held by {holder}, which Aura did not start. "
+                    f"Stop it first, or use it as-is by starting your app against "
+                    f"http://localhost:{known.port} directly.")
             continue
         ok, why = emulators.start_container(name, known)
         (done if ok else problems).append(name if ok else f"{name}: {why}")

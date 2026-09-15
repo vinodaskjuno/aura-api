@@ -118,6 +118,14 @@ def _ensure_lambda() -> None:
                 # NOT localhost. The function runs on Floci's own container network,
                 # where localhost is the function's own container and reaches nothing.
                 "FLOCI_ENDPOINT": "http://floci:4566",
+                # The account this project's resources live in. The emulator is
+                # shared by every project on the machine and Floci separates them by
+                # AWS account, so a function that used the default credentials would
+                # read an EMPTY namespace while the app wrote to the project's — a
+                # failure that looks exactly like a broken emulator. Floci's docs cover
+                # account resolution for incoming requests but say nothing about
+                # propagating it into an invocation, so the app has to pass it on.
+                "FLOCI_ACCOUNT_ID": os.environ.get("AWS_ACCESS_KEY_ID", "000000000000"),
                 "CATALOG_TABLE": TABLE,
                 "MEDIA_BUCKET": BUCKET,
             }},

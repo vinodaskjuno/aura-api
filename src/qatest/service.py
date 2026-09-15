@@ -260,7 +260,8 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
 
     # EmulatorSet emits per container as it starts AND as it is removed, so a panel
     # can show Floci coming up and going away rather than only learning it started.
-    with emulators.EmulatorSet(needed, run_id, on_event=on_event) as emus:
+    with emulators.EmulatorSet(needed, run_id, on_event=on_event,
+                               project_id=project_id) as emus:
         # Started INSIDE the emulator block and after it, so the application inherits
         # the endpoint variables and talks to the emulators rather than real cloud.
         with _maybe_apps(app_url, specs, emus.env, emit) as apps:
@@ -309,7 +310,8 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
             # A green test says the application answered; this says what it reached.
             from src.qatest import inventory
 
-            report.resources = inventory.collect(_endpoints(emus))
+            report.resources = inventory.collect(
+                _endpoints(emus), account=emulators.account_for(project_id))
             for line in inventory.summarise(report.resources):
                 emit("evidence", message=line)
 

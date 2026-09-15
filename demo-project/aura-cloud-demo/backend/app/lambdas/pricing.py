@@ -15,12 +15,16 @@ import os
 import boto3
 
 ENDPOINT = os.environ.get("FLOCI_ENDPOINT", "http://floci:4566")
+#: The Floci account this function's resources live in. A 12-digit access key IS the
+#: account selector — the secret is never validated. Without it the function reads the
+#: default namespace while the app wrote to the project's, and finds nothing.
+ACCOUNT = os.environ.get("FLOCI_ACCOUNT_ID", "000000000000")
 TABLE = os.environ.get("CATALOG_TABLE", "aura-demo-catalog")
 
 
 def handler(event, context):
     ddb = boto3.client("dynamodb", endpoint_url=ENDPOINT, region_name="us-east-1",
-                       aws_access_key_id="test", aws_secret_access_key="test")
+                       aws_access_key_id=ACCOUNT, aws_secret_access_key="test")
     rows = ddb.scan(TableName=TABLE).get("Items", [])
     total = 0.0
     for row in rows:

@@ -828,6 +828,10 @@ def get_container_logs(command_id: str, runner: str = Query(...),
 class InventoryRequest(BaseModel):
     runner: str
     cloud: str
+    #: Whose resources to report. The emulator is shared by every project on the machine
+    #: and Floci separates them by AWS account, so an inventory without a project reads
+    #: the default namespace — empty, or another project's.
+    projectId: str = ""
 
 
 @router.post("/runners/inventory")
@@ -845,7 +849,8 @@ def request_emulator_inventory(body: InventoryRequest,
         # The cloud name reaches podman and boto3 on someone's machine. Whitelist it
         # against the four we know rather than passing a free string through.
         raise HTTPException(400, f"unknown cloud {body.cloud!r}")
-    return queue.request_command(body.runner, "inventory", body.cloud)
+    return queue.request_command(body.runner, "inventory", body.cloud,
+                                 project_id=body.projectId)
 
 
 @router.get("/runners/inventory/{command_id}")

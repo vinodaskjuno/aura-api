@@ -872,13 +872,19 @@ COMMAND_DEDUPE_S = 30
 
 
 def request_command(runner: str, kind: str, container: str, tail: int = 200,
-                    clouds: str = "", payload: dict | None = None) -> dict:
+                    clouds: str = "", payload: dict | None = None,
+                    project_id: str = "") -> dict:
     """Queue one command for a runner. Returns {commandId, status}.
 
     `container` is the command's free-text slot and means whatever the kind needs: a
     container name for `logs`, a cloud name for `inventory`, a project id for
     `emulator-start`/`emulator-stop`/`app-populate`. `clouds` is a comma-separated list,
     used only by the emulator kinds.
+
+    `project_id` is carried separately because `inventory` already uses the `container`
+    slot for a CLOUD name and has nowhere else to say whose resources it wants. The
+    emulator is shared by every project on the machine, so an inventory without it reads
+    the default account and reports either nothing or somebody else's.
 
     `payload` carries structured input a command cannot derive for itself — today only
     `app-populate`'s workspace handle, which is the same `{url, sha256, bytes}` a run
@@ -899,6 +905,7 @@ def request_command(runner: str, kind: str, container: str, tail: int = 200,
         "cmdKind": kind,
         "cmdContainer": container,
         "cmdClouds": str(clouds or ""),
+        "cmdProjectId": str(project_id or ""),
         "cmdPayload": json.dumps(payload or {})[:8192],
         "cmdTail": int(tail),
         "cmdRequestedAt": _now(),
@@ -942,6 +949,7 @@ def take_command(runner: str) -> dict | None:
     return {"id": command_id, "kind": row.get("cmdKind", "logs"),
             "container": row.get("cmdContainer", ""),
             "clouds": row.get("cmdClouds", ""),
+            "projectId": row.get("cmdProjectId", ""),
             "payload": payload if isinstance(payload, dict) else {},
             "tail": int(row.get("cmdTail") or 200)}
 

@@ -44,21 +44,30 @@ MAX_FUNCTIONS = 25
 TIMEOUT_S = 5
 
 
-def _session(endpoint: str):
-    """A boto3 client factory bound to one emulator. Shares nothing with the process."""
+def _session(endpoint: str, account: str = ""):
+    """A boto3 client factory bound to one emulator. Shares nothing with the process.
+
+    `account` is a 12-digit Floci account id. The emulator is shared by every project on
+    the machine, and Floci reads a 12-digit access key as the account whose resources to
+    return — so without this an inventory would report the DEFAULT account's namespace,
+    which is either empty or somebody else's, rather than the project's own.
+    """
     import boto3
     from botocore.config import Config
 
     session = boto3.session.Session(
-        aws_access_key_id="test", aws_secret_access_key="test",
+        aws_access_key_id=account or "test", aws_secret_access_key="test",
         region_name="us-east-1")
     config = Config(connect_timeout=TIMEOUT_S, read_timeout=TIMEOUT_S,
                     retries={"max_attempts": 1})
     return lambda service: session.client(service, endpoint_url=endpoint, config=config)
 
 
-def collect(endpoints: dict[str, str]) -> dict:
+def collect(endpoints: dict[str, str], account: str = "") -> dict:
     """Inventory every emulator in `endpoints` ({cloud: url}).
+
+    `account` scopes the read to one project's Floci account. Omitting it reports the
+    default namespace, which is right only for a caller that genuinely has no project.
 
     Never raises. An inventory is a description of a run, not part of it — a failure here
     must not turn a passing run into a failing one, so every probe is guarded
@@ -70,7 +79,7 @@ def collect(endpoints: dict[str, str]) -> dict:
             continue
         try:
             if cloud == "aws":
-                found = _aws(_session(url))
+                found = _aws(_session(url, account))
             else:
                 # Only AWS is inventoried today. The others start and are reported as
                 # running; enumerating them needs their own SDKs and their own probes,

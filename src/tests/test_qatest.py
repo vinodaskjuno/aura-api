@@ -814,3 +814,49 @@ def test_provision_does_not_unwrap_two_siblings(tmp_path):
     found = _app_dirs(tmp_path)
     assert tmp_path / "services" / "backend" not in found
     assert tmp_path / "tools" / "backend" not in found
+
+
+def test_the_dev_emulator_is_shared_per_cloud_not_per_project():
+    """Floci's ports are fixed, so a container per project could never run alongside
+    another — the second Start was refused and a developer had to stop one to see
+    another. One name per cloud, whatever project asks."""
+    from src.qatest import emulators
+    assert emulators.dev_container("aws") == "aura-dev-aws"
+    assert emulators.dev_container("aws", "project-a") == \
+           emulators.dev_container("aws", "project-b")
+
+
+def test_each_project_gets_a_distinct_stable_twelve_digit_account():
+    """Floci reads a 12-digit access key as the account id and hides one account's
+    resources from another. Eleven digits, or a word, silently falls back to the shared
+    default — which is what every project used to get."""
+    from src.qatest import emulators
+    a = emulators.account_for("project-a")
+    b = emulators.account_for("project-b")
+    assert a != b
+    for value in (a, b):
+        assert len(value) == 12 and value.isdigit()
+    assert emulators.account_for("project-a") == a, "must be stable across calls"
+
+
+def test_a_project_with_no_id_lands_in_the_default_account():
+    from src.qatest import emulators
+    assert emulators.account_for("") == "000000000000"
+
+
+def test_the_aws_env_carries_the_project_account():
+    """This is the entire isolation mechanism: the access key IS the account selector."""
+    from src.qatest import emulators
+    env = emulators._BY_NAME["aws"].env("project-a")
+    assert env["AWS_ACCESS_KEY_ID"] == emulators.account_for("project-a")
+    # Without a project, unchanged from before — a bare probe has no account to use.
+    assert emulators._BY_NAME["aws"].env()["AWS_ACCESS_KEY_ID"] == "test"
+
+
+def test_only_aws_is_account_scoped():
+    """The mechanism is Floci's AWS emulator. Quietly writing an account key into the
+    others would imply an isolation they do not provide."""
+    from src.qatest import emulators
+    for name in ("azure", "gcp", "oci"):
+        before = emulators._BY_NAME[name].env()
+        assert emulators._BY_NAME[name].env("project-a") == before

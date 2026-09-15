@@ -46,10 +46,55 @@ DEV_PREFIX = "aura-dev-"
 CONTAINER_NETWORK = "aura-floci"
 
 
-def dev_container(cloud: str, project_id: str) -> str:
-    """The name of a project-scoped emulator. Stable, so Start is idempotent and Stop
-    can find what Start created without recording anything."""
-    return f"{DEV_PREFIX}{cloud}-{project_id}"
+def dev_container(cloud: str, project_id: str = "") -> str:
+    """The name of the shared DevMate emulator for a cloud.
+
+    ONE container per cloud, shared by every project on the machine — not one each.
+    Floci's ports are fixed (AWS is always 4566), so per-project containers could never
+    run at the same time: the second Start was refused, and a developer working across
+    projects had to stop one to look at another.
+
+    Projects are kept apart INSIDE the emulator instead, by AWS account. Floci reads a
+    12-digit access key as an account id and makes each account's resources invisible to
+    the others (see `account_for`), which is isolation the port could never have given.
+
+    `project_id` is accepted and ignored so every existing call site keeps working. It is
+    deliberately not part of the name: a name that varied by project is exactly what the
+    fixed port could not support.
+    """
+    del project_id                      # one emulator per cloud; see above
+    return f"{DEV_PREFIX}{cloud}"
+
+
+def account_for(project_id: str) -> str:
+    """This project's AWS account id inside the emulator: 12 digits, stable, derived.
+
+    Floci's rule, which this exists to satisfy:
+
+        "If AWS_ACCESS_KEY_ID is exactly 12 digits, Floci uses it as the account ID.
+         Resources created by one account are invisible to another."
+        — https://floci.io/floci/configuration/multi-account/
+
+    Anything else — including Aura's previous literal `test` — falls back to
+    FLOCI_DEFAULT_ACCOUNT_ID (000000000000), which is precisely why every project used to
+    share one namespace and could not safely share an emulator.
+
+    Derived from the project id rather than allocated, so it needs no registry and the
+    server and the runner compute the same value without exchanging anything. Truncated
+    from a SHA-256 so it is stable across restarts and re-uploads.
+
+    NOT a security boundary. Floci is explicit that account selection is AKID-based and
+    proves nothing about the caller; it separates a developer's own projects on their own
+    machine, and must never be described as isolation between people.
+    """
+    import hashlib
+
+    if not project_id:
+        return "000000000000"
+    digest = hashlib.sha256(project_id.encode()).hexdigest()
+    # Modulo into 12 digits. Zero-padded, so it stays exactly 12 characters — an 11-digit
+    # value would silently fall back to the default account.
+    return f"{int(digest[:16], 16) % 1_000_000_000_000:012d}"
 
 
 def _ready_timeout() -> int:
@@ -73,8 +118,24 @@ class Cloud:
         self.markers = markers
         self.env_template = env
 
-    def env(self) -> dict[str, str]:
-        return {k: v.format(port=self.port) for k, v in self.env_template.items()}
+    def env(self, project_id: str = "") -> dict[str, str]:
+        """Environment that points an application at this emulator.
+
+        `project_id` selects the AWS account the application's resources live in — see
+        `account_for`. Optional so callers that genuinely have no project (a bare probe)
+        still work; they get the default account, which is the old behaviour.
+
+        AWS only: the account mechanism belongs to Floci's AWS emulator, and Azure, GCP
+        and OCI have no equivalent. Projects sharing one of those emulators still share
+        one namespace and can collide, which is stated here rather than left to be
+        discovered.
+        """
+        out = {k: v.format(port=self.port) for k, v in self.env_template.items()}
+        if self.name == "aws" and project_id:
+            # The 12-digit access key IS the account selector. The secret is never
+            # validated — Floci does no SigV4 checking — but must be non-empty.
+            out["AWS_ACCESS_KEY_ID"] = account_for(project_id)
+        return out
 
 
 # Ports are Floci's own, so a developer already running Floci by hand sees the same
@@ -247,9 +308,16 @@ class EmulatorSet:
     for a reason that looks nothing like the cause.
     """
 
-    def __init__(self, clouds: list[Cloud], run_id: str, on_event=None):
+    def __init__(self, clouds: list[Cloud], run_id: str, on_event=None,
+                 project_id: str = ""):
         self.clouds = clouds
         self.run_id = run_id
+        # Selects the AWS account the run's resources live in, so a run and DevMate's
+        # Populate for the same project land in the same namespace. Without it a run
+        # would provision into the default account and then test against it, while the
+        # Resources panel showed the project's own — two views of one emulator that
+        # never agreed.
+        self.project_id = project_id
         self.records: list[EmulatorRecord] = []
         # So the UI can watch containers come up and go away. Without an event on the
         # way OUT, a panel can only ever learn that an emulator started.
@@ -270,7 +338,7 @@ class EmulatorSet:
         started = {r.cloud for r in self.records if r.started}
         for cloud in self.clouds:
             if cloud.name in started:
-                out.update(cloud.env())
+                out.update(cloud.env(self.project_id))
         return out
 
     def __enter__(self) -> "EmulatorSet":
@@ -307,7 +375,12 @@ class EmulatorSet:
         self.stop()
 
     def _start(self, cloud: Cloud) -> EmulatorRecord:
-        name = f"aura-qa-{cloud.name}-{self.run_id}"
+        # The SHARED container, not a run-scoped one. A run that started
+        # `aura-qa-<cloud>-<runId>` would remove it again in `stop()`, and with one
+        # emulator per machine that teardown takes every other project's resources with
+        # it — including a DevMate emulator someone is working against. Runs now attach
+        # to the same container DevMate starts, and leave it running.
+        name = dev_container(cloud.name)
         rec = EmulatorRecord(cloud=cloud.name, image=cloud.image,
                              digest=image_digest(cloud.image), port=cloud.port,
                              container=name)
@@ -352,6 +425,10 @@ class EmulatorSet:
             rec.error = why
             return rec
 
+        # Started by this run, but NOT owned by it: `stop()` leaves it up for whatever
+        # else is using the machine. Recorded as adopted for exactly that reason — the
+        # flag already means "someone else's to stop", and the teardown honours it.
+        rec.adopted = True
         rec.started = True
         log.info("qatest: %s emulator ready on :%s (%s)", cloud.name, cloud.port,
                  rec.digest[:19] or "no digest")
@@ -359,15 +436,15 @@ class EmulatorSet:
 
     def stop(self) -> None:
         for rec in self.records:
-            # Never remove what this run did not start. An adopted emulator belongs to
-            # whoever started it — `floci-cli` or DevMate — and they stop it when they
-            # choose. Tearing it down here would make "run the tests" a destructive act
-            # on someone's working environment.
+            # Never remove the shared emulator. One container per cloud serves every
+            # project on the machine, so tearing it down here would take another
+            # project's resources — and possibly an emulator someone is working
+            # against — with it. True whether this run found it up or started it.
             if rec.adopted:
                 self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
                            started=True, stopped=False, adopted=True,
-                           message=f"{rec.cloud} emulator left running "
-                                   f"(started outside this run)")
+                           message=f"{rec.cloud} emulator left running — it is shared "
+                                   f"with any other project on this machine")
                 continue
             if rec.container:
                 _run(["rm", "-f", rec.container])
@@ -379,14 +456,24 @@ class EmulatorSet:
 
 
 def probe(cloud_name: str) -> dict:
-    """Start one emulator, confirm it answers, stop it. Used by the CLI and tests."""
+    """Start one emulator, confirm it answers, stop it. Used by the CLI and tests.
+
+    Cleans up EXPLICITLY. `EmulatorSet.stop()` now leaves the shared emulator running,
+    which is right for a run but wrong for a probe: a diagnostic that silently leaves a
+    container behind is how a machine ends up holding a port nobody asked it to.
+    Anything it found already running is left exactly as it was.
+    """
     cloud = _BY_NAME.get(cloud_name)
     if not cloud:
         return {"ok": False, "message": f"unknown cloud {cloud_name!r}"}
+    already_up = _ready(cloud.port, timeout=2)
     with EmulatorSet([cloud], "probe") as es:
         rec = es.records[0]
-        return {"ok": rec.started, "message": rec.error or "ready",
-                "digest": rec.digest, "port": rec.port, "env": es.env}
+        result = {"ok": rec.started, "message": rec.error or "ready",
+                  "digest": rec.digest, "port": rec.port, "env": es.env}
+    if rec.started and not already_up and rec.container:
+        remove_container(rec.container)
+    return result
 
 
 # ── Reporting the machine's own state ──────────────────────────────────────────
