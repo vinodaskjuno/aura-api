@@ -155,3 +155,117 @@ def test_a_project_with_no_iac_plans_nothing(tmp_path):
 
 def test_no_root_is_not_an_error(tmp_path):
     assert policy.plan_checks(None) == []
+
+
+# ── The per-resource pivot ───────────────────────────────────────────────────
+
+def test_a_resource_no_control_reads_is_present_and_marked_unchecked():
+    """The honesty requirement the whole per-resource view rests on.
+
+    `aura-cloud-demo` declares an SNS::Topic, which NO control reads. Leaving it out of
+    the view, or showing it as passing, would be Aura vouching for something it never
+    examined — the same distinction the endpoint already draws for a project with no IaC.
+    """
+    from pathlib import Path
+    from src.qatest import policy
+
+    rows = policy.resource_view(Path("demo-project/aura-cloud-demo/backend"))
+    topic = next((r for r in rows if r["name"] == "NotifyTopic"), None)
+    assert topic is not None, "a resource nothing checks must still be listed"
+    assert topic["type"] == "AWS::SNS::Topic"
+    assert topic["applicable"] == 0
+    assert topic["controls"] == []
+    # And it sorts last, after everything that was actually assessed.
+    assert rows[-1]["name"] == "NotifyTopic"
+
+
+def test_each_resource_carries_only_the_controls_that_apply_to_it():
+    from pathlib import Path
+    from src.qatest import policy
+
+    rows = {r["name"]: r for r in
+            policy.resource_view(Path("demo-project/aura-lambda-demo"))}
+    # Functions: IA-5(1), AC-6(1), SI-2. Stores: SC-13 alone.
+    assert rows["AuditFunction"]["applicable"] == 3
+    assert rows["PricingFunction"]["applicable"] == 3
+    assert rows["CatalogTable"]["applicable"] == 1
+    assert rows["MediaBucket"]["applicable"] == 1
+
+
+def test_a_resource_compliant_on_one_control_shows_it():
+    """The fact the old aggregate destroyed. PricingFunction resolves DB_PASSWORD from
+    Secrets Manager — genuinely compliant on IA-5(1) — while failing AC-6(1)."""
+    from pathlib import Path
+    from src.qatest import policy
+
+    rows = {r["name"]: r for r in
+            policy.resource_view(Path("demo-project/aura-lambda-demo"))}
+    pricing = {c["id"]: c for c in rows["PricingFunction"]["controls"]}
+    assert pricing["lambda_env_no_secrets"]["ok"] is True
+    assert pricing["iam_no_wildcards"]["ok"] is False
+    assert rows["PricingFunction"]["passed"] == 2
+
+
+def test_a_failing_finding_carries_a_remedy():
+    """A finding that says what is wrong and not what to do is a chore, not a control."""
+    from pathlib import Path
+    from src.qatest import policy
+
+    rows = policy.resource_view(Path("demo-project/aura-lambda-demo"))
+    failing = [c for r in rows for c in r["controls"] if not c["ok"]]
+    assert failing, "the demo template is authored to fail two controls"
+    for c in failing:
+        assert c["remedy"], f"{c['id']} gives no remedy"
+
+
+def test_the_aggregate_reports_scale_not_a_bare_fail(tmp_path):
+    """One offender among three used to read exactly like three offenders."""
+    from src.qatest import policy
+
+    template = """
+Resources:
+""" + "".join(f"""
+  Fn{i}:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.12
+      Environment:
+        Variables:
+          DB_PASSWORD: {'literal-secret' if i == 1 else "'{{resolve:secretsmanager:x:SecretString:p}}'"}
+""" for i in (1, 2, 3))
+    (tmp_path / "template.yaml").write_text(template)
+    check = next(c for c in policy.plan_checks(tmp_path)
+                 if c.validator == "lambda_env_no_secrets")
+    ok, detail = policy.run_check(tmp_path, check)
+    assert not ok
+    assert "1 of 3" in detail, detail
+
+
+def test_the_run_verdicts_are_unchanged_for_both_demos():
+    """The refactor must not move a single case's outcome. Both real templates, all four
+    controls — the cheapest possible guard against the pivot changing what a run says."""
+    from pathlib import Path
+    from src.qatest import policy
+
+    expected = {"lambda_env_no_secrets": False, "iam_no_wildcards": False,
+                "runtime_supported": True, "encryption_declared": True}
+    for demo in ("demo-project/aura-lambda-demo",
+                 "demo-project/aura-cloud-demo/backend"):
+        root = Path(demo)
+        for check in policy.plan_checks(root):
+            ok, _ = policy.run_check(root, check)
+            assert ok is expected[check.validator], f"{demo} {check.validator}"
+
+
+def test_a_control_with_nothing_to_check_says_so(tmp_path):
+    """Vacuously true, and it must not claim otherwise: "no resource of this kind" is a
+    different fact from "all of them passed"."""
+    from src.qatest import policy
+
+    (tmp_path / "template.yaml").write_text(
+        "Resources:\n  T:\n    Type: AWS::SNS::Topic\n    Properties: {}\n")
+    check = next(c for c in policy.plan_checks(tmp_path)
+                 if c.validator == "lambda_env_no_secrets")
+    ok, detail = policy.run_check(tmp_path, check)
+    assert ok
+    assert "no resource of this kind" in detail

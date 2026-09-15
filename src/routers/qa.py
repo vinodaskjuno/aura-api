@@ -617,10 +617,23 @@ def get_project_policy(project_id: str,
         controls.append({"id": check.check_id, "name": check.name,
                          "file": check.rel_path, "control": check.validator,
                          "passed": ok, "detail": detail})
+    # Both projections of the same evaluation. `controls` is the existing shape and stays
+    # — the summary line is still the right headline and removing it would break a
+    # shipped response. `resources` is the pivot the panel and the Security popup render.
+    resources = policy.resource_view(root)
     return {"applicable": True,
             "controls": controls,
             "passed": sum(1 for c in controls if c["passed"]),
-            "total": len(controls)}
+            "total": len(controls),
+            "resources": resources,
+            # Counted here so the panel, the popup and any other reader cannot each
+            # derive a different headline from the same rows.
+            "resourceTotal": len(resources),
+            "resourcesWithFindings": sum(
+                1 for r in resources if r["applicable"] and r["passed"] < r["applicable"]),
+            # Its own number, never folded into "passing": a resource no control reads
+            # was not assessed, which is a different fact from having passed.
+            "resourcesNotChecked": sum(1 for r in resources if not r["applicable"])}
 
 
 @router.get("/projects/{project_id}/coverage")
