@@ -597,13 +597,28 @@ def _command_populate(command: dict, result: dict) -> dict:
     project_id = str(command.get("container") or "")
     clouds = [c for c in str(command.get("clouds") or "").split(",") if c]
 
-    problems = provision.prepare(project_id, command.get("payload") or {}, None)
+    # Kept apart from `problems` deliberately. A fetch that fails when a working copy is
+    # ALREADY on disk is not a failed populate: the copy may simply be a few minutes old.
+    # Treating it as fatal made a populate that deployed both Lambdas and every other
+    # resource report "the working copy could not be fetched" — the reader is told it
+    # failed while the Resources panel fills up behind them, which is worse than either
+    # a clean success or a clean failure. Whether it is fatal is decided below, by
+    # whether there is anything to run.
+    stale = provision.prepare(project_id, command.get("payload") or {}, None)
+    problems: list[str] = []
 
     root, checked = appserver.locate(project_id)
     if root is None:
-        result["error"] = ("no working copy on this machine for this project. Looked in: "
-                           + ", ".join(str(c) for c in checked))
+        result["error"] = ("no working copy on this machine for this project"
+                           + (f" ({'; '.join(stale)})" if stale else "")
+                           + ". Looked in: " + ", ".join(str(c) for c in checked))
         return result
+    warnings: list[str] = []
+    if stale:
+        # Recorded, never silent — but not a failure. The populate below either works or
+        # does not, and that is what `ok` reports.
+        warnings.append("could not refresh the working copy, so the copy already on this "
+                        "machine was used: " + "; ".join(stale))
 
     # Only the API half. Starting the frontend dev server creates no cloud resources and
     # costs a minute of the reader's time. A compose stack is returned alone by `detect`,
@@ -665,7 +680,7 @@ def _command_populate(command: dict, result: dict) -> dict:
 
     result["ok"] = not problems
     result["output"] = json.dumps({"resources": found, "created": total,
-                                   "problems": problems})
+                                   "problems": problems, "warnings": warnings})
     if problems:
         result["error"] = "; ".join(problems)[:400]
     return result

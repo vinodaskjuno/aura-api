@@ -854,9 +854,22 @@ def test_inventory_is_requested_and_answered(fake_dynamo):
 # containers on the host. That is a real privilege escalation, so it is opt-in and the
 # demo must never depend on it.
 
-def test_the_runtime_socket_is_not_mounted_by_default(monkeypatch):
+def test_the_runtime_socket_is_not_mounted_when_the_flag_is_off(monkeypatch):
+    """Explicitly OFF, not "unset".
+
+    This read the developer's own src/.env, so it asserted a default rather than a
+    behaviour — and failed on any machine that had legitimately turned Lambda on. What
+    matters is that the flag being off means no socket, whatever the machine believes.
+    """
+    from src.config_settings import get_settings
     from src.qatest import emulators
-    assert emulators._socket_args(emulators._BY_NAME["aws"]) == []
+
+    monkeypatch.setenv("QATEST_CONTAINER_BACKED_SERVICES", "false")
+    get_settings.cache_clear()
+    try:
+        assert emulators._socket_args(emulators._BY_NAME["aws"]) == []
+    finally:
+        get_settings.cache_clear()
 
 
 def test_enabling_it_mounts_the_socket_and_a_named_network(monkeypatch):
