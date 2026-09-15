@@ -651,7 +651,12 @@ def _command_populate(command: dict, result: dict) -> dict:
         return result
 
     found = inventory.collect(endpoints)
-    total = sum(len(v) for v in (found or {}).values() if isinstance(v, list))
+    # `collect` nests per cloud: {"aws": {"s3": [...], "lambda": [...]}}. Counting the
+    # outer level finds dicts, not lists, and silently reports zero — which turned a
+    # perfectly good populate into "the app created no resources".
+    total = sum(len(items)
+                for services in (found or {}).values() if isinstance(services, dict)
+                for items in services.values() if isinstance(items, list))
     if not total:
         # Started but created nothing. Saying so beats a green tick the Resources panel
         # is about to contradict.
