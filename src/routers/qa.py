@@ -913,6 +913,41 @@ class EmulatorRequest(BaseModel):
     runner: str
 
 
+@router.post("/emulators/{project_id}/populate")
+def populate_project_emulators(project_id: str, body: EmulatorRequest,
+                               _: dict = Depends(require_permission("dev_workspace"))):
+    """Boot the app under test once so it fills the running emulator, then stop it.
+
+    Declared BEFORE `control_project_emulators`, whose `{action}` is a catch-all that
+    would otherwise swallow this path and 404 it.
+
+    Start brings up an empty emulator, and nothing in Aura puts anything in it: the only
+    thing that ever creates resources is the application's own startup code. This asks
+    the runner to run that code once, against the emulator DevMate already started.
+
+    Refuses here, at the button press, when this server has no working copy to ship —
+    the same check `enqueue_run` makes. That failure is knowable now and costs a
+    round trip of minutes to discover on the runner.
+    """
+    from src.qatest import emulators, plan, queue, workspace
+
+    facts = plan.fetch_facts(project_id)
+    clouds = [c.name for c in emulators.clouds_for(facts.get("dependencies") or [])]
+    if not clouds:
+        raise HTTPException(
+            409,
+            "This project declares no cloud dependencies, so there is no emulator to "
+            "populate. Aura derives them from the packages your code imports.")
+
+    published = workspace.publish(project_id)
+    if not published or not published.get("url"):
+        raise HTTPException(status_code=409, detail=_no_workspace_detail(project_id))
+
+    return {**queue.request_command(body.runner, "app-populate", project_id,
+                                    clouds=",".join(clouds), payload=published),
+            "clouds": clouds}
+
+
 @router.post("/emulators/{project_id}/{action}")
 def control_project_emulators(project_id: str, action: str, body: EmulatorRequest,
                               _: dict = Depends(require_permission("dev_workspace"))):

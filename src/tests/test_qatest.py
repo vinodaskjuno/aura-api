@@ -782,3 +782,35 @@ def test_unwrapping_is_bounded(tmp_path):
     deep = tmp_path / "a" / "b" / "c" / "d"
     _demo_layout(deep)
     assert appserver.detect(tmp_path) == []
+
+
+def test_provision_finds_an_app_inside_a_single_wrapper_directory(tmp_path):
+    """A folder uploaded through the UI puts the app one level down, and `install` used
+    to walk straight past it. Invisible until now, because `appserver` falls back to the
+    agent's own interpreter when a project has no venv — so the app booted on Aura's
+    dependencies and would have failed for any project needing something else."""
+    from src.qatest.provision import _app_dirs
+    (tmp_path / "wrapper" / "backend").mkdir(parents=True)
+    (tmp_path / "wrapper" / "backend" / "requirements.txt").write_text("fastapi\n")
+    found = _app_dirs(tmp_path)
+    assert tmp_path / "wrapper" / "backend" in found
+
+
+def test_provision_does_not_descend_past_an_installable_root(tmp_path):
+    """A normal layout must not gain a second level of scanning."""
+    from src.qatest.provision import _app_dirs
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "requirements.txt").write_text("fastapi\n")
+    (tmp_path / "backend" / "nested").mkdir()
+    assert tmp_path / "backend" / "nested" not in _app_dirs(tmp_path)
+
+
+def test_provision_does_not_unwrap_two_siblings(tmp_path):
+    """With two candidates there is nothing to disambiguate them, so neither is entered."""
+    from src.qatest.provision import _app_dirs
+    for name in ("services", "tools"):
+        (tmp_path / name / "backend").mkdir(parents=True)
+        (tmp_path / name / "backend" / "requirements.txt").write_text("fastapi\n")
+    found = _app_dirs(tmp_path)
+    assert tmp_path / "services" / "backend" not in found
+    assert tmp_path / "tools" / "backend" not in found

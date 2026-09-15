@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Floci UI — Any Cloud. Locally. The local cloud console for Floci." />
+    <title>Floci UI</title>
+    <script>
+      (function () {
+        var t = localStorage.getItem("floci-theme");
+        document.documentElement.setAttribute(
+          "data-theme",
+          t === "light" ? "light" : "dark",
+        );
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="icon" href="/assets/floci-black-BZXfF1vs.svg" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <script type="module" crossorigin src="/assets/index-B5P5f6NC.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-Bh1tDfsg.js">
+    <link rel="modulepreload" crossorigin href="/assets/query-vendor-BzDIgHqe.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-vendor-dvtXtJwz.js">
+    <link rel="modulepreload" crossorigin href="/assets/ui-vendor-BGIHmJr2.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-79G0eGoE.css">
+    <!--
+      Aura co-branding. Floci UI is a separate MIT-licensed product that Aura does not
+      own; this ADDS a mark beside its own and changes nothing else, so Floci stays
+      plainly identified as Floci. Injected from index.html rather than by rebuilding
+      the image, so upgrading floci-ui is still a plain image pull.
+
+      Everything below fails silently. A decoration must never be what stops the
+      console rendering, so a missing element, a DOM the next floci-ui release has
+      reshaped, or any thrown error simply leaves the page exactly as it shipped.
+    -->
+    <style>
+      .aura-cobrand {
+        display: flex; align-items: center; gap: 6px;
+        margin-top: 8px; padding-top: 8px;
+        border-top: 1px solid rgba(128, 138, 157, 0.22);
+        font-size: 11px; letter-spacing: 0.01em;
+        color: rgba(128, 138, 157, 0.95);
+      }
+      .aura-cobrand img { width: 15px; height: 15px; border-radius: 3.5px; }
+    </style>
+    <script>
+      (function () {
+        var DEADLINE = 15000;          // stop watching; the console may have changed
+        var started = Date.now();
+        function mount() {
+          try {
+            var brand = document.querySelector(".brand");
+            if (!brand) return false;
+            if (brand.querySelector(".aura-cobrand")) return true;   // idempotent
+            var row = document.createElement("div");
+            row.className = "aura-cobrand";
+            var img = document.createElement("img");
+            img.src = "/assets/aura-mark.svg";
+            img.alt = "";                     // decorative; the text carries the name
+            var label = document.createElement("span");
+            label.textContent = "Running for Aura";
+            row.appendChild(img);
+            row.appendChild(label);
+            brand.appendChild(row);
+            return true;
+          } catch (e) { return true; }        // give up quietly, never retry-loop
+        }
+        if (mount()) return;
+        // The console is a React SPA, so `.brand` does not exist at parse time.
+        var observer = new MutationObserver(function () {
+          if (mount() || Date.now() - started > DEADLINE) observer.disconnect();
+        });
+        try {
+          observer.observe(document.documentElement, { childList: true, subtree: true });
+          setTimeout(function () { observer.disconnect(); }, DEADLINE);
+        } catch (e) { /* nothing to do */ }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

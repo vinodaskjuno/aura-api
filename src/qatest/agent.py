@@ -520,6 +520,152 @@ def _command_inventory(command: dict, result: dict) -> dict:
     return result
 
 
+#: The populate thread, if one is running. A list rather than a bare global so the poll
+#: loop can test it without a lock: append and clear are atomic enough for a flag whose
+#: only reader asks "is something running".
+_POPULATING: list = []
+
+
+#: Results from finished populate threads, waiting for the next state POST to carry them.
+_PENDING_RESULTS: list = []
+
+
+def populate_in_flight() -> str:
+    """The project id of a populate currently running, or "" — read by the poll loop."""
+    return _POPULATING[0][0] if _POPULATING else ""
+
+
+def _start_populate(command: dict) -> None:
+    """Run a populate on a worker thread, and return at once.
+
+    Commands are normally executed INLINE on the poll loop. That is fine for the others,
+    which take milliseconds, and fatal for this one: a first populate installs the
+    project's dependencies, and while the loop is blocked nothing reports state. After
+    RUNNER_STALE_S (90s) the row goes stale and the panel stops finding an online runner
+    of its own — so it swaps itself for "No runner is connected" and unmounts the poller
+    watching this very command. The work is still running; the screen says nothing is.
+
+    So: thread it, let the loop keep heartbeating, and hand the result to whichever state
+    POST comes after it finishes.
+    """
+    import threading
+
+    project_id = str(command.get("container") or "")
+    if _POPULATING:
+        _PENDING_RESULTS.append({
+            "id": command.get("id", ""), "output": "", "ok": False,
+            "error": f"already populating {_POPULATING[0][0]} on this machine"})
+        return
+
+    def body() -> None:
+        result = {"id": command.get("id", ""), "output": "", "ok": False, "error": ""}
+        try:
+            result = _command_populate(command, result)
+        except Exception as exc:                              # noqa: BLE001
+            # Never let a thread die silently: the reader is watching a spinner that
+            # would otherwise run to its timeout and blame the runner for going quiet.
+            result["error"] = f"{type(exc).__name__}: {exc}"[:400]
+        finally:
+            _PENDING_RESULTS.append(result)
+            _POPULATING.clear()
+
+    thread = threading.Thread(target=body, name=f"populate-{project_id}", daemon=True)
+    _POPULATING.append((project_id, thread))
+    thread.start()
+
+
+def _command_populate(command: dict, result: dict) -> dict:
+    """Boot the app under test once so it creates its cloud resources, then stop it.
+
+    Pressing Start in DevMate brings up an EMPTY emulator, and readers reasonably expect
+    to see their buckets and functions in it. Nothing in Aura creates those: the only
+    thing that ever does is the application's own startup code — the demo's FastAPI
+    lifespan calling `cloud.ensure()`. Until now that ran solely inside a test run, so an
+    emulator started from DevMate stayed empty with no way to fill it.
+
+    This drives the app's own code rather than provisioning anything itself. Aura must
+    not become a second, competing declaration of what a project's resources are — one
+    that could disagree with what a real deploy produces.
+
+    ATTACHES, NEVER STARTS. `EmulatorSet` is deliberately not used: for a cloud whose port
+    happens to be free it would start an `aura-qa-*` container with a run's lifetime,
+    which would then be torn down and take the resources with it. The env comes straight
+    from `cloud.env()`, which is the same source `EmulatorSet.env` reads.
+    """
+    from src.qatest import appserver, emulators, inventory, provision
+
+    project_id = str(command.get("container") or "")
+    clouds = [c for c in str(command.get("clouds") or "").split(",") if c]
+
+    problems = provision.prepare(project_id, command.get("payload") or {}, None)
+
+    root, checked = appserver.locate(project_id)
+    if root is None:
+        result["error"] = ("no working copy on this machine for this project. Looked in: "
+                           + ", ".join(str(c) for c in checked))
+        return result
+
+    # Only the API half. Starting the frontend dev server creates no cloud resources and
+    # costs a minute of the reader's time. A compose stack is returned alone by `detect`,
+    # so it survives this filter by having no "ui" sibling to drop.
+    specs = [sp for sp in appserver.detect(root) if sp.kind == "api" or sp.compose]
+    if not specs:
+        result["error"] = (f"no runnable application found in {root} — there is nothing "
+                           f"here whose startup could create cloud resources")
+        return result
+
+    # The emulator must be THIS project's. `_ready` alone is satisfied by another
+    # project's emulator on the same fixed port, and populating someone else's is the
+    # worst failure available here.
+    env: dict[str, str] = {}
+    endpoints: dict[str, str] = {}
+    for cloud in clouds:
+        known = emulators._BY_NAME.get(cloud)
+        if not known:
+            problems.append(f"unknown cloud {cloud}")
+            continue
+        expected = emulators.dev_container(cloud, project_id)
+        if not emulators._ready(known.port, timeout=2):
+            problems.append(f"the {cloud} emulator is not running — press Start first")
+            continue
+        holder = emulators._container_on_port(known.port).get("name", "")
+        if holder != expected:
+            problems.append(
+                f"port {known.port} is held by {holder or 'another process'}, not this "
+                f"project's emulator — populating it would write into someone else's")
+            continue
+        env.update(known.env())
+        endpoints[cloud] = known.env()[_ENDPOINT_VAR[cloud]]
+
+    if not endpoints:
+        result["error"] = "; ".join(problems)[:400] or "no usable emulator for this project"
+        return result
+
+    try:
+        with appserver.RunningApps(specs, extra_env=env) as apps:
+            # Nothing to do in the body. `__enter__` has already waited for the app to
+            # answer, which means its startup — and therefore its provisioning — is done.
+            problems.extend(f"{spec.name}: {why}" for spec, why in apps.failures)
+    except Exception as exc:                                  # noqa: BLE001
+        result["error"] = f"the app did not start: {type(exc).__name__}: {exc}"[:400]
+        return result
+
+    found = inventory.collect(endpoints)
+    total = sum(len(v) for v in (found or {}).values() if isinstance(v, list))
+    if not total:
+        # Started but created nothing. Saying so beats a green tick the Resources panel
+        # is about to contradict.
+        problems.append("the app started but created no resources — this project may "
+                        "create them on first use rather than at startup")
+
+    result["ok"] = not problems
+    result["output"] = json.dumps({"resources": found, "created": total,
+                                   "problems": problems})
+    if problems:
+        result["error"] = "; ".join(problems)[:400]
+    return result
+
+
 def _command_emulator(command: dict, result: dict) -> dict:
     """Start or stop this project's emulators, on request from DevMate.
 
@@ -583,6 +729,10 @@ def _run_command(command: dict, allow_logs: bool) -> dict:
       inventory       what is inside a running emulator, right now
       emulator-start  bring up this project's emulators (from DevMate)
       emulator-stop   take them down again
+      app-populate    boot the app once so it creates its resources
+
+    `app-populate` is the only one that takes minutes rather than seconds, and it is run
+    on a worker thread by the caller for that reason — see `report_state_strict`.
 
     Every kind that names a container checks it against MANAGED_PREFIXES here as well as
     on the server. Both sides check because the failure mode — reading or killing
@@ -598,6 +748,8 @@ def _run_command(command: dict, allow_logs: bool) -> dict:
         return _command_inventory(command, result)
     if kind in ("emulator-start", "emulator-stop"):
         return _command_emulator(command, result)
+    if kind == "app-populate":
+        return _command_populate(command, result)
     if kind != "logs":
         result["error"] = f"unknown command {kind!r}"
         return result
@@ -707,11 +859,18 @@ def main(argv: list[str] | None = None) -> int:
 
         Lets AuthRejected out. Only the startup call wants that — see `report_state`.
         """
-        reply = client.report_state(
-            _machine_state(busy, args.report_all_containers, allow_logs))
+        # Anything a populate thread finished since the last report rides out now.
+        finished, _PENDING_RESULTS[:] = list(_PENDING_RESULTS), []
+        reply = client.report_state({
+            **_machine_state(busy, args.report_all_containers, allow_logs),
+            **({"commandResults": finished} if finished else {})})
         for command in (reply or {}).get("commands") or []:
             log.info("  command  %s %s", command.get("kind"),
                      command.get("container", ""))
+            if command.get("kind") == "app-populate":
+                # Returns immediately; its result arrives on a later state POST.
+                _start_populate(command)
+                continue
             client.report_state({**_machine_state(busy, args.report_all_containers,
                                                   allow_logs),
                                  "commandResults": [_run_command(command, allow_logs)]})
@@ -735,6 +894,15 @@ def main(argv: list[str] | None = None) -> int:
 
     while True:
         polls += 1
+        # A populate has the app under test running on its port and is attached to this
+        # project's emulator. A run claimed now would collide on both, so stand off and
+        # say why — `busyRunId` is what makes the panel show the machine as occupied
+        # rather than idle-but-unresponsive.
+        populating = populate_in_flight()
+        if populating:
+            report_state(f"populate:{populating}")
+            time.sleep(args.poll)
+            continue
         try:
             job = client.claim()
         except AuthRejected as rejected:

@@ -153,6 +153,39 @@ def _run(command: list[str], cwd: Path, say) -> bool:
     return True
 
 
+def _app_dirs(root: Path) -> list[Path]:
+    """The directories that might hold an installable app.
+
+    The root and its immediate children — and, when the root holds exactly ONE directory
+    and nothing installable of its own, that directory's children too.
+
+    That last step exists because uploading a FOLDER through the UI keeps the folder, so
+    the app lands at `<root>/<name>/backend` rather than `<root>/backend`. Without it
+    `install` walks right past the project and installs nothing, and the failure is
+    invisible: `appserver` falls back to `sys.executable` when a project has no venv
+    (appserver.py:149-150), so the app boots on the AGENT's own interpreter and works
+    right up until a project needs a dependency the agent happens not to have.
+
+    Limited to a single wrapper, like `appserver.detect`: with two sibling directories
+    there is nothing to disambiguate them, and descending would install trees that are
+    not the app.
+    """
+    def children(base: Path) -> list[Path]:
+        return [d for d in sorted(base.iterdir()) if d.is_dir()
+                and not d.name.startswith(".")
+                and d.name not in ("node_modules", "dist", "build")]
+
+    if not root.is_dir():
+        return []
+    found = [root] + children(root)
+    installable = [d for d in found
+                   if (d / "package.json").is_file() or (d / "requirements.txt").is_file()]
+    if not installable and len(found) == 2:
+        # found == [root, the single wrapper]
+        return found + children(found[1])
+    return found
+
+
 def install(root: Path, emit=None) -> list[str]:
     """Install dependencies for every app directory under `root`. Returns problems.
 
@@ -166,9 +199,7 @@ def install(root: Path, emit=None) -> list[str]:
             emit({"type": "provision", "message": message})
 
     problems: list[str] = []
-    candidates = [root] + [d for d in sorted(root.iterdir()) if d.is_dir()
-                           and not d.name.startswith(".")
-                           and d.name not in ("node_modules", "dist", "build")]
+    candidates = _app_dirs(root)
 
     for directory in candidates:
         # ── Node ─────────────────────────────────────────────────────────────

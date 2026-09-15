@@ -1108,3 +1108,42 @@ def test_the_endpoint_reports_superseded_rather_than_404(fake_dynamo):
     res = client.get(f"{BASE}/runners/inventory/{first}", params={"runner": RUNNER})
     assert res.status_code == 200
     assert res.json()["status"] == "superseded"
+
+
+def test_a_late_result_does_not_land_on_a_newer_command(fake_dynamo, monkeypatch):
+    """One slot per runner, so a slow command can finish after a newer one replaced it.
+
+    `record_command_result` used to write unconditionally, so a populate finishing after
+    someone pressed Stop reported ITS outcome against Stop's id — telling the reader that
+    Stop had succeeded, and quoting work Stop never did.
+    """
+    first = queue.request_command(RUNNER, "app-populate", "proj-1")["commandId"]
+    queue.take_command(RUNNER)
+
+    # A newer command takes the slot while the first is still running.
+    # Restored automatically; a bare assignment here leaked into every later test.
+    monkeypatch.setattr(queue, "_age_seconds", lambda _at: 999)  # past COMMAND_DEDUPE_S
+    second = queue.request_command(RUNNER, "emulator-stop", "proj-1")["commandId"]
+    assert second != first
+
+    # The slow one finishes and tries to record against its own, now-stale, id.
+    queue.record_command_result(RUNNER, first, key="s3://somewhere", error="")
+
+    newer = queue.command_result(RUNNER, second)
+    assert not newer.get("resultAt"), "the stale result overwrote the newer command"
+    assert queue.command_result(RUNNER, first).get("superseded")
+
+
+def test_a_command_payload_round_trips_to_the_runner(fake_dynamo):
+    """`app-populate` needs a workspace handle it cannot derive for itself."""
+    handle = {"url": "https://example/x.tgz", "sha256": "abc", "bytes": 12}
+    queue.request_command(RUNNER, "app-populate", "proj-1", clouds="aws", payload=handle)
+    taken = queue.take_command(RUNNER)
+    assert taken["kind"] == "app-populate"
+    assert taken["payload"] == handle
+
+
+def test_a_command_without_a_payload_still_reads_back_cleanly(fake_dynamo):
+    """Every other kind sends none, and must not get a None the agent would trip on."""
+    queue.request_command(RUNNER, "inventory", "aws")
+    assert queue.take_command(RUNNER)["payload"] == {}

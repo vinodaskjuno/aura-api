@@ -23,6 +23,7 @@ Lifecycle:
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -871,13 +872,20 @@ COMMAND_DEDUPE_S = 30
 
 
 def request_command(runner: str, kind: str, container: str, tail: int = 200,
-                    clouds: str = "") -> dict:
+                    clouds: str = "", payload: dict | None = None) -> dict:
     """Queue one command for a runner. Returns {commandId, status}.
 
     `container` is the command's free-text slot and means whatever the kind needs: a
     container name for `logs`, a cloud name for `inventory`, a project id for
-    `emulator-start`/`emulator-stop`. `clouds` is a comma-separated list, used only by
-    the emulator kinds.
+    `emulator-start`/`emulator-stop`/`app-populate`. `clouds` is a comma-separated list,
+    used only by the emulator kinds.
+
+    `payload` carries structured input a command cannot derive for itself — today only
+    `app-populate`'s workspace handle, which is the same `{url, sha256, bytes}` a run
+    claim ships. Explicit and small on purpose: it holds a PRESIGNED URL, which is a
+    bearer credential, so it must stay out of every reader that enumerates runner fields
+    for the UI (`list_runner_state`, `_index_runner`) — neither exposes `cmd*` today and
+    neither should start.
     """
     row = runner_state(runner) or {}
     existing = row.get("cmdId")
@@ -891,6 +899,7 @@ def request_command(runner: str, kind: str, container: str, tail: int = 200,
         "cmdKind": kind,
         "cmdContainer": container,
         "cmdClouds": str(clouds or ""),
+        "cmdPayload": json.dumps(payload or {})[:8192],
         "cmdTail": int(tail),
         "cmdRequestedAt": _now(),
         # Flat attributes rather than a nested map: update_item builds only top-level
@@ -926,16 +935,37 @@ def take_command(runner: str) -> dict | None:
                           {"cmdTakenAt": _now()}, expect={"cmdId": command_id})
     except Exception:                                         # noqa: BLE001 — lost the race
         return None
+    try:
+        payload = json.loads(row.get("cmdPayload") or "{}")
+    except (TypeError, ValueError):
+        payload = {}
     return {"id": command_id, "kind": row.get("cmdKind", "logs"),
             "container": row.get("cmdContainer", ""),
             "clouds": row.get("cmdClouds", ""),
+            "payload": payload if isinstance(payload, dict) else {},
             "tail": int(row.get("cmdTail") or 200)}
 
 
 def record_command_result(runner: str, command_id: str, key: str = "",
                           error: str = "") -> None:
-    db.update_item(TABLE, _runner_key(runner), {
-        "cmdResultKey": key, "cmdResultAt": _now(), "cmdError": error[:400]})
+    """Record a command's outcome, ONLY if that command still holds the slot.
+
+    Conditional, like `take_command`. There is one slot per runner, so a command that
+    outlives its own request — a populate takes minutes, a Stop pressed meanwhile takes
+    seconds — used to write its result over WHATEVER command occupied the row by then.
+    The reader was then told that Stop had finished, quoting the result of work Stop
+    never did.
+
+    Losing the race is the correct outcome and not an error: the caller's command is
+    gone, and `command_result` reports `superseded` to whoever is still polling it.
+    """
+    try:
+        db.update_item_if(TABLE, _runner_key(runner),
+                          {"cmdResultKey": key, "cmdResultAt": _now(),
+                           "cmdError": error[:400]},
+                          expect={"cmdId": command_id})
+    except Exception:                                         # noqa: BLE001 — superseded
+        log.info("dropping result for %s: the runner's slot moved on", command_id)
 
 
 def command_result(runner: str, command_id: str) -> dict | None:
