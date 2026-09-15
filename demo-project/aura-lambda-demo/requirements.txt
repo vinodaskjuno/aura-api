@@ -1,0 +1,6 @@
+# boto3 is what makes Aura start the AWS Floci emulator at all: the analyser writes a
+# Dependency node from this file, and `emulators.clouds_for()` reads it. The emulator
+# selection follows the code rather than being configured anywhere.
+fastapi>=0.110
+uvicorn>=0.29
+boto3>=1.34

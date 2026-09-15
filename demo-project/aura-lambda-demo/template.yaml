@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Infrastructure for aura-lambda-demo. This file is NOT deployed by the demo — the app
+  creates its own resources at startup. It exists to be READ by Aura's NIST policy checks
+  (src/qatest/policy.py), which parse IaC and never touch a running system.
+
+  Authored deliberately to produce a MIX of pass and fail: a demo where every control
+  passes proves nothing, and one where every control fails looks broken. Each violation
+  is paired with a compliant sibling so the check is visibly discriminating.
+
+Resources:
+
+  # ── IA-5(1) FAILS here: a literal credential in an environment variable ──────────
+  # Paired with PricingFunction below, which references Secrets Manager instead.
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aura-lambda-audit
+      Handler: audit.handler
+      Runtime: python3.12          # SI-2 passes: current runtime
+      Timeout: 30
+      Environment:
+        Variables:
+          FLOCI_ENDPOINT: http://floci:4566
+          MEDIA_BUCKET: !Ref MediaBucket
+          DB_PASSWORD: sup3rs3cret-do-not-ship    # IA-5(1) VIOLATION: literal secret
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub '${MediaBucket.Arn}/audit/*'
+
+  # ── AC-6(1) FAILS here: wildcard Action and Resource ────────────────────────────
+  # Paired with AuditFunction above, which names exactly what it needs.
+  PricingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aura-lambda-pricing
+      Handler: pricing.handler
+      Runtime: python3.12          # SI-2 passes: current runtime
+      Timeout: 30
+      Environment:
+        Variables:
+          FLOCI_ENDPOINT: http://floci:4566
+          CATALOG_TABLE: !Ref CatalogTable
+          # IA-5(1) passes here: a REFERENCE, not a literal. This is the compliant
+          # pattern the control is looking for.
+          DB_PASSWORD: '{{resolve:secretsmanager:aura-lambda-demo/db:SecretString:password}}'
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: '*'          # AC-6(1) VIOLATION: wildcard action
+              Resource: '*'        # AC-6(1) VIOLATION: wildcard resource
+
+  # ── SC-13 passes: encryption at rest declared on both stores ────────────────────
+  CatalogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: aura-lambda-catalog
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: aura-lambda-media
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+Outputs:
+  PricingFunctionName:
+    Value: !Ref PricingFunction
+  AuditFunctionName:
+    Value: !Ref AuditFunction
