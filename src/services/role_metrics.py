@@ -63,6 +63,30 @@ _MAPPING_PIPELINES = {"dev-mate", "correlation", "self-learning"}
 _TEST_PIPELINES = {"qa-mind"}
 _MIGRATION_PIPELINES = {"migration"}
 
+#: Stat keys a run reports. Mirrors `provenance._STAT_KEYS`; duplicated rather than
+#: imported because this module must stay readable with no graph stack present, and
+#: an extra key appearing there is additive here (an unknown key simply is not read).
+_WRITE_STAT_KEYS = ("nodesAdded", "nodesUpdated", "nodesRetired", "nodesDeleted",
+                    "relsAdded", "relsUpdated", "relsArchived", "relsDeleted")
+
+
+def _wrote_anything(run: dict) -> bool:
+    """Did this run actually change the graph?
+
+    `nodesUnchanged` is deliberately excluded: a run that looked at everything and
+    changed nothing is evidence the pipeline ran, not evidence it produced anything.
+    """
+    stats = run.get("stats")
+    if not isinstance(stats, dict):
+        return False
+    for key in _WRITE_STAT_KEYS:
+        try:
+            if int(stats.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
 
 # ── Wire constructors ────────────────────────────────────────────────────────
 
@@ -459,11 +483,56 @@ class _Data:
     @cached_property
     def proposals(self) -> list[dict]:
         """Decided DevMate proposals — what the agent suggested and whether it
-        was taken. Only exists from the moment apply/discard started recording."""
+        was taken. Only exists from the moment apply/discard started recording.
+
+        SCOPED TO THIS USER'S PROJECTS. The scan was unfiltered, so "Advice applied"
+        — rendered on a per-user page, beside this user's own project count and their
+        own token spend — was in fact an estate-wide figure computed from everybody's
+        decisions. Filtered in Python rather than by a query because the table is keyed
+        on (projectId, proposalId) and the answer wanted is "my projects", which is a
+        set, not a partition.
+        """
         def read() -> list[dict]:
             from src.database import dynamo_client as db
-            return db.scan_items("devmate-proposals", limit=500)
+            rows = db.scan_items("devmate-proposals", limit=500)
+            mine = self.known_project_ids
+            return [r for r in rows if str(r.get("projectId") or "") in mine]
         return self._load("proposals", read, [])
+
+    @cached_property
+    def local_apps(self) -> dict:
+        """projectId -> the app sessions running on someone's machine right now.
+
+        ONE read for every project, not one per card. `list_runner_state` reads the
+        aggregate index row, so asking "is this project running locally" costs the
+        same whether the hero shows one project or six — which is what lets this sit
+        on a card without breaking the rule that only the hero six may be expensive.
+        """
+        def read() -> dict:
+            from src.qatest import queue
+            out: dict = {}
+            for row in queue.list_runner_state():
+                for app in row.get("apps") or []:
+                    pid = str(app.get("projectId") or "")
+                    if not pid:
+                        continue
+                    out.setdefault(pid, []).append({
+                        **{k: v for k, v in app.items() if k != "logTail"},
+                        "runner": row.get("name") or row.get("runner") or "",
+                        "ownerId": row.get("ownerId", ""),
+                        "stale": bool(row.get("stale")),
+                    })
+            return out
+        return self._load("local_apps", read, {})
+
+    @cached_property
+    def ingest_state(self) -> dict:
+        """projectId -> telemetry state. One GetItem for the whole estate."""
+        def read() -> dict:
+            from src.aiobs import ingest_status
+            ids = [str(p.get("projectId") or "") for p in self.my_projects]
+            return ingest_status.status_for_many([pid for pid in ids if pid])
+        return self._load("ingest_state", read, {})
 
     @cached_property
     def devmate_runs(self) -> list[dict]:
@@ -544,11 +613,13 @@ class _Data:
         return self.NOT_ANALYSED
 
     def last_run(self, project_id: str, pipelines: set[str] | None = None,
-                 *, success_only: bool = False) -> dict | None:
+                 *, success_only: bool = False, wrote_only: bool = False) -> dict | None:
         for run in self.runs_by_project.get(project_id, []):
             if pipelines and str(run.get("pipeline") or "") not in pipelines:
                 continue
             if success_only and run.get("status") != "success":
+                continue
+            if wrote_only and not _wrote_anything(run):
                 continue
             return run
         return None
@@ -563,9 +634,18 @@ class _Data:
         # same from here and mean opposite things to a reader.
         blank = "unknown" if self.unattributed_runs else "none"
 
-        for pipelines in (_ANALYSIS_PIPELINES, _MAPPING_PIPELINES,
-                          _TEST_PIPELINES, _MIGRATION_PIPELINES):
-            latest = self.last_run(pid, pipelines)
+        # `wrote_only` on the MAPPING stage only. Every DevMate chat turn now opens a
+        # `pipeline='dev-mate'` run carrying this projectId, and a conversational turn
+        # always closes "success" — status only flips on an exception. So asking
+        # DevMate "what does this repo do?" lit the Mapped column, under a legend that
+        # promises the stage is "derived from pipeline runs that actually succeeded,
+        # not self-reported". Mapping is the one stage whose whole claim is that
+        # something was written, so it is the one stage that must check.
+        for pipelines, wrote_only in ((_ANALYSIS_PIPELINES, False),
+                                      (_MAPPING_PIPELINES, True),
+                                      (_TEST_PIPELINES, False),
+                                      (_MIGRATION_PIPELINES, False)):
+            latest = self.last_run(pid, pipelines, wrote_only=wrote_only)
             if latest is None:
                 marks.append(blank)
             elif latest.get("status") == "success":
@@ -1513,6 +1593,8 @@ def _devmate_cards(data: _Data) -> tuple[list[dict], int]:
         except Exception:                                     # noqa: BLE001
             pending = []
 
+        running = [a for a in data.local_apps.get(pid, []) if not a.get("stale")]
+
         if pending:
             status, state = (f"{len(pending)} change"
                              f"{'s' if len(pending) > 1 else ''} awaiting you"), "attention"
@@ -1535,6 +1617,12 @@ def _devmate_cards(data: _Data) -> tuple[list[dict], int]:
             "detail": detail,
             "when": _ago(project.get("updatedAt") or project.get("createdAt")),
             "pending": len(pending),
+            # Both come from sources read once for the whole estate, so a card costs
+            # nothing extra — see `_Data.local_apps` and `_Data.ingest_state`.
+            "running": bool(running),
+            "runningUrl": (running[0].get("url", "") if running else ""),
+            "runningOwnerId": (running[0].get("ownerId", "") if running else ""),
+            "telemetry": data.ingest_state.get(pid, ""),
         })
     return cards, len(projects)
 
@@ -1584,6 +1672,36 @@ def _devmate_blocks(data: _Data, cards: list[dict], show_cost: bool) -> dict:
                                                weigh=_row_cost)))
 
     blocks: list[dict] = [{"kind": "metrics", "title": "Workspace", "items": items}]
+
+    # ── Local runs ───────────────────────────────────────────────────────────
+    # Deliberately HERE and not on the AI Traces page. A local run's lifecycle —
+    # detect, provision, podman, boot, readiness — is infra, and `aiobs.classify`
+    # would file those spans as `unknown` with empty cost and token columns, drowning
+    # the LLM traces that page exists for. Run health is a DevMate concern.
+    running = [a for apps in data.local_apps.values() for a in apps if not a.get("stale")]
+    traced = sum(1 for pid in data.ingest_state
+                 if data.ingest_state.get(pid) == "connected")
+    refused = [pid for pid in data.ingest_state
+               if data.ingest_state.get(pid) == "key-refused"]
+    blocks.append({"kind": "metrics", "title": "Local runs", "items": [
+        metric("Running locally", len(running) or None,
+               state="ok" if data.ok("local_apps") else "unavailable",
+               reason=data.why("local_apps") if not data.ok("local_apps") else "",
+               basis=(", ".join(sorted({a.get("runner", "") for a in running}))
+                      if running else "nothing started from DevMate")),
+        metric("Reporting traces", traced or None,
+               state="ok" if data.ok("ingest_state") else "unavailable",
+               reason=data.why("ingest_state") if not data.ok("ingest_state") else "",
+               basis=(f"of {len(data.ingest_state)} project(s)"
+                      if data.ingest_state else "no project has sent a span yet")),
+        # Its own tile rather than folded into the one above, because "nothing is
+        # arriving" and "something is arriving and being refused" are the two states
+        # the always-200 ingest contract makes indistinguishable everywhere else.
+        metric("Telemetry refused", len(refused) or None,
+               state="attention" if refused else "ok",
+               basis=(", ".join(sorted(refused)) if refused
+                      else "no credential has been rejected")),
+    ]})
 
     # The full catalogue is NOT sent. `ProjectsPanel` already renders it on the
     # client, with a name/environment search filter, and it fetches its own
@@ -1705,12 +1823,30 @@ def _assert_every_role_has_a_view() -> None:
 DEFAULT_VIEW = _developer
 
 
-def build_view(user: dict) -> dict:
-    """The whole dashboard payload for one user."""
+def build_view(user: dict, preview_role: str = "") -> dict:
+    """The whole dashboard payload for one user.
+
+    `preview_role` renders ANOTHER role's blocks against THIS user's data. The
+    caller is responsible for checking permission — `routers/dashboard_view.py`
+    allows it only for `user_management`, and this function deliberately does not
+    re-check, so there is exactly one place that decides.
+
+    It exists because there are seven distinct payloads and, until now, no way to
+    look at six of them: role is read off the token by design, so seeing the
+    Project Manager dashboard meant provisioning an account in that directory
+    group. That is a reasonable stance for using the product and an unreasonable
+    one for changing it.
+
+    ONLY the builder is swapped. `_Data` is still constructed from the real user,
+    so a preview shows that role's SHAPE over data this person may already see —
+    it is not an impersonation and grants no access. An unknown role id falls
+    through to DEFAULT_VIEW exactly as a real one would.
+    """
     from src.services.auth_service import ROLE_LABELS
 
     role = str(user.get("role") or "")
-    builder = ROLE_VIEWS.get(role, DEFAULT_VIEW)
+    rendered_role = str(preview_role or "") or role
+    builder = ROLE_VIEWS.get(rendered_role, DEFAULT_VIEW)
     data = _Data(user)
 
     try:
@@ -1718,7 +1854,7 @@ def build_view(user: dict) -> dict:
     except Exception as exc:                                      # noqa: BLE001
         # A builder bug must not return a 500 — the dashboard is the landing
         # page, and a blank landing page looks like the product is down.
-        log.exception("role view %r failed", role)
+        log.exception("role view %r failed", rendered_role)
         view = {
             "headline": {"text": "Your dashboard could not be assembled",
                          "detail": f"{type(exc).__name__}: {exc}"[:200],
@@ -1727,13 +1863,19 @@ def build_view(user: dict) -> dict:
         }
 
     payload = {
-        "role": role,
-        "roleLabel": ROLE_LABELS.get(role, role or "User"),
+        "role": rendered_role,
+        "roleLabel": ROLE_LABELS.get(rendered_role, rendered_role or "User"),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "headline": view.get("headline") or {"text": "", "state": "ok"},
         "attention": view.get("attention") or [],
         "blocks": view.get("blocks") or [],
     }
+    if preview_role and preview_role != role:
+        # Stated on the payload so the UI can show a persistent banner. A preview
+        # that looks identical to the real thing is how someone files a bug about
+        # a dashboard they were never actually looking at.
+        payload["previewedRole"] = rendered_role
+        payload["actualRole"] = role
     if data.failed:
         # Reported, not hidden. A dashboard quietly missing a section is worse
         # than one that says which source it could not read.

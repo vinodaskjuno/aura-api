@@ -157,6 +157,61 @@ def _stage_pop(project_id: str, file_path: str) -> str | None:
     return content
 
 
+def attach_commit(project_id: str, commit_sha: str = "", pr_url: str = "",
+                  paths: list[str] | None = None) -> int:
+    """Record which commit (or PR) carried this project's applied changes.
+
+    Returns how many proposal rows were updated.
+
+    The chain proposal -> file on disk -> commit -> PR was broken at its second link:
+    `git_ops` computed the SHA and the PR URL, returned them in an HTTP response body
+    and persisted neither, so there was no way to answer "which conversation produced
+    this commit" — or the reverse — even though both halves were known at the time.
+
+    Applies to APPLIED, UNCOMMITTED rows only. A commit sweeps up whatever is staged in
+    the working tree, so the honest attribution is "every applied change that had not
+    yet been attached to one", not a guess at which files this particular commit
+    touched. When the caller does know the paths, it says so and only those are taken.
+
+    Best-effort, like `record_decision` itself: a bookkeeping write must never be able
+    to fail a commit the operator has already made.
+    """
+    if not project_id or not (commit_sha or pr_url):
+        return 0
+    try:
+        from src.database import dynamo_client as db
+        rows = db.query_items("devmate-proposals", "projectId", project_id, limit=500)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("attach_commit: could not read proposals for %s: %s", project_id, exc)
+        return 0
+
+    wanted = set(paths or [])
+    updated = 0
+    for row in rows:
+        if str(row.get("decision") or "") != "applied":
+            continue
+        if row.get("commitSha") or row.get("prUrl"):
+            continue
+        if wanted and str(row.get("path") or "") not in wanted:
+            continue
+        patch = {}
+        if commit_sha:
+            patch["commitSha"] = str(commit_sha)[:64]
+        if pr_url:
+            patch["prUrl"] = str(pr_url)[:400]
+        try:
+            from src.database import dynamo_client as db
+            db.update_item("devmate-proposals",
+                           {"projectId": project_id,
+                            "proposalId": str(row.get("proposalId") or "")},
+                           patch)
+            updated += 1
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("attach_commit: could not update %s: %s",
+                        row.get("proposalId"), exc)
+    return updated
+
+
 def record_decision(project_id: str, file_path: str, decision: str,
                     staged: dict | None, decided_by: str = "",
                     additions: int = 0, deletions: int = 0) -> None:

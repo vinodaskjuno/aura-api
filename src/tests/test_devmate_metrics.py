@@ -324,10 +324,28 @@ def test_advice_applied_is_unmeasured_until_something_is_decided(devmate):
 
 def test_advice_applied_reports_a_rate_once_decisions_exist(devmate):
     devmate.projects = _projects(2)
-    devmate.proposals = [{"decision": "applied"}, {"decision": "applied"},
-                         {"decision": "discarded"}, {"decision": "discarded"}]
+    devmate.proposals = [{"projectId": "p0", "decision": "applied"},
+                         {"projectId": "p0", "decision": "applied"},
+                         {"projectId": "p1", "decision": "discarded"},
+                         {"projectId": "p1", "decision": "discarded"}]
     metrics = {i["label"]: i for b in _dm()["blocks"] for i in b.get("items", [])}
     assert metrics["Advice applied"]["value"] == 50
+
+
+def test_advice_applied_counts_only_my_own_projects(devmate):
+    """The scan is estate-wide; the page is not.
+
+    "Advice applied" sits beside this user's project count and their token spend, so
+    computing it from everybody's decisions made it the one number on the page that
+    silently described someone else.
+    """
+    devmate.projects = _projects(1)                      # p0 only
+    devmate.proposals = [{"projectId": "p0", "decision": "applied"},
+                         {"projectId": "someone-else", "decision": "discarded"},
+                         {"projectId": "someone-else", "decision": "discarded"}]
+    metrics = {i["label"]: i for b in _dm()["blocks"] for i in b.get("items", [])}
+    assert metrics["Advice applied"]["value"] == 100
+    assert "1 of 1 decided" in metrics["Advice applied"]["basis"]
 
 
 def test_only_an_admin_sees_spend(devmate):

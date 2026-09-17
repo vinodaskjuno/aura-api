@@ -996,6 +996,192 @@ def control_project_emulators(project_id: str, action: str, body: EmulatorReques
             "clouds": clouds}
 
 
+class AppRunRequest(BaseModel):
+    runner: str
+    #: Opt-in, off by default. Installs an OpenTelemetry sidecar beside the project —
+    #: never into its venv — so the running app emits LLM span trees with no code change.
+    instrument: bool = False
+
+
+#: `app-start` and friends did not exist before protocol 3. A runner below it answers
+#: `unknown command 'app-start'`, which reaches the reader as a bare failure with
+#: nothing to act on. Deploying Aura updates the server; the runner is code on someone's
+#: laptop, so the two are always skewed and the server is the side that must check.
+_APP_SESSION_PROTOCOL = 3
+
+
+def _require_app_capable(runner: str) -> dict:
+    """The runner's row, or a 409 explaining exactly what is too old."""
+    from src.qatest import queue
+
+    for row in queue.list_runner_state():
+        if row.get("name") != runner and row.get("runner") != runner:
+            continue
+        if int(row.get("protocol") or 1) < _APP_SESSION_PROTOCOL:
+            raise HTTPException(
+                409,
+                f"The runner on {runner} speaks protocol {row.get('protocol') or 1} and "
+                f"running a project locally needs {_APP_SESSION_PROTOCOL}. Update it on "
+                f"that machine (git pull, then restart `python -m src.qatest.agent`).")
+        return row
+    raise HTTPException(404, f"No runner named {runner!r} is connected.")
+
+
+def _telemetry_for(project_id: str, user: dict) -> dict:
+    """The environment that points a locally-run app back at this Aura.
+
+    ENV VARS ONLY. Both SDKs honour a base URL from the environment and every OTel SDK
+    honours the OTEL_* set, so nothing here requires the developer to change a line of
+    their code or add a dependency.
+
+    A KEY OF ITS OWN, minted server-side and scoped to this project. The runner's own
+    `--key` carries `qa_workspace` and must never be handed to a user's application
+    process: one debug route or exception page that dumps os.environ would leak it.
+
+    Returns {} — and therefore injects nothing — when the base URL is not HTTPS. These
+    values include a bearer credential, and putting one in a developer's environment to
+    travel over plain HTTP is a decision someone has to take knowingly, not a default.
+    """
+    from src.config_settings import get_settings
+    from src.services import gateway_service
+
+    s = get_settings()
+    base = str(getattr(s, "public_base_url", "") or "").rstrip("/")
+    if not base:
+        return {"env": {}, "skipped": "no PUBLIC_BASE_URL is configured on this server"}
+    insecure_ok = bool(getattr(s, "allow_insecure_telemetry_keys", False))
+    if not base.startswith("https://") and not insecure_ok:
+        return {"env": {}, "skipped": (
+            f"{base} is not HTTPS, so no gateway key was injected — it would cross the "
+            f"network in clear text. Set ALLOW_INSECURE_TELEMETRY_KEYS=true to accept "
+            f"that in a development environment.")}
+
+    user_id = str(user.get("userId") or user.get("username") or "")
+    try:
+        key = gateway_service.get_or_create_tool_key(
+            user_id, f"local-app:{project_id}"[:64],
+            role_id=str(user.get("roleId") or ""), project_id=project_id)
+    except Exception as exc:                                  # noqa: BLE001
+        return {"env": {}, "skipped": f"could not mint a key: {exc}"[:200]}
+
+    raw = str(key.get("key") or "")
+    if not raw:
+        # `get_or_create_tool_key` returns the plaintext only on creation — an existing
+        # key is a hint and nothing more, by design. Rotate to get a usable one.
+        try:
+            key = gateway_service.rotate_tool_key(
+                user_id, f"local-app:{project_id}"[:64],
+                role_id=str(user.get("roleId") or ""))
+            raw = str(key.get("key") or "")
+        except Exception as exc:                              # noqa: BLE001
+            return {"env": {}, "skipped": f"could not rotate the key: {exc}"[:200]}
+    if not raw:
+        return {"env": {}, "skipped": "no usable gateway key"}
+
+    return {"env": {
+        # ── AI Ops: cost and usage, attributed by the key's own projectId ──
+        "ANTHROPIC_BASE_URL": f"{base}/gateway",
+        "ANTHROPIC_API_KEY": raw,
+        "OPENAI_BASE_URL": f"{base}/gateway/v1",
+        "OPENAI_API_BASE": f"{base}/gateway/v1",
+        "OPENAI_API_KEY": raw,
+        "AURA_PROJECT_ID": project_id,
+
+        # ── AI Traces ──
+        # SIGNAL-SPECIFIC, deliberately. The generic OTEL_EXPORTER_OTLP_ENDPOINT would
+        # also route metrics and logs to /otlp/v1/metrics and /otlp/v1/logs, which are
+        # Claude Code usage-reconciliation endpoints feeding usage_rollup under this
+        # key's user id. A stranger's FastAPI metrics landing there is a data-quality
+        # incident nobody would ever trace back to this feature.
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"{base}/otlp/v1/traces",
+        "OTEL_EXPORTER_OTLP_TRACES_HEADERS": f"Authorization=Bearer {raw}",
+        # MANDATORY. opentelemetry-distro defaults to gRPC and this server speaks HTTP
+        # only; wrong here means zero spans, no error, and nothing for the developer to
+        # see — the exporter retries inside their own process forever.
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_METRICS_EXPORTER": "none",
+        "OTEL_LOGS_EXPORTER": "none",
+        "OTEL_SERVICE_NAME": project_id,
+        # MANDATORY TOO. `aiobs.service.project_of` reads `aura.project` BEFORE
+        # service.name, and this is the id — not the name — that joins these traces to
+        # the Aura project. Names get edited; ids do not.
+        "OTEL_RESOURCE_ATTRIBUTES": f"aura.project={project_id},aura.user_id={user_id}",
+    }, "skipped": ""}
+
+
+@router.post("/apps/{project_id}/start")
+def start_project_app(project_id: str, body: AppRunRequest,
+                      user: dict = Depends(require_permission("dev_workspace"))):
+    """Start this project's app on the runner's machine and LEAVE IT RUNNING.
+
+    The difference from `/emulators/{id}/populate` is only the lifetime: populate boots
+    the app inside a `with` block so its startup creates cloud resources, then stops it.
+    Nothing was ever left up long enough to be worth observing.
+    """
+    from src.qatest import emulators, plan, queue, workspace
+
+    _require_app_capable(body.runner)
+
+    published = workspace.publish(project_id)
+    if not published or not published.get("url"):
+        raise HTTPException(status_code=409, detail=_no_workspace_detail(project_id))
+
+    facts = plan.fetch_facts(project_id)
+    clouds = [c.name for c in emulators.clouds_for(facts.get("dependencies") or [])]
+    telemetry = _telemetry_for(project_id, user)
+
+    queued = queue.request_command(
+        body.runner, "app-start", project_id,
+        clouds=",".join(clouds), payload=published,
+        extra={"telemetry": telemetry, "instrument": bool(body.instrument)})
+    return {**queued, "clouds": clouds,
+            "telemetry": {"configured": bool(telemetry.get("env")),
+                          "skipped": telemetry.get("skipped", "")}}
+
+
+@router.post("/apps/{project_id}/stop")
+def stop_project_app(project_id: str, body: AppRunRequest,
+                     _: dict = Depends(require_permission("dev_workspace"))):
+    """Stop this project's app session on the runner's machine."""
+    from src.qatest import queue
+
+    _require_app_capable(body.runner)
+    return queue.request_command(body.runner, "app-stop", project_id)
+
+
+@router.get("/apps/{project_id}")
+def get_project_app(project_id: str,
+                    _: dict = Depends(require_permission("dev_workspace"))):
+    """Every runner's view of this project's app session.
+
+    Read from the reported state rather than by asking the runner: the state report
+    already carries `apps`, so the panel costs one GetItem instead of a command slot.
+    `stale` is reported honestly — a sleeping laptop must not leave a panel claiming an
+    app is up.
+    """
+    from src.qatest import queue
+
+    out = []
+    for row in queue.list_runner_state():
+        for app in row.get("apps") or []:
+            if str(app.get("projectId") or "") != project_id:
+                continue
+            out.append({**app, "runner": row.get("name") or row.get("runner") or "",
+                        "ownerId": row.get("ownerId", ""),
+                        "stale": bool(row.get("stale")),
+                        "appsAt": row.get("appsAt", "")})
+    return {"apps": out}
+
+
+@router.get("/apps/{project_id}/logs")
+def get_project_app_logs(project_id: str, runner: str = Query(...),
+                         _: dict = Depends(require_permission("dev_workspace"))):
+    """The running app's console tail. A GetItem, not a command — see `queue.app_logs`."""
+    from src.qatest import queue
+    return queue.app_logs(runner, project_id)
+
+
 @router.get("/results/{project_id}/{run_id}/console")
 def get_run_console(project_id: str, run_id: str,
                     _: dict = Depends(require_permission("qa_workspace"))):

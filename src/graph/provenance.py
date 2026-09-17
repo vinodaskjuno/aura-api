@@ -390,6 +390,8 @@ def _open_run_record(ctx: TraceContext, file_info: dict[str, Any] | None = None)
             project_id=ctx.projectId,
             written_by=ctx.writtenBy,
             parent_run_id=ctx.parentRunId,
+            session_id=ctx.sessionId,
+            actor_id=ctx.actorId,
         )
         return str(record.get("versionNumber", ""))
     except Exception as exc:  # noqa: BLE001 — bookkeeping never fails ingestion

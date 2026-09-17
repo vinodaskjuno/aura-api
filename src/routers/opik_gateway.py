@@ -182,6 +182,12 @@ class OnboardRequest(BaseModel):
     # "opik-sdk" for @track-style instrumentation, "otel-sdk" for a raw exporter.
     style: str = "opik-sdk"
     projectName: str = "my-agent"
+    #: Where the snippets should point. Empty means "whatever this server is
+    #: configured as", which is the right answer almost always. It exists for the
+    #: case the server genuinely cannot know: an operator generating a snippet for a
+    #: colleague's environment, or a developer whose Aura is reached on a port this
+    #: process has never been told about.
+    baseUrl: str = ""
 
 
 _SNIPPET_STYLES = ("opik-sdk", "otel-sdk", "langchain", "crewai", "llamaindex",
@@ -233,20 +239,34 @@ def onboarding(body: OnboardRequest, user: dict = Depends(get_current_user)):
         "apiKeyHint": hint,
         "isNewKey": bool(raw),
         "toolLabel": label,
-        "snippets": _snippets(body.style, project, raw or "gw-<your key>"),
+        "baseUrl": _base_url(body.baseUrl),
+        "snippets": _snippets(body.style, project, raw or "gw-<your key>",
+                              _base_url(body.baseUrl)),
         "notes": _notes(body.style),
     }
 
 
-def _base_url() -> str:
+def _base_url(override: str = "") -> str:
     """The host a customer's agent should export to.
 
-    Left as a placeholder rather than guessed from the request: Aura sits behind an
-    ALB and nginx, so `request.base_url` is frequently the internal address and a
-    confidently-wrong endpoint is worse than an obvious blank.
+    Still not guessed from the request: Aura sits behind an ALB and nginx, so
+    `request.base_url` is frequently the internal address and a confidently-wrong
+    endpoint is worse than an obvious blank.
+
+    But a developer running Aura on their own machine has no `public_base_url` and was
+    handed the literal string `https://<aura-host>` — a snippet that cannot work,
+    offered as if it could. When nothing is configured, the local address is the only
+    honest answer available, and it is the right one for the only person who can be in
+    that state. `override` lets the caller ask for a specific one.
     """
     from src.config_settings import get_settings
-    return (get_settings().public_base_url or "https://<aura-host>").rstrip("/")
+
+    if override:
+        return override.rstrip("/")
+    configured = (get_settings().public_base_url or "").rstrip("/")
+    if configured:
+        return configured
+    return "http://localhost:8000"
 
 
 def _notes(style: str) -> list[str]:
@@ -267,9 +287,9 @@ def _notes(style: str) -> list[str]:
     return common
 
 
-def _snippets(style: str, project: str, key: str) -> list[dict]:
+def _snippets(style: str, project: str, key: str, base: str = "") -> list[dict]:
     """Copy-paste blocks. Language tags match the UI's syntax highlighter."""
-    base = _base_url()
+    base = base or _base_url()
 
     if style == "opik-sdk":
         return [

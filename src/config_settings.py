@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     otlp_max_body_bytes: int = 8 * 1024 * 1024   # reject absurd payloads
     usage_rollup_table: str = "usage-daily"
 
+    # Whether a `gw-` key may be injected into a locally-run application's environment
+    # when `public_base_url` is plain HTTP. Off, because that key then crosses the
+    # network in clear text — a development environment may accept it, but only by
+    # saying so. `routers/qa.py:_telemetry_for` is the only reader.
+    allow_insecure_telemetry_keys: bool = False
+
     # ── Opik (self-hosted LLM observability engine) ───────────────────────────
     # Opik replaces DynamoDB as the trace/span engine behind src/aiobs/. It is
     # reached over its REST API; nothing here talks to ClickHouse directly.

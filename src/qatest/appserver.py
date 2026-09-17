@@ -389,6 +389,51 @@ def _wait_ready(port: int, timeout: int = READY_TIMEOUT_S,
     return False
 
 
+def instrumented(spec: AppSpec, sidecar) -> AppSpec:
+    """`spec` re-pointed through OpenTelemetry auto-instrumentation, where that is
+    possible. Returns the spec UNCHANGED when it is not, so a caller can compare and
+    report honestly rather than claiming tracing it did not install.
+
+    Deliberately separate from `detect`, which is shared with QA runs: silently
+    instrumenting the app under test would change what is being tested — extra ASGI
+    middleware, extra latency, a different exception path — and a test run must
+    exercise the application, not the application plus our tracing.
+
+    Two cases it refuses, both permanently:
+
+      COMPOSE. `spec.command` is `[compose…, "up", "-d"]`, so the process is compose,
+      not the app. Instrumenting would mean editing the user's docker-compose.yml, and
+      Aura must not rewrite a project's own deployment description. Since
+      `detect_compose` wins outright, this is exactly the case most people mean by
+      "run my project locally" — so the caller has to say so rather than showing an
+      empty traces panel.
+
+      NODE. `npm run dev` is a bundler; the model calls in a frontend happen in the
+      browser, not in that process. Making it real would need `npm install` into the
+      project, rewriting package-lock.json — a source mutation that would then fight
+      `npm ci` on the next `provision.install`.
+    """
+    from dataclasses import replace
+
+    if spec.compose or not spec.command:
+        return spec
+    binary = str(spec.command[0])
+    if "python" not in binary.lower():
+        return spec
+
+    # The MODULE, not the `opentelemetry-instrument` console script: a script installed
+    # by `pip --target` carries an absolute shebang pointing at whichever interpreter
+    # did the install, which is not the interpreter this app runs on.
+    command = [binary, "-m", "opentelemetry.instrumentation.auto_instrumentation",
+               *spec.command]
+    env = {**spec.env, "PYTHONPATH": _prepend_path(str(sidecar), spec.env.get("PYTHONPATH", ""))}
+    return replace(spec, command=command, env=env)
+
+
+def _prepend_path(head: str, tail: str) -> str:
+    return f"{head}{os.pathsep}{tail}" if tail else head
+
+
 class RunningApps:
     """Starts the detected applications and guarantees they are stopped.
 
@@ -396,9 +441,20 @@ class RunningApps:
     watcher running; the next run then fails in a way that points nowhere near here.
     """
 
-    def __init__(self, specs: list[AppSpec], extra_env: dict[str, str] | None = None):
+    def __init__(self, specs: list[AppSpec], extra_env: dict[str, str] | None = None,
+                 *, destroy_volumes: bool = True, compose_project: str = ""):
         self.specs = specs
         self.extra_env = extra_env or {}
+        # `down -v` deletes NAMED VOLUMES — the stack's database. Correct for a test
+        # run, whose stack is disposable and whose next run must start from nothing.
+        # Catastrophic for "run my project locally", where the volume is the developer's
+        # own data. The default stays True so every existing caller behaves exactly as
+        # before, and the long-lived session opts out.
+        self.destroy_volumes = destroy_volumes
+        # Explicit `-p`, so teardown provably targets the stack WE started. Without it
+        # compose derives a project name from the directory, which is the same name a
+        # stack the developer started by hand would have — and `down` would take theirs.
+        self.compose_project = compose_project
         self.procs: dict[str, subprocess.Popen] = {}
         self._composed: list[AppSpec] = []
         self.started: list[AppSpec] = []
@@ -410,7 +466,11 @@ class RunningApps:
         # the run's own progress output.
         self._handles: list = []
 
-    def __enter__(self) -> "RunningApps":
+    def start_all(self) -> "RunningApps":
+        """Start every spec. Split out of `__enter__` so a caller that owns the
+        lifetime itself — a long-lived dev session, which cannot sit inside a `with`
+        spanning many poll iterations — reuses this code rather than copying it.
+        The guaranteed-teardown contract still holds for every `with` user below."""
         for spec in self.specs:
             if spec.blocked:
                 self.failures.append((spec, spec.blocked))
@@ -420,6 +480,9 @@ class RunningApps:
             except Exception as exc:  # noqa: BLE001 — one app failing is data
                 self.failures.append((spec, str(exc)))
         return self
+
+    def __enter__(self) -> "RunningApps":
+        return self.start_all()
 
     def __exit__(self, *_exc) -> None:
         self.stop()
@@ -469,12 +532,13 @@ class RunningApps:
         """
         from src.qatest import toolpath
 
-        result = subprocess.run(spec.command, cwd=str(spec.directory),
+        command = self._compose_command(spec)
+        result = subprocess.run(command, cwd=str(spec.directory),
                                 capture_output=True, text=True, timeout=600,
                                 env=toolpath.env())
         if result.returncode != 0:
             tail = (result.stderr or result.stdout or "").strip()[-400:]
-            self.failures.append((spec, f"`{' '.join(spec.command)}` failed: {tail}"))
+            self.failures.append((spec, f"`{' '.join(command)}` failed: {tail}"))
             return
 
         self._composed.append(spec)
@@ -491,16 +555,31 @@ class RunningApps:
         self.started.append(spec)
         log.info("qatest: compose stack ready on %s", spec.url)
 
+    def _compose_command(self, spec: AppSpec) -> list[str]:
+        """`spec.command` with an explicit project name spliced in, when we have one.
+
+        The name goes immediately after the compose binary and before `up`, which is
+        where every compose implementation expects a global flag.
+        """
+        if not self.compose_project:
+            return list(spec.command)
+        head = spec.command[:-2]                  # the binary, without "up -d"
+        return head + ["-p", self.compose_project] + spec.command[-2:]
+
     def _stop_compose(self) -> None:
         for spec in self._composed:
             from src.qatest import toolpath
 
-            down = spec.command[:-2] + ["down", "-v"]
+            head = spec.command[:-2]
+            if self.compose_project:
+                head = head + ["-p", self.compose_project]
+            down = head + ["down"] + (["-v"] if self.destroy_volumes else [])
             with contextlib.suppress(Exception):
                 subprocess.run(down, cwd=str(spec.directory),
                                capture_output=True, timeout=180,
                                env=toolpath.env())
-            log.info("qatest: compose stack stopped (%s)", spec.name)
+            log.info("qatest: compose stack stopped (%s, volumes %s)", spec.name,
+                     "removed" if self.destroy_volumes else "kept")
         self._composed.clear()
 
     @staticmethod
@@ -524,6 +603,20 @@ class RunningApps:
             with contextlib.suppress(Exception):
                 handle.close()
         self._handles.clear()
+
+    def stop_one(self, kind: str) -> bool:
+        """Stop just one of the started apps. Returns whether anything was stopped.
+
+        Compose is all-or-nothing here: a stack is one spec, so stopping "the api"
+        of a compose project would mean reaching inside it, which this module has no
+        business doing.
+        """
+        proc = self.procs.pop(kind, None)
+        if proc is None:
+            return False
+        self._kill(proc)
+        self.started = [spec for spec in self.started if spec.kind != kind]
+        return True
 
     def url_for(self, kind: str) -> str:
         for spec in self.started:

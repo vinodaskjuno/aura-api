@@ -50,14 +50,22 @@ _PROJECT_HEADER = "X-Aura-Project-Id"
 _RUN_HEADER = "X-Aura-Test-Run-Id"
 
 
-def _attribution(request: Request) -> dict:
+def _attribution(request: Request, user: "GatewayUser | None" = None) -> dict:
     """projectId / testRunId for this request, empty when not declared.
 
     Bounded because they are caller-supplied and land in a DynamoDB row that dashboards
     group by.
+
+    Falls back to the KEY's project when the header is absent. A test run sets the
+    header explicitly and still wins; what this rescues is the case the header cannot
+    reach — a developer's own application, started locally and pointed at the gateway
+    by `ANTHROPIC_BASE_URL` alone. A stock SDK sends no custom headers, so without the
+    key-carried value that traffic lands in an unattributed pool and no per-project
+    spend figure can ever be right.
     """
     return {
-        "project_id": str(request.headers.get(_PROJECT_HEADER) or "")[:64],
+        "project_id": (str(request.headers.get(_PROJECT_HEADER) or "")[:64]
+                       or str(getattr(user, "project_id", "") or "")[:64]),
         "test_run_id": str(request.headers.get(_RUN_HEADER) or "")[:64],
     }
 
@@ -172,7 +180,7 @@ async def anthropic_messages(
 
     request_id = str(uuid.uuid4())
     user_agent = request.headers.get("User-Agent", "")
-    attribution = _attribution(request)
+    attribution = _attribution(request, user)
     client_headers = forwardable_headers(request)
 
     # The caller is otherwise never told its model was swapped mid-conversation.
@@ -365,7 +373,7 @@ async def openai_chat_completions(
 
     request_id = str(uuid.uuid4())
     user_agent = request.headers.get("User-Agent", "")
-    attribution = _attribution(request)
+    attribution = _attribution(request, user)
     client_headers = forwardable_headers(request)
     extra_headers: dict[str, str] = {"X-Request-Id": request_id}
     if downgraded_from:

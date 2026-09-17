@@ -299,3 +299,46 @@ def emit_llm_span(*, project: str, agent: str, model: str, provider: str,
         return {"traceId": trace_id, "spanId": ""}
 
     return {"traceId": trace_id, "spanId": span_id}
+
+
+def emit_span(*, project: str, trace_id: str, name: str, kind: str,
+              masked_input: str = "", masked_output: str = "",
+              parent_span_id: str = "", latency_ms: int = 0, error: str = "",
+              metadata: dict | None = None) -> str:
+    """Record one NON-LLM span (a tool, retriever or chain step) under an existing trace.
+
+    Returns the new span id, or "" if Opik is off or the write failed — a caller must
+    treat "" as "no tracing this time" and carry on, per rule 1 above.
+
+    Separate from `emit_llm_span` rather than a flag on it because the two carry
+    genuinely different rows: this one has no model, no provider, no usage and no
+    cost, and Opik's `type` drives how the waterfall colours and groups it. Folding
+    them together would mean sending four empty fields on every tool call and would
+    let a caller emit a "tool" span that reports a token count.
+
+    Requires an existing `trace_id` by design. A bare tool call with no LLM turn
+    above it is not a thing DevMate can produce, and inventing a parent trace here
+    would scatter orphan single-span traces across the list view.
+    """
+    if not enabled() or not trace_id:
+        return ""
+
+    span_id = _uuid7()
+    span: dict[str, Any] = {
+        "id": span_id, "trace_id": trace_id, "project_name": project,
+        "name": name, "type": kind,
+        "start_time": _now(), "end_time": _now(),
+        "metadata": {**(metadata or {}), "latency_ms": int(latency_ms or 0)},
+    }
+    if masked_input:
+        span["input"] = {"args": _redact(masked_input)}
+    if masked_output:
+        span["output"] = {"result": _redact(masked_output)}
+    if parent_span_id:
+        span["parent_span_id"] = parent_span_id
+    if error:
+        span["error_info"] = {"exception_type": "ToolError", "message": error[:500]}
+
+    if request("POST", "v1/private/spans", json_body=span) is None:
+        return ""
+    return span_id

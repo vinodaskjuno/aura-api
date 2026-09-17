@@ -66,6 +66,10 @@ async def advisor_ws(websocket: WebSocket, token: str = Query(...)):
                     user_id=user_id,
                     project_id=project_id,
                     model_override=model_override,
+                    # The username, not the id: the Lineage run feed renders
+                    # `actor` as its identity column, and without this every
+                    # DevMate turn shows as "system".
+                    actor=user.get("username", ""),
                 )
                 # Persist session metadata plus both the user and assistant messages
                 try:

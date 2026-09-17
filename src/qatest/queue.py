@@ -604,6 +604,50 @@ def _clean_containers(containers: list | None) -> list[dict]:
     return out
 
 
+#: Cap on reported app sessions. One project can only have one session, but the cap is
+#: enforced here anyway: every runner's state shares ONE 400 KB index item, and the
+#: agent's own limit is not something to trust.
+_MAX_APPS = 12
+
+
+def _clean_apps(apps: list | None) -> list[dict]:
+    """Long-lived app sessions a runner reports. Bounded and stripped, like containers.
+
+    This is runner-supplied text that gets rendered to other people — including a URL,
+    which a reader may click. Kept to the fields the panel actually shows.
+    """
+    out: list[dict] = []
+    for a in (apps or [])[:_MAX_APPS]:
+        if not isinstance(a, dict):
+            continue
+        out.append({
+            "projectId": str(a.get("projectId") or "")[:128],
+            "sessionId": str(a.get("sessionId") or "")[:64],
+            "kind": str(a.get("kind") or "")[:20],
+            "name": str(a.get("name") or "")[:128],
+            "url": str(a.get("url") or "")[:200],
+            "port": int(a.get("port") or 0),
+            "pid": int(a.get("pid") or 0),
+            "compose": bool(a.get("compose")),
+            "healthy": bool(a.get("healthy")),
+            "instrumented": bool(a.get("instrumented")),
+            "instrumentationError": _text(a.get("instrumentationError"), 300),
+            "startedAt": str(a.get("startedAt") or "")[:40],
+            "logTail": [_text(line, 200) for line in (a.get("logTail") or [])[:40]],
+        })
+    return out
+
+
+def _without_logs(apps: list | None) -> list[dict]:
+    """The same rows with the console dropped.
+
+    The index is ONE 400 KB item shared by EVERY runner, and a console tail is by far
+    the largest thing an app row can carry. It lives on the per-runner row only, and
+    `app_logs` reads it from there — a GetItem, so the panel pays nothing extra for it.
+    """
+    return [{k: v for k, v in row.items() if k != "logTail"} for row in (apps or [])]
+
+
 def _text(value, limit: int = HEALTH_MAX_TEXT) -> str:
     """A string safe to store and render. Written by a runner, read by everyone."""
     out = str(value or "")[:limit]
@@ -663,6 +707,7 @@ def record_runner_state(runner: str, state: dict,
     if not runner:
         return {}
     containers = _clean_containers(state.get("containers"))
+    apps = _clean_apps(state.get("apps"))
     payload = {k: state[k] for k in _STATE_FIELDS if k in state}
     health = _clean_health(state.get("health"))
     if health:
@@ -675,6 +720,11 @@ def record_runner_state(runner: str, state: dict,
         "runner": runner,
         "containers": containers,
         "containersAt": _now(),
+        "apps": apps,
+        # Its OWN timestamp, not `updatedAt`. Staleness of the whole report cannot
+        # distinguish "the runner went offline" from "the runner is fine and the app
+        # died", and those mean opposite things to whoever is looking at the panel.
+        "appsAt": _now(),
         "updatedAt": _now(),
         # Applied AFTER the whitelisted body fields, so a runner cannot claim to be
         # owned by someone else by putting `owner` in its own state report.
@@ -720,10 +770,29 @@ def _index_runner(runner: str, payload: dict) -> None:
                             "protocol": int(payload.get("protocol") or 1),
                             "containers": payload.get("containers") or [],
                             "containersAt": payload.get("containersAt") or "",
+                            "apps": _without_logs(payload.get("apps")),
+                            "appsAt": payload.get("appsAt") or "",
                         }})
     except Exception as exc:                                  # noqa: BLE001
         # The index is a cache. Losing a write costs a scan, not correctness.
         log.debug("QA queue: runner index write failed for %s: %s", runner, exc)
+
+
+def app_logs(runner: str, project_id: str) -> dict:
+    """The console tail for one project's app on one runner.
+
+    Deliberately NOT a command. `useContainerLogs` documents that a runner has a single
+    command slot and that two viewers racing it re-request forever; a DevMate app-log
+    follower polling alongside the container-log follower would starve both and clobber
+    every start/stop in between. The tail already rides the regular state report, so
+    this is a GetItem on the per-runner row.
+    """
+    row = runner_state(runner) or {}
+    for app in row.get("apps") or []:
+        if str(app.get("projectId") or "") == project_id:
+            return {"lines": list(app.get("logTail") or []),
+                    "at": row.get("appsAt", ""), "kind": app.get("kind", "")}
+    return {"lines": [], "at": row.get("appsAt", ""), "kind": ""}
 
 
 def _index_attr(runner: str) -> str:
@@ -804,6 +873,8 @@ def list_runner_state(stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
             "reportsState": bool(row.get("containersAt")),
             "containers": list(row.get("containers") or []),
             "containersAt": row.get("containersAt", ""),
+            "apps": list(row.get("apps") or []),
+            "appsAt": row.get("appsAt", ""),
             "health": dict(row.get("health") or {}),
             "setup": dict(row.get("setup") or {}),
         })
@@ -873,7 +944,7 @@ COMMAND_DEDUPE_S = 30
 
 def request_command(runner: str, kind: str, container: str, tail: int = 200,
                     clouds: str = "", payload: dict | None = None,
-                    project_id: str = "") -> dict:
+                    project_id: str = "", extra: dict | None = None) -> dict:
     """Queue one command for a runner. Returns {commandId, status}.
 
     `container` is the command's free-text slot and means whatever the kind needs: a
@@ -892,6 +963,10 @@ def request_command(runner: str, kind: str, container: str, tail: int = 200,
     bearer credential, so it must stay out of every reader that enumerates runner fields
     for the UI (`list_runner_state`, `_index_runner`) — neither exposes `cmd*` today and
     neither should start.
+
+    `extra` is the same kind of thing for `app-start`: the OTLP/gateway environment to
+    inject into the app under test, including a freshly minted `gw-` key. Same rule,
+    same reason — it is a bearer credential and lives only in `cmd*`.
     """
     row = runner_state(runner) or {}
     existing = row.get("cmdId")
@@ -907,6 +982,7 @@ def request_command(runner: str, kind: str, container: str, tail: int = 200,
         "cmdClouds": str(clouds or ""),
         "cmdProjectId": str(project_id or ""),
         "cmdPayload": json.dumps(payload or {})[:8192],
+        "cmdExtra": json.dumps(extra or {})[:8192],
         "cmdTail": int(tail),
         "cmdRequestedAt": _now(),
         # Flat attributes rather than a nested map: update_item builds only top-level
@@ -946,11 +1022,18 @@ def take_command(runner: str) -> dict | None:
         payload = json.loads(row.get("cmdPayload") or "{}")
     except (TypeError, ValueError):
         payload = {}
+    try:
+        extra = json.loads(row.get("cmdExtra") or "{}")
+    except (TypeError, ValueError):
+        extra = {}
     return {"id": command_id, "kind": row.get("cmdKind", "logs"),
             "container": row.get("cmdContainer", ""),
             "clouds": row.get("cmdClouds", ""),
             "projectId": row.get("cmdProjectId", ""),
             "payload": payload if isinstance(payload, dict) else {},
+            # Merged flat so a handler reads `command["telemetry"]` without knowing
+            # this envelope exists. Never surfaced by any runner-listing reader.
+            **(extra if isinstance(extra, dict) else {}),
             "tail": int(row.get("cmdTail") or 200)}
 
 

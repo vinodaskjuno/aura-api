@@ -68,6 +68,8 @@ def create_version_record(
     project_id: str = "",
     written_by: str = "",
     parent_run_id: str = "",
+    session_id: str = "",
+    actor_id: str = "",
 ) -> dict:
     """Create a new run record and return it.  Status defaults to 'in_progress'.
 
@@ -98,6 +100,13 @@ def create_version_record(
         "projectId": project_id,
         "writtenBy": written_by,
         "parentRunId": parent_run_id,
+        # `TraceContext` has carried both of these since it was written, and both were
+        # dropped here — so a run could never be walked back to the conversation that
+        # caused it, and `actor` alone ("system" whenever a caller set only actorId)
+        # was the sole identity on the row. DevMate is the case that made it visible:
+        # every turn opened a run, and every run named nobody and linked to nothing.
+        "sessionId": session_id,
+        "actorId": actor_id,
         "durationMs": None,
         "errors": [],
         "stats": {
@@ -148,6 +157,26 @@ def finish_version_record(
         update_item(_VERSION_TABLE, {"versionId": version_id}, changes)
     except Exception as exc:
         log.warning("finish_version_record: DynamoDB update failed: %s", exc)
+
+
+def annotate_version_record(version_id: str, **fields: Any) -> None:
+    """Attach extra facts to an open run record, without closing it.
+
+    `finish_version_record` is the only other writer and it owns status/stats/timing,
+    so a caller that merely learned something about its own run — the Opik trace it
+    emitted, a summary of what it did — had nowhere to put it: `TraceContext` is
+    frozen, so `ctx.notes = ...` raises rather than records.
+
+    Best-effort like everything else here: the run record is bookkeeping and must
+    never be able to fail the work it describes.
+    """
+    if not version_id or not fields:
+        return
+    from src.database.dynamo_client import update_item
+    try:
+        update_item(_VERSION_TABLE, {"versionId": version_id}, dict(fields))
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("annotate_version_record: DynamoDB update failed: %s", exc)
 
 
 def list_versions(

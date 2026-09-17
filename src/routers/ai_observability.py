@@ -101,6 +101,18 @@ def capabilities(_: dict = Depends(_READ)):
             "demoAgentsEnabled": bool(s.demo_agents_url)}
 
 
+@router.get("/ingest-status")
+def ingest_status(projectId: str = Query(...), _: dict = Depends(_READ)):
+    """Is this project's telemetry arriving, and if not, why not.
+
+    Exists because `/otlp/*` always answers 200 — so "no spans yet" and "your key was
+    refused" are indistinguishable to everyone, including the developer whose app is
+    supposedly reporting. See `aiobs/ingest_status.py`.
+    """
+    from src.aiobs import ingest_status as status
+    return {"projectId": projectId, **status.status_for(projectId)}
+
+
 @router.get("/traces")
 def list_traces(projectId: str = Query(...), limit: int = 50,
                 status: str = "", threadId: str = "", search: str = "",
@@ -185,8 +197,50 @@ def list_projects(user: dict = Depends(_READ)):
     `scan_items("ai-traces", limit=2000)` inline with no tenant predicate, which
     enumerated every tenant's project names for any caller holding dev_workspace.
     """
-    return {"projects": service.get_store().list_projects(
-        tenant_id=_tenant_scope(user))}
+    projects = service.get_store().list_projects(tenant_id=_tenant_scope(user))
+    return {"projects": _resolve_projects(projects)}
+
+
+#: What a trace project turns out to be, once matched against Aura's own catalogue.
+#: `unlinked` is the honest and important one: those traces are joined to no Aura
+#: project, so nothing in DevMate will ever show them and no per-project spend figure
+#: will include them.
+_ORIGIN_LINKED, _ORIGIN_UNLINKED = "linked", "unlinked"
+
+
+def _resolve_projects(projects: list[dict]) -> list[dict]:
+    """Attach the Aura project name to each trace project, where there is one.
+
+    A trace project is a free string — `aura.project`, else `service.name`, else
+    `service.namespace` (`aiobs/service.py:project_of`). An Aura project is a row with
+    an id and a name. They were never the same thing, and the selector rendered the raw
+    string, so nobody could tell which of these traces belonged to a project they knew.
+
+    Resolution is by ID, deliberately: that is what Aura injects as `aura.project` when
+    it starts an app locally. A name would look friendlier in a config file and would
+    break the moment somebody renamed the project.
+
+    Never fails the listing: an unreachable catalogue means every row renders exactly
+    as it did before, badged `unlinked`.
+    """
+    catalogue: dict = {}
+    try:
+        from src.database import dynamo_client as db
+        for row in db.scan_items("projects", limit=500):
+            pid = str(row.get("projectId") or "")
+            if pid:
+                catalogue[pid] = str(row.get("name") or "")
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("could not resolve trace projects against the catalogue: %s", exc)
+
+    out = []
+    for project in projects or []:
+        pid = str(project.get("projectId") or "")
+        name = catalogue.get(pid, "")
+        out.append({**project,
+                    "auraName": name,
+                    "origin": _ORIGIN_LINKED if name else _ORIGIN_UNLINKED})
+    return out
 
 
 @router.get("/summary")

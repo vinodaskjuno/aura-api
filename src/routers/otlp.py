@@ -275,16 +275,31 @@ async def receive_traces(request: Request):
         # Unauthenticated traces are dropped rather than stored against a guessed
         # tenant: this store holds one client's prompts, and mis-attributing them
         # is worse than losing them.
+        #
+        # COUNTED, though. The always-200 contract means the sender is told nothing,
+        # so without this a refused key and an idle app look identical from every
+        # screen in the product. `qatest/queue.py:record_unauthorized` is the same
+        # idea for the runner, and for the same reason.
+        try:
+            from src.aiobs import ingest_status
+            ingest_status.record_rejected(
+                extract_credential(request) or "", "credential not resolvable")
+        except Exception:                                     # noqa: BLE001
+            pass
         return _partial(0, "unauthenticated: send a gateway key or JWT", kind="spans")
 
     try:
-        from src.aiobs import ingest, service
+        from src.aiobs import ingest, ingest_status, service
         parsed = ingest.parse_spans(payload)
         if not parsed:
             return _accepted()
         spans = [span for span, _ in parsed]
         thread_id = ingest.thread_id_from(spans, payload)
         stored = service.store_batch(spans, payload, user_id, thread_id)
+        try:
+            ingest_status.record_spans(service.project_of(payload), len(spans), user_id)
+        except Exception:                                     # noqa: BLE001
+            pass
         return _accepted(stored=stored)
     except Exception as exc:  # noqa: BLE001 — never fail the caller's exporter
         log.exception("trace ingest failed")

@@ -123,6 +123,10 @@ class PRCreate(BaseModel):
     title: str
     body: str = ""
     changedFiles: list[str] = []
+    #: Optional, and only used to attach the resulting PR URL to this project's
+    #: proposal ledger. Absent simply means the link is not recorded — it must never
+    #: be able to stop a pull request being opened.
+    projectId: str = ""
 
 
 @router.post("/pr", status_code=201)
@@ -154,7 +158,17 @@ def create_pull_request(body: PRCreate, user: dict = Depends(get_current_user)):
             req = urllib.request.Request(api_url, data=json_lib.dumps(payload).encode(), headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json_lib.loads(resp.read())
-                return {"success": True, "prUrl": data.get("html_url"), "prNumber": data.get("number")}
+                pr_url = data.get("html_url")
+                attached = 0
+                try:
+                    from src.services.advisor import tools as advisor_tools
+                    attached = advisor_tools.attach_commit(
+                        body.projectId, pr_url=str(pr_url or ""),
+                        paths=body.changedFiles or None)
+                except Exception as exc:                      # noqa: BLE001
+                    log.warning("could not attach PR %s to proposals: %s", pr_url, exc)
+                return {"success": True, "prUrl": pr_url,
+                        "prNumber": data.get("number"), "proposalsAttached": attached}
         except urllib.error.HTTPError as e:
             detail = e.read().decode()[:300]
             raise HTTPException(status_code=e.code, detail=f"GitHub API error: {detail}")
@@ -434,7 +448,18 @@ def commit_and_push(body: CommitRequest, user: dict = Depends(get_current_user))
         if push_result.returncode != 0:
             raise HTTPException(status_code=400, detail=f"Push failed: {push_result.stderr[:300]}")
 
-        return {"success": True, "commitSha": commit_sha, "branch": current_branch, "message": "Committed and pushed"}
+        # The second link in the chain. Until now this SHA existed only in this
+        # response body, so a proposal could never be walked forward to the commit
+        # that carried it, nor a commit back to the conversation that proposed it.
+        attached = 0
+        try:
+            from src.services.advisor import tools as advisor_tools
+            attached = advisor_tools.attach_commit(body.projectId, commit_sha=commit_sha)
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("could not attach commit %s to proposals: %s", commit_sha, exc)
+
+        return {"success": True, "commitSha": commit_sha, "branch": current_branch,
+                "proposalsAttached": attached, "message": "Committed and pushed"}
     except HTTPException:
         raise
     except subprocess.TimeoutExpired:

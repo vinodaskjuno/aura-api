@@ -140,6 +140,27 @@ def get_by_tool_model(user_id: str | None, period: str = "7d", is_admin: bool = 
     return _grouped(_rows(user_id, period, is_admin), "tool", "model")
 
 
+def get_by_project(user_id: str | None, period: str = "7d",
+                   is_admin: bool = False) -> list[dict]:
+    """Spend per project.
+
+    The one breakdown that was missing, although `token-usage` has carried a
+    `projectId-timestamp-index` GSI for it all along (`aura-infra/infra/data.tf`).
+    Rows with no projectId are reported under "unattributed" rather than dropped: a
+    breakdown that silently omits a third of the spend is worse than one that names it.
+
+    NOTE the index to use is the one ON `token-usage`. A separate `token-usage-gsi`
+    table exists and is an orphan — data.tf records that it was an earlier attempt at
+    this same index, and that every per-project usage query failed in AWS while passing
+    locally because of it.
+    """
+    rows = _rows(user_id, period, is_admin)
+    for row in rows:
+        if not row.get("projectId"):
+            row["projectId"] = "unattributed"
+    return _grouped(rows, "projectId")
+
+
 def get_by_user(period: str = "7d") -> list[dict]:
     return _grouped(_rows(None, period, is_admin=True), "userId")
 

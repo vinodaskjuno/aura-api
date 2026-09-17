@@ -63,18 +63,77 @@ def _endpoints(emus) -> dict[str, str]:
             for rec in emus.records if rec.started and urls.get(rec.cloud)}
 
 
+class _AdoptedApps:
+    """A live app session, wearing the surface `RunningApps` presents to a run.
+
+    Only `url_for`, `started` and `failures` are ever read from that object here, so an
+    adopted session needs nothing more — and crucially it must NOT implement `stop()`
+    in a way the run can reach, because the developer's session has to outlive the run.
+    """
+
+    def __init__(self, session) -> None:
+        self.session = session
+        self.started = list(getattr(session.apps, "started", []) or [])
+        self.failures: list = []
+
+    def url_for(self, kind: str) -> str:
+        for spec in self.started:
+            if spec.kind == kind:
+                return spec.url
+        return ""
+
+
 @contextlib.contextmanager
-def _maybe_apps(app_url: str, specs: list, env: dict, emit):
-    """Start the given applications, unless a URL was supplied.
+def _maybe_apps(app_url: str, specs: list, env: dict, emit, project_id: str = ""):
+    """Start the given applications, unless a URL was supplied or one is already up.
 
     A context manager either way so the caller has one code path — the alternative is
     a try/finally that has to remember whether it started anything.
+
+    ADOPTION, NOT STAND-OFF. When the developer has this project running locally, its
+    ports and its working copy are taken, so starting a second copy fails. Standing the
+    runner down instead is worse than it sounds: `client.claim()` has no project filter,
+    so "skip runs while a session is up" means the machine claims NOTHING all day.
+
+    Adoption deliberately does NOT go through `app_url`. That path sets `root = None`
+    in `execute`, which silently drops every structural and file-check case — a run
+    that looks like it passed while a whole case kind never executed.
+
+    It refuses on an env mismatch. The session was started with some set of emulator
+    endpoints; if the run wants different ones, the app under test is pointed at the
+    wrong account and a green result would be a lie.
     """
     if app_url:
         yield None
         return
 
     from src.qatest import appserver
+
+    session = None
+    if project_id:
+        try:
+            from src.qatest import appsession
+            session = appsession.get(project_id)
+        except Exception:                                     # noqa: BLE001
+            session = None
+
+    if session is not None:
+        from src.qatest import appsession
+        wanted = appsession.env_fingerprint(env)
+        if session.env_fingerprint and wanted != session.env_fingerprint:
+            emit("app", started=False,
+                 error="the running app is pointed at different emulators",
+                 message=("This project is already running locally, but it was started "
+                          "against a different set of emulators than this run needs. "
+                          "Stop it from DevMate and run again."))
+            yield _AdoptedApps(session)
+            return
+        for spec in session.apps.started:
+            emit("app", kind=spec.kind, name=spec.name, url=spec.url, started=True,
+                 adopted=True,
+                 message=f"using the {spec.kind} app you already have running on {spec.url}")
+        yield _AdoptedApps(session)
+        return
 
     with appserver.RunningApps(specs, extra_env=env) as apps:
         for spec in apps.started:
@@ -174,15 +233,31 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
     """
     run_id = run_id or new_run_id()
 
+    # A SECOND observer of the same stream, never a replacement for it. The live
+    # WebSocket is the product; if tracing were wired in place of `on_event`, or
+    # ahead of it, a telemetry failure would become a run failure.
+    from src.qatest import tracing as _tracing
+    tracer = _tracing.tracer_for(project_id, run_id)
+
     def emit(_event: str, **data):
         # Underscore-prefixed so a payload field can be called anything — `kind` is a
         # natural name for an application's kind, and a plain `kind` parameter here
         # collided with it: "emit() got multiple values for argument 'kind'".
+        event = {"type": _event, **data}
         if on_event:
             try:
-                on_event({"type": _event, **data})
+                on_event(event)
             except Exception:  # noqa: BLE001 — a progress consumer must not fail a run
                 pass
+        # After the consumer, so the reader always sees the event first, and inside
+        # its own guard — `observe` swallows, but the call itself must not be able to
+        # throw either (a missing module, say).
+        try:
+            tracer.observe(event)
+            if _event == "done":
+                tracer.flush()
+        except Exception:  # noqa: BLE001 — tracing cannot fail a run
+            pass
 
     facts: dict = {}
     if cases is None:
@@ -264,7 +339,7 @@ def execute(project_id: str, app_url: str = "", run_id: str | None = None,
                                project_id=project_id) as emus:
         # Started INSIDE the emulator block and after it, so the application inherits
         # the endpoint variables and talks to the emulators rather than real cloud.
-        with _maybe_apps(app_url, specs, emus.env, emit) as apps:
+        with _maybe_apps(app_url, specs, emus.env, emit, project_id) as apps:
             if apps is not None:
                 urls = {k: apps.url_for(k) for k in ("api", "ui") if apps.url_for(k)}
                 for spec, why in apps.failures:

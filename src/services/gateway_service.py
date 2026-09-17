@@ -54,6 +54,7 @@ class GatewayUser:
         role: str,
         permissions: list[str],
         tool_label: str = "unknown",
+        project_id: str = "",
     ):
         self.user_id = user_id
         self.username = username
@@ -61,6 +62,12 @@ class GatewayUser:
         self.permissions = permissions
         # Which tool made this request (aura-plugin, claude-ext, claude-cli, codex-cli, …)
         self.tool_label = tool_label
+        # The project this key was minted for, when it was minted for one. A stock
+        # Anthropic or OpenAI SDK cannot be made to send `X-Aura-Project-Id` from an
+        # environment variable, so a locally-run app pointed at the gateway by env
+        # alone has no way to declare attribution. Carrying it on the key is the one
+        # channel that survives an unmodified SDK.
+        self.project_id = project_id
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +80,7 @@ def _key_id(raw_key: str) -> str:
 
 
 def generate_api_key(user_id: str, label: str = "", tool_label: str = "",
-                     role_id: str = "") -> dict:
+                     role_id: str = "", project_id: str = "") -> dict:
     """Create a new gateway API key. Returns the plain-text key (shown once).
 
     tool_label identifies which AI tool will use this key
@@ -98,6 +105,8 @@ def generate_api_key(user_id: str, label: str = "", tool_label: str = "",
         # directory user has no row in `users`, so resolving the role at USE time finds
         # nothing and falls back — see `_directory_role`.
         "roleId": role_id or "",
+        # Attribution of last resort; see GatewayUser.project_id.
+        "projectId": project_id or "",
     }
     db.put_item(s.gateway_keys_table, item)
     log.info("Created gateway API key %s for user %s (tool=%s)", kid, user_id, tool_label)
@@ -105,7 +114,7 @@ def generate_api_key(user_id: str, label: str = "", tool_label: str = "",
 
 
 def get_or_create_tool_key(user_id: str, tool_label: str,
-                           role_id: str = "") -> dict:
+                           role_id: str = "", project_id: str = "") -> dict:
     """Return the existing active key for this (user, tool_label) pair, or create one.
 
     Used by the VS Code plugin on login to provision per-tool virtual keys without
@@ -129,12 +138,13 @@ def get_or_create_tool_key(user_id: str, tool_label: str,
                 "keyHint": item.get("keyHint", ""),
                 "label": item.get("label", ""),
                 "toolLabel": tool_label,
+                "projectId": item.get("projectId", ""),
                 "createdAt": item.get("createdAt", ""),
                 "exists": True,
             }
     # No existing key — create one
     return {**generate_api_key(user_id, label=tool_label, tool_label=tool_label,
-                               role_id=role_id), "exists": False}
+                               role_id=role_id, project_id=project_id), "exists": False}
 
 
 def rotate_tool_key(user_id: str, tool_label: str, role_id: str = "") -> dict:
@@ -355,6 +365,7 @@ def resolve_credential(token: str) -> GatewayUser:
         role=role,
         permissions=_permissions_for_role(role),
         tool_label=item.get("toolLabel", "unknown"),
+        project_id=item.get("projectId", ""),
     )
 
 

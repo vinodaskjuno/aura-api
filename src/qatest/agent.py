@@ -23,13 +23,17 @@ What this deliberately does NOT do:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
 import platform
 import sys
+import threading
 import time
 from datetime import datetime, timezone
+
+from src.qatest import tracing
 
 log = logging.getLogger("qa-runner")
 
@@ -40,7 +44,13 @@ HEARTBEAT_MIN_INTERVAL_S = 10
 #: What this agent understands. Sent on every request so the server knows whether it
 #: may include newer fields inside the `cases` it ships — an older agent splats those
 #: straight into `Case(**c)` and dies on an unknown key, uncaught, inside its poll loop.
-PROTOCOL = 2
+#:
+#: 3 adds the app-session commands (`app-start`/`app-stop`/`app-status`). The server
+#: MUST NOT park those on a runner reporting less: `_run_command` answers an unknown
+#: kind with "unknown command 'app-start'", which reaches the reader as a bare failure
+#: with nothing to act on. Deploying Aura updates the server; this file lives on a
+#: laptop and updates when someone gets round to it, so the two are always skewed.
+PROTOCOL = 3
 
 #: How many console lines the runner keeps and resends. Matches the server's own cap;
 #: at ~200 chars a line that is a payload of tens of KB at worst, on a local runner.
@@ -469,7 +479,7 @@ def _machine_state(busy_run_id: str = "", include_unmanaged: bool = False,
     The API runs on Fargate and can never see podman, so everything the panel shows
     about a developer's machine is reported from here.
     """
-    from src.qatest import doctor, emulators
+    from src.qatest import appsession, doctor, emulators
 
     # Shallow: this runs every ~15s, and the deep check launches a real browser.
     diag = doctor.diagnose(deep=False)
@@ -492,6 +502,10 @@ def _machine_state(busy_run_id: str = "", include_unmanaged: bool = False,
         "busyRunId": busy_run_id,
         "acceptsLogCommands": allow_logs,
         "containers": emulators.list_containers(include_unmanaged),
+        # Long-lived app sessions on this machine. Probed per report, with the same
+        # bounded connect `_floci_ui` uses — the server cannot see a laptop's ports,
+        # so if this does not say the app is up, nothing else can.
+        "apps": appsession.describe_all(),
     }
 
 
@@ -525,19 +539,78 @@ def _command_inventory(command: dict, result: dict) -> dict:
     return result
 
 
-#: The populate thread, if one is running. A list rather than a bare global so the poll
-#: loop can test it without a lock: append and clear are atomic enough for a flag whose
-#: only reader asks "is something running".
-_POPULATING: list = []
+#: Long-running work on this machine, keyed by (kind, projectId). Was a single-slot
+#: list holding only the populate thread; app-start needs the same treatment and the
+#: two MUST be mutually exclusive per project — they contend for the same ports, the
+#: same emulator env and the same working copy. A real lock now, because "is anything
+#: running" and "claim the slot" are no longer the same question.
+_JOBS: dict = {}
+_JOBS_LOCK = threading.Lock()
+
+#: Work that must not run at the same time for one project. Populate boots the app on
+#: its detected port; a live session is already holding it, and `detect` would come
+#: back `blocked` — failing the populate with a message blaming the reader's own session.
+_EXCLUSIVE = ("populate", "app-start")
 
 
-#: Results from finished populate threads, waiting for the next state POST to carry them.
+#: Results from finished background threads, waiting for the next state POST to carry them.
 _PENDING_RESULTS: list = []
+
+
+def _claim_job(kind: str, project_id: str) -> str:
+    """Take the slot for this (kind, project), or say what is already holding it."""
+    with _JOBS_LOCK:
+        for (held_kind, held_project) in _JOBS:
+            if held_project != project_id:
+                continue
+            if kind in _EXCLUSIVE and held_kind in _EXCLUSIVE:
+                return f"already running {held_kind} for {held_project} on this machine"
+            if held_kind == kind:
+                return f"already running {kind} for {held_project} on this machine"
+        _JOBS[(kind, project_id)] = None
+        return ""
+
+
+def _release_job(kind: str, project_id: str) -> None:
+    with _JOBS_LOCK:
+        _JOBS.pop((kind, project_id), None)
 
 
 def populate_in_flight() -> str:
     """The project id of a populate currently running, or "" — read by the poll loop."""
-    return _POPULATING[0][0] if _POPULATING else ""
+    with _JOBS_LOCK:
+        for (kind, project_id) in _JOBS:
+            if kind == "populate":
+                return project_id
+    return ""
+
+
+def _run_threaded(kind: str, project_id: str, command: dict, body) -> None:
+    """Run `body(command, result)` off the poll loop, parking its result.
+
+    Threaded for the reason `_start_populate` documents: work measured in minutes on
+    the loop means no state is reported, the row goes stale after RUNNER_STALE_S, and
+    the panel swaps itself for "No runner is connected" while the work is still going.
+    """
+    busy = _claim_job(kind, project_id)
+    if busy:
+        _PENDING_RESULTS.append({"id": command.get("id", ""), "output": "",
+                                 "ok": False, "error": busy})
+        return
+
+    def wrapper() -> None:
+        result = {"id": command.get("id", ""), "output": "", "ok": False, "error": ""}
+        try:
+            result = body(command, result)
+        except Exception as exc:                              # noqa: BLE001
+            # Never let a thread die silently: the reader is watching a spinner that
+            # would otherwise run to its timeout and blame the runner for going quiet.
+            result["error"] = f"{type(exc).__name__}: {exc}"[:400]
+        finally:
+            _PENDING_RESULTS.append(result)
+            _release_job(kind, project_id)
+
+    threading.Thread(target=wrapper, name=f"{kind}-{project_id}", daemon=True).start()
 
 
 def _start_populate(command: dict) -> None:
@@ -551,32 +624,26 @@ def _start_populate(command: dict) -> None:
     watching this very command. The work is still running; the screen says nothing is.
 
     So: thread it, let the loop keep heartbeating, and hand the result to whichever state
-    POST comes after it finishes.
+    POST comes after it finishes. `_run_threaded` is that mechanism, shared with
+    app-start, which also enforces that the two never run together for one project.
     """
-    import threading
+    _run_threaded("populate", str(command.get("container") or ""), command,
+                  _command_populate)
 
-    project_id = str(command.get("container") or "")
-    if _POPULATING:
-        _PENDING_RESULTS.append({
-            "id": command.get("id", ""), "output": "", "ok": False,
-            "error": f"already populating {_POPULATING[0][0]} on this machine"})
-        return
 
-    def body() -> None:
-        result = {"id": command.get("id", ""), "output": "", "ok": False, "error": ""}
-        try:
-            result = _command_populate(command, result)
-        except Exception as exc:                              # noqa: BLE001
-            # Never let a thread die silently: the reader is watching a spinner that
-            # would otherwise run to its timeout and blame the runner for going quiet.
-            result["error"] = f"{type(exc).__name__}: {exc}"[:400]
-        finally:
-            _PENDING_RESULTS.append(result)
-            _POPULATING.clear()
+def _start_app(command: dict) -> None:
+    """Start a project's app and keep it running. Threaded, for the reason above —
+    more so: a compose stack's `up` alone is bounded at 600s, and readiness can add
+    another 180s, both far past RUNNER_STALE_S."""
+    _run_threaded("app-start", str(command.get("container") or ""), command,
+                  _command_app_start)
 
-    thread = threading.Thread(target=body, name=f"populate-{project_id}", daemon=True)
-    _POPULATING.append((project_id, thread))
-    thread.start()
+
+def _stop_app(command: dict) -> None:
+    """Stop a project's app. Threaded too: a compose `down` is bounded at 180s, which
+    is already past the point where the panel would call this runner stale."""
+    _run_threaded("app-stop", str(command.get("container") or ""), command,
+                  _command_app_stop)
 
 
 def _command_populate(command: dict, result: dict) -> dict:
@@ -695,6 +762,218 @@ def _command_populate(command: dict, result: dict) -> dict:
     return result
 
 
+def _command_app_start(command: dict, result: dict) -> dict:
+    """Start this project's app and leave it running until someone stops it.
+
+    The sibling of `_command_populate`, and deliberately almost all of the same code
+    up to the point where populate enters a `with` block and this one does not. What
+    populate answers is "did your app create its resources"; what this answers is
+    "your app is at http://127.0.0.1:5173, go and use it".
+
+    UI AND API BOTH, unlike populate. Populate filters to `kind == "api"` because only
+    a backend's startup creates cloud resources and a frontend would cost the reader a
+    minute for nothing. Here the frontend is frequently the whole point.
+    """
+    from src.qatest import appserver, appsession, emulators, provision
+
+    project_id = str(command.get("container") or "")
+    if not project_id:
+        result["error"] = "no project"
+        return result
+    clouds = [c for c in str(command.get("clouds") or "").split(",") if c]
+    instrument = bool(command.get("instrument"))
+
+    existing = appsession.get(project_id)
+    if existing:
+        result["ok"] = True
+        result["output"] = json.dumps({"apps": existing.describe(),
+                                       "already": True,
+                                       "sessionId": existing.session_id})
+        return result
+
+    stale = provision.prepare(project_id, command.get("payload") or {}, None)
+    warnings: list[str] = []
+    if stale:
+        warnings.append("could not refresh the working copy, so the copy already on "
+                        "this machine was used: " + "; ".join(stale))
+
+    root, checked = appserver.locate(project_id)
+    if root is None:
+        result["error"] = ("no working copy on this machine for this project"
+                           + (f" ({'; '.join(stale)})" if stale else "")
+                           + ". Looked in: " + ", ".join(str(c) for c in checked))
+        return result
+
+    specs = appserver.detect(root)
+    if not specs:
+        result["error"] = f"no runnable application found in {root}"
+        return result
+
+    # Emulator env, exactly as populate builds it — an app started here should talk to
+    # the same Floci containers a test run would give it, scoped to this project's
+    # account. Missing emulators are a warning, not a refusal: plenty of projects have
+    # no cloud dependencies at all and should still start.
+    env: dict[str, str] = {}
+    for cloud in clouds:
+        known = emulators._BY_NAME.get(cloud)
+        if not known:
+            warnings.append(f"unknown cloud {cloud}")
+            continue
+        if not emulators._ready(known.port, timeout=2):
+            warnings.append(f"the {cloud} emulator is not running — press Start first")
+            continue
+        env.update(known.env(project_id))
+
+    env.update(_telemetry_env(command, project_id))
+
+    instrumented, instrumentation_error = False, ""
+    if instrument:
+        specs, instrumented, instrumentation_error = _instrument_specs(
+            root, specs, env, project_id)
+
+    session = appsession.start(
+        project_id, specs, env,
+        instrumented=instrumented, instrumentation_error=instrumentation_error,
+        env_fingerprint=appsession.env_fingerprint(env))
+
+    failures = [f"{spec.name}: {why}" for spec, why in session.apps.failures]
+
+    # If instrumentation is what broke the boot, start again without it rather than
+    # failing the whole feature over a tracing checkbox. The 400-char log tail a
+    # failure carries usually does not contain the word "opentelemetry", so a reader
+    # left with it alone would be debugging their own application for no reason.
+    if instrumented and not session.apps.started and failures:
+        appsession.stop(project_id)
+        plain = appserver.detect(root)
+        session = appsession.start(
+            project_id, plain, env, instrumented=False,
+            instrumentation_error="auto-instrumentation prevented the app from booting; "
+                                  "started without tracing. " + "; ".join(failures)[:300],
+            env_fingerprint=appsession.env_fingerprint(env))
+        warnings.append(session.instrumentation_error)
+        failures = [f"{spec.name}: {why}" for spec, why in session.apps.failures]
+        _remember_instrumentation_failure(project_id)
+
+    apps = session.describe()
+    result["ok"] = bool(apps)
+    result["output"] = json.dumps({
+        "apps": apps, "sessionId": session.session_id,
+        "instrumented": session.instrumented,
+        "problems": failures, "warnings": warnings})
+    if not apps:
+        result["error"] = ("; ".join(failures) or "the app did not start")[:400]
+        appsession.stop(project_id)
+    return result
+
+
+def _command_app_stop(command: dict, result: dict) -> dict:
+    """Stop this project's app session."""
+    from src.qatest import appsession
+
+    project_id = str(command.get("container") or "")
+    if not project_id:
+        result["error"] = "no project"
+        return result
+
+    stopped = appsession.stop(project_id)
+    notes = appsession.sweep([project_id]) if not stopped else []
+    result["ok"] = True
+    result["output"] = json.dumps({"stopped": stopped, "notes": notes})
+    if not stopped and notes:
+        # Honest rather than reassuring: something IS still on the port, and we
+        # declined to kill what we could not prove was ours.
+        result["error"] = "; ".join(notes)[:400]
+    return result
+
+
+def _command_app_status(command: dict, result: dict) -> dict:
+    """What this project's app session looks like right now."""
+    from src.qatest import appsession
+
+    project_id = str(command.get("container") or "")
+    session = appsession.get(project_id)
+    result["ok"] = True
+    result["output"] = json.dumps({
+        "apps": session.describe() if session else [],
+        "sessionId": session.session_id if session else "",
+        "instrumented": bool(session and session.instrumented),
+    })
+    return result
+
+
+def _telemetry_env(command: dict, project_id: str) -> dict:
+    """Gateway + OTLP environment for the app under test, WITHOUT clobbering.
+
+    `RunningApps._start` merges `{**toolpath.env(), **extra_env, **spec.env}`, and
+    `toolpath.env()` is `{**os.environ, ...}` — so extra_env WINS over anything the
+    developer exported. Dict-ordering intuition says the user's own value should win
+    and it does not, which means injecting blindly would silently redirect a developer's
+    existing collector to Aura. So: subtract. Anything already set is left alone, and
+    the skipped keys are reported rather than swallowed.
+
+    The credential comes from the SERVER, in the command payload, never from this
+    runner's own `--key`: that key carries `qa_workspace`, and it would be sitting in
+    the user's application process where one exception page dumping os.environ leaks it.
+    """
+    wanted = dict((command.get("telemetry") or {}).get("env") or {})
+    if not wanted:
+        return {}
+    out, skipped = {}, []
+    for key, value in wanted.items():
+        if os.environ.get(key):
+            skipped.append(key)
+            continue
+        out[str(key)] = str(value)
+    if skipped:
+        log.info("telemetry: left %s alone — already set in this environment",
+                 ", ".join(sorted(skipped)))
+    return out
+
+
+def _instrument_specs(root, specs: list, env: dict, project_id: str):
+    """(specs, instrumented, why-not). Never raises; falls back to plain specs."""
+    from src.qatest import appserver, provision
+
+    if _instrumentation_refused(project_id):
+        return specs, False, ("auto-instrumentation is disabled for this project after "
+                              "it prevented a previous start")
+    try:
+        sidecar, why_not = provision.instrument(root, env)
+        if not sidecar:
+            return specs, False, why_not
+        wrapped = [appserver.instrumented(spec, sidecar) for spec in specs]
+        changed = any(a.command != b.command for a, b in zip(specs, wrapped))
+        if not changed:
+            return specs, False, ("nothing here can be auto-instrumented — a compose "
+                                  "stack runs the app inside a container, and a Node "
+                                  "dev server is not where the model calls happen")
+        return wrapped, True, ""
+    except Exception as exc:                                  # noqa: BLE001
+        return specs, False, f"{type(exc).__name__}: {exc}"[:300]
+
+
+def _instrumentation_flag(project_id: str):
+    from src.qatest import provision
+    return provision.workspace_root(project_id) / ".aura-otel-refused"
+
+
+def _instrumentation_refused(project_id: str) -> bool:
+    try:
+        return _instrumentation_flag(project_id).is_file()
+    except Exception:                                         # noqa: BLE001
+        return False
+
+
+def _remember_instrumentation_failure(project_id: str) -> None:
+    """Sticky, so the next start does not repeat a doubled startup that already failed."""
+    try:
+        path = _instrumentation_flag(project_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(datetime.now(timezone.utc).isoformat())
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("could not record the instrumentation opt-out: %s", exc)
+
+
 def _command_emulator(command: dict, result: dict) -> dict:
     """Start or stop this project's emulators, on request from DevMate.
 
@@ -786,6 +1065,12 @@ def _run_command(command: dict, allow_logs: bool) -> dict:
         return _command_emulator(command, result)
     if kind == "app-populate":
         return _command_populate(command, result)
+    if kind == "app-start":
+        return _command_app_start(command, result)
+    if kind == "app-stop":
+        return _command_app_stop(command, result)
+    if kind == "app-status":
+        return _command_app_status(command, result)
     if kind != "logs":
         result["error"] = f"unknown command {kind!r}"
         return result
@@ -882,6 +1167,44 @@ def main(argv: list[str] | None = None) -> int:
         for problem in problems:
             log.warning("starting anyway with a known problem: %s", problem)
 
+    # A run's own telemetry goes back to the same Aura with the same credential, so
+    # the runner needs no second endpoint and no second key. Published in the
+    # environment rather than threaded as parameters for the reason `_apply_run_context`
+    # gives: a subprocess or a library picks it up without every layer in between
+    # having to know it exists.
+    os.environ.setdefault(tracing.ENDPOINT_ENV, args.api)
+    os.environ.setdefault(tracing.KEY_ENV, args.key)
+
+    # Reconcile anything a previous life of this process left running, BEFORE the
+    # first state report — so the panel's first sight of this machine is the truth.
+    # `sweep` never kills what it cannot prove is ours; it reports and leaves it.
+    try:
+        from src.qatest import appsession
+        for note in appsession.sweep():
+            log.warning("app session: %s", note)
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("app session sweep skipped: %s", exc)
+
+    # `appserver` starts children with start_new_session=True — deliberately, so that
+    # stopping a dev server also stops the node processes npm leaves behind. The cost
+    # is that the child is detached from this process group, so Ctrl-C here does NOT
+    # reach it. That was invisible while every session lived inside a `with`; with
+    # sessions that outlive the loop it is the default leak.
+    import atexit
+    import signal as _signal
+
+    from src.qatest import appsession as _appsession
+    atexit.register(_appsession.stop_all)
+
+    def _bye(signum, _frame):
+        log.info("stopping app sessions on signal %s", signum)
+        _appsession.stop_all()
+        raise SystemExit(0)
+
+    for _sig in (_signal.SIGTERM, _signal.SIGINT):
+        with contextlib.suppress(Exception):
+            _signal.signal(_sig, _bye)
+
     client = Client(args.api, args.key, args.name)
     log.info("runner %r ready, polling %s every %ss", args.name, args.api, args.poll)
     allow_logs = not args.no_container_logs
@@ -906,6 +1229,12 @@ def main(argv: list[str] | None = None) -> int:
             if command.get("kind") == "app-populate":
                 # Returns immediately; its result arrives on a later state POST.
                 _start_populate(command)
+                continue
+            if command.get("kind") == "app-start":
+                _start_app(command)
+                continue
+            if command.get("kind") == "app-stop":
+                _stop_app(command)
                 continue
             client.report_state({**_machine_state(busy, args.report_all_containers,
                                                   allow_logs),

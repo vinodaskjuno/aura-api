@@ -65,6 +65,23 @@ def usage_by_tool(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Usage — By project
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/usage/by-project")
+def usage_by_project(
+    period: str = Query("7d"),
+    user: dict = Depends(get_current_user),
+):
+    """Spend per project — the breakdown a per-project view needs and the only one
+    this router did not have, despite the GSI for it being provisioned."""
+    is_admin = user.get("role", "") in ("admin", "super_admin")
+    return {"period": period,
+            "byProject": gateway_analytics.get_by_project(user.get("userId"), period,
+                                                          is_admin)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Usage — By user (admin only)
 # ─────────────────────────────────────────────────────────────────────────────
 

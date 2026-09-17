@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -256,10 +257,147 @@ def install(root: Path, emit=None) -> list[str]:
     return problems
 
 
+#: What a sidecar installs. Deliberately OpenInference rather than the GenAI-only
+#: instrumentors: `aiobs/ingest.py` reads OpenInference's spellings (`input.value`,
+#: `llm.token_count.prompt`) alongside `gen_ai.*`, and those are the ones that carry
+#: the prompt and the response. Simplifying to the GenAI set would produce span trees
+#: with no payloads, which is most of the value gone.
+_OTEL_SIDECAR = (
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-instrumentation",
+    "opentelemetry-instrumentation-fastapi",
+    "openinference-instrumentation-anthropic",
+    "openinference-instrumentation-openai",
+)
+
+#: Source markers that mean the project already has tracing of its own. Instrumenting
+#: on top produces two exporters fighting over one tracer provider.
+_OWN_TRACING = ("set_tracer_provider", "TracerProvider(", "logfire", "opik",
+                "langsmith", "traceloop", "phoenix", "LANGCHAIN_TRACING_V2")
+
+#: Env that means the same thing. If any is already set, the project is pointed
+#: somewhere and it is not our business to repoint it.
+_OWN_OTEL_ENV = ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                 "OTEL_TRACES_EXPORTER", "OTEL_SDK_DISABLED")
+
+SIDECAR_DIR = ".aura-otel"
+
+
+def _already_instrumented(directory: Path) -> str:
+    """Why we must NOT instrument this app, or "" if we may."""
+    for name in _OWN_OTEL_ENV:
+        if os.environ.get(name):
+            return f"{name} is already set in this environment"
+    env_file = directory / ".env"
+    if env_file.is_file():
+        try:
+            body = env_file.read_text(errors="replace")
+            for name in _OWN_OTEL_ENV:
+                if name in body:
+                    return f"{name} is set in {directory.name}/.env"
+        except OSError:
+            pass
+
+    venv_python = directory / ".venv" / "bin" / "python"
+    if venv_python.is_file():
+        try:
+            probe = subprocess.run(
+                [str(venv_python), "-c", "import opentelemetry.sdk"],
+                capture_output=True, timeout=30)
+            if probe.returncode == 0:
+                # THE IMPORTANT ONE. A sidecar on PYTHONPATH precedes site-packages,
+                # so shipping a newer opentelemetry-api would shadow the project's own
+                # pinned copy and break it in a way that points nowhere near Aura.
+                return "this project already has the OpenTelemetry SDK installed"
+        except Exception:                                     # noqa: BLE001
+            pass
+
+    for source in list(directory.rglob("*.py"))[:400]:
+        try:
+            body = source.read_text(errors="replace")
+        except OSError:
+            continue
+        for marker in _OWN_TRACING:
+            if marker in body:
+                return f"this project sets up its own tracing ({marker})"
+    return ""
+
+
+def instrument(root: Path, env: dict | None = None) -> tuple[Path | None, str]:
+    """Build the OpenTelemetry sidecar for this project. Returns (path, why-not).
+
+    A SIDECAR DIRECTORY, NEVER THE PROJECT'S VENV. `opentelemetry-bootstrap -a install`
+    resolves against the project's own pins and writes into their environment — the
+    breakage is permanent, and `.aura-py-deps` would still read "fresh" so the next
+    run would not repair it. `pip install --target` keeps the app on its own
+    interpreter and its own site-packages, with the instrumentation riding on
+    PYTHONPATH for exactly one process.
+
+    Named `.aura-otel` because `fetch` preserves every child starting with `.aura-`;
+    anything else would be deleted by the next refresh.
+    """
+    root = Path(root)
+    directories = [d for d in _app_dirs(root)
+                   if (d / "requirements.txt").is_file() or (d / "pyproject.toml").is_file()]
+    if not directories:
+        return None, "no Python application here to instrument"
+
+    directory = directories[0]
+    refusal = _already_instrumented(directory)
+    if refusal:
+        return None, refusal
+
+    sidecar = root / SIDECAR_DIR
+    key = ",".join(_OTEL_SIDECAR)
+    stamp = sidecar / ".stamp"
+    if stamp.is_file() and stamp.read_text().strip() == key:
+        return sidecar, ""
+
+    python = str(directory / ".venv" / "bin" / "python")
+    if not Path(python).is_file():
+        python = sys.executable
+    sidecar.mkdir(parents=True, exist_ok=True)
+    try:
+        done = subprocess.run(
+            [python, "-m", "pip", "install", "--quiet", "--target", str(sidecar),
+             *_OTEL_SIDECAR],
+            capture_output=True, text=True, timeout=600, cwd=str(directory))
+    except Exception as exc:                                  # noqa: BLE001
+        return None, f"could not install the tracing sidecar: {exc}"[:300]
+    if done.returncode != 0:
+        tail = (done.stderr or done.stdout or "").strip()[-300:]
+        return None, f"could not install the tracing sidecar: {tail}"
+    stamp.write_text(key)
+    return sidecar, ""
+
+
 def prepare(project_id: str, workspace: dict | None, emit=None) -> list[str]:
-    """Fetch and install. Returns problems; an empty list means ready."""
+    """Fetch and install. Returns problems; an empty list means ready.
+
+    REFUSES WHILE AN APP SESSION IS LIVE. `fetch` rmtree's the source tree and
+    `install` can re-run `npm ci`, which deletes node_modules — both underneath a dev
+    server that is serving out of that very directory. Every caller reaches here
+    unconditionally (`run_one`, `_command_populate`, `_command_app_start`), so the
+    guard belongs here rather than at each of them.
+
+    Skipping is the right answer rather than stopping the session: the copy on disk is
+    the one the running app was started from, so it is exactly the copy a run should
+    test. Saying so is the point — a silent skip would leave someone wondering why
+    their new commit is not being picked up.
+    """
     if not workspace or not workspace.get("url"):
         return []                      # nothing shipped; app_url runs are unaffected
+
+    try:
+        from src.qatest import appsession
+        if appsession.get(project_id) is not None:
+            return ["this project's app is running locally, so the working copy was "
+                    "left alone — refreshing it would replace the source underneath "
+                    "the running app. Stop the app to pick up newer code."]
+    except Exception:                  # noqa: BLE001 — never block on the guard itself
+        pass
+
     root = fetch(project_id, workspace, emit)
     if root is None:
         return ["the working copy could not be fetched"]
