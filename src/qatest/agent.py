@@ -901,6 +901,48 @@ def _command_app_status(command: dict, result: dict) -> dict:
     return result
 
 
+#: Whether we have already said we are behind. Said ONCE, loudly, rather than every
+#: 15 seconds: a warning that repeats forever in a terminal becomes wallpaper, and the
+#: operator has to be able to see the poll lines around it.
+_STALE_WARNED = [False]
+
+
+def _warn_if_stale(reply: dict | None) -> None:
+    """Say so, here, when this process is older than the server expects.
+
+    THE ONLY CHANNEL THAT EXISTS. The server cannot reach this machine — that is the
+    whole point of a poll loop ("no inbound port, no public hostname and no NAT
+    traversal") — so it cannot restart us and cannot pop a dialog. What it CAN do is
+    state its expectation on every poll, which it now does, and what we can do is
+    notice and tell whoever is watching this terminal.
+
+    Without this the skew is discoverable only by pressing a button in a browser and
+    being refused, minutes or hours later, by someone who may not be the person who
+    started this process.
+
+    An older server sends no `expectedProtocol` at all; absent means "no opinion", not
+    "zero", so we say nothing.
+    """
+    if _STALE_WARNED[0]:
+        return
+    expected = (reply or {}).get("expectedProtocol")
+    try:
+        expected = int(expected)
+    except (TypeError, ValueError):
+        return
+    if expected <= PROTOCOL:
+        return
+
+    _STALE_WARNED[0] = True
+    log.warning(
+        "THIS RUNNER IS OUT OF DATE: it speaks protocol %s and the server expects %s. "
+        "Features added since protocol %s will be refused. This is almost certainly a "
+        "process started before the change — the constant is bound at import, so "
+        "editing the file is not enough. Restart this agent. If it still reports %s "
+        "afterwards, git pull here first.",
+        PROTOCOL, expected, PROTOCOL, PROTOCOL)
+
+
 def _telemetry_env(command: dict, project_id: str) -> dict:
     """Gateway + OTLP environment for the app under test, WITHOUT clobbering.
 
@@ -1223,6 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
         reply = client.report_state({
             **_machine_state(busy, args.report_all_containers, allow_logs),
             **({"commandResults": finished} if finished else {})})
+        _warn_if_stale(reply)
         for command in (reply or {}).get("commands") or []:
             log.info("  command  %s %s", command.get("kind"),
                      command.get("container", ""))

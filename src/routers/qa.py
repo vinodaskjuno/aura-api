@@ -727,6 +727,16 @@ def post_runner_state(body: dict = Body(...), request: Request = None):  # noqa:
     command = queue.take_command(runner)
     return {"ok": True,
             "pollSeconds": 15,
+            # What this server needs a runner to speak. Sent on EVERY poll so the
+            # agent can notice it is behind and say so in the operator's own terminal
+            # — which is the one place they are already looking.
+            #
+            # Without this, a version skew is only discoverable by pressing a button
+            # in a browser and being refused. The architecture is pull-only by design
+            # ("polling needs no inbound port, no public hostname and no NAT
+            # traversal"), so the server can never restart a runner; the least it can
+            # do is tell the runner it is stale, through the one channel that exists.
+            "expectedProtocol": _APP_SESSION_PROTOCOL,
             "commands": [command] if command else []}
 
 
@@ -1011,18 +1021,40 @@ _APP_SESSION_PROTOCOL = 3
 
 
 def _require_app_capable(runner: str) -> dict:
-    """The runner's row, or a 409 explaining exactly what is too old."""
+    """The runner's row, or a 409 explaining exactly what is too old.
+
+    LEADS WITH THE RESTART, not with `git pull`. The first version of this message said
+    "git pull, then restart", which reads as "your checkout is behind" — and the first
+    time it fired in anger the checkout was already correct. The agent is a daemon; it
+    binds `PROTOCOL` at import, so a process started before the change holds the old
+    value no matter what is on disk. For anything long-running, "your process predates
+    this" is the likely cause and "your code predates this" is the exception.
+
+    NAMES THE MACHINE, not just the runner label. The label is
+    `username/tool_label` (`_runner_identity`), derived from the GATEWAY KEY rather
+    than from `--name`, so two agents on two machines using the same key render
+    identically — `admin/qa-runner` twice. `_scope()` keeps their rows apart, but a
+    message naming only the label sends the reader to whichever one they thought of
+    first. The row already carries `machine` and the scope; say them.
+    """
     from src.qatest import queue
 
     for row in queue.list_runner_state():
         if row.get("name") != runner and row.get("runner") != runner:
             continue
-        if int(row.get("protocol") or 1) < _APP_SESSION_PROTOCOL:
+        speaks = int(row.get("protocol") or 1)
+        if speaks < _APP_SESSION_PROTOCOL:
+            machine = str(row.get("machine") or "").strip()
+            where = f" on {machine}" if machine else ""
             raise HTTPException(
                 409,
-                f"The runner on {runner} speaks protocol {row.get('protocol') or 1} and "
-                f"running a project locally needs {_APP_SESSION_PROTOCOL}. Update it on "
-                f"that machine (git pull, then restart `python -m src.qatest.agent`).")
+                f"The runner{where} ({runner}) speaks protocol {speaks}; running a "
+                f"project locally needs {_APP_SESSION_PROTOCOL}. It is almost "
+                f"certainly a process that started before this feature existed — "
+                f"restart it:\n\n"
+                f"    python -m src.qatest.agent --api <this server> --key gw-…\n\n"
+                f"If it still reports {speaks} after restarting, the checkout on that "
+                f"machine is genuinely older than the server — git pull there first.")
         return row
     raise HTTPException(404, f"No runner named {runner!r} is connected.")
 
@@ -1038,19 +1070,36 @@ def _telemetry_for(project_id: str, user: dict) -> dict:
     `--key` carries `qa_workspace` and must never be handed to a user's application
     process: one debug route or exception page that dumps os.environ would leak it.
 
-    Returns {} — and therefore injects nothing — when the base URL is not HTTPS. These
-    values include a bearer credential, and putting one in a developer's environment to
-    travel over plain HTTP is a decision someone has to take knowingly, not a default.
+    Refuses to inject over plain HTTP TO ANOTHER HOST: these values include a bearer
+    credential, and putting one in a developer's environment to travel the network in
+    clear text is a decision someone takes knowingly, not a default.
+
+    LOOPBACK IS EXEMPT, and that is not a loosening. The guard exists because the key
+    crosses a network; over `localhost` it does not cross one. The server handing out
+    the key, the app receiving it and the person running both are the same machine, so
+    demanding TLS there protects nothing and blocks the one setup where this feature is
+    most used — someone running Aura on their own laptop.
+
+    An unset `public_base_url` falls back to the local address rather than refusing.
+    `opik_gateway._base_url()` already made that choice for its onboarding snippets and
+    this did not, so the same machine got a working snippet and a dead Run-locally.
     """
+    from urllib.parse import urlparse
+
     from src.config_settings import get_settings
     from src.services import gateway_service
 
     s = get_settings()
     base = str(getattr(s, "public_base_url", "") or "").rstrip("/")
     if not base:
-        return {"env": {}, "skipped": "no PUBLIC_BASE_URL is configured on this server"}
+        # The only honest answer available to a server nobody told a public address:
+        # it is the address that works for the one person who can be in this state.
+        base = "http://localhost:8000"
+
+    host = (urlparse(base).hostname or "").lower()
+    loopback = host in ("localhost", "127.0.0.1", "::1")
     insecure_ok = bool(getattr(s, "allow_insecure_telemetry_keys", False))
-    if not base.startswith("https://") and not insecure_ok:
+    if not base.startswith("https://") and not loopback and not insecure_ok:
         return {"env": {}, "skipped": (
             f"{base} is not HTTPS, so no gateway key was injected — it would cross the "
             f"network in clear text. Set ALLOW_INSECURE_TELEMETRY_KEYS=true to accept "

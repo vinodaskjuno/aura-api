@@ -89,6 +89,34 @@ def test_the_project_id_is_what_joins_the_trace_to_the_project(telemetry, monkey
     assert "aura.project=proj-42" in env["OTEL_RESOURCE_ATTRIBUTES"]
 
 
+def test_loopback_needs_no_https(telemetry, monkeypatch):
+    """The guard exists because the key crosses a network. Over localhost it does not:
+    the server handing it out, the app receiving it and the person running both are one
+    machine. Demanding TLS there protects nothing and blocks the setup this feature is
+    most used in."""
+    from src.config_settings import get_settings
+    s = get_settings()
+    monkeypatch.setattr(s, "allow_insecure_telemetry_keys", False, raising=False)
+
+    for base in ("http://localhost:8000", "http://127.0.0.1:8000", ""):
+        monkeypatch.setattr(s, "public_base_url", base, raising=False)
+        out = telemetry("p1", {"userId": "u1"})
+        assert out["env"], f"loopback base {base!r} should inject"
+        assert "localhost" in out["env"]["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] \
+            or "127.0.0.1" in out["env"]["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
+
+
+def test_an_unset_base_url_falls_back_rather_than_refusing(telemetry, monkeypatch):
+    """`opik_gateway._base_url()` already falls back to the local address for its
+    onboarding snippets. This refused outright, so one machine got a working snippet
+    and a dead Run-locally."""
+    from src.config_settings import get_settings
+    monkeypatch.setattr(get_settings(), "public_base_url", "", raising=False)
+    out = telemetry("p1", {"userId": "u1"})
+    assert out["env"]
+    assert out["skipped"] == ""
+
+
 def test_no_key_is_injected_over_plain_http(telemetry, monkeypatch):
     """These values carry a bearer credential. Putting one into a developer's
     environment to travel in clear text is a decision someone takes knowingly."""

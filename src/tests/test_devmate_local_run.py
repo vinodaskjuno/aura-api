@@ -278,3 +278,74 @@ def test_the_sidecar_directory_survives_a_working_copy_refresh():
     the installed sidecar on the next refresh, and the stamp would still read fresh."""
     from src.qatest import provision
     assert provision.SIDECAR_DIR.startswith(".aura-")
+
+
+# ── Version skew is reported, not just enforced ─────────────────────────────
+
+def test_the_poll_reply_states_what_the_server_expects():
+    """The server cannot reach the runner — that is the whole point of a poll loop —
+    so the only way it can tell an agent it is stale is to say so in the reply the
+    agent is already reading. Without this the skew is discoverable ONLY by pressing
+    a button in a browser and being refused."""
+    import inspect
+    from src.routers import qa
+
+    source = inspect.getsource(qa.post_runner_state)
+    assert "expectedProtocol" in source
+    assert "_APP_SESSION_PROTOCOL" in source
+
+
+def test_a_stale_runner_warns_once_in_its_own_terminal(caplog):
+    from src.qatest import agent
+
+    agent._STALE_WARNED[0] = False
+    with caplog.at_level("WARNING"):
+        agent._warn_if_stale({"expectedProtocol": agent.PROTOCOL + 1})
+    assert "OUT OF DATE" in caplog.text
+    assert "Restart this agent" in caplog.text
+
+    # Once, not every 15 seconds: a warning that repeats forever becomes wallpaper.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        agent._warn_if_stale({"expectedProtocol": agent.PROTOCOL + 1})
+    assert caplog.text == ""
+    agent._STALE_WARNED[0] = False
+
+
+def test_a_current_runner_says_nothing(caplog):
+    from src.qatest import agent
+
+    agent._STALE_WARNED[0] = False
+    with caplog.at_level("WARNING"):
+        agent._warn_if_stale({"expectedProtocol": agent.PROTOCOL})
+        # An older server sends no opinion at all. Absent is not zero.
+        agent._warn_if_stale({})
+        agent._warn_if_stale(None)
+        agent._warn_if_stale({"expectedProtocol": "nonsense"})
+    assert caplog.text == ""
+
+
+def test_the_refusal_names_the_machine_and_leads_with_restart(monkeypatch):
+    """Two runners can share one label — it is `username/tool_label`, derived from the
+    gateway KEY rather than from `--name`, so two machines using one key both render
+    as `admin/qa-runner`. A message naming only the label sends the reader to whichever
+    one they thought of first, which is exactly what happened.
+
+    And it must not say "git pull" first: the constant is bound at import, so a daemon
+    started before the change is stale no matter what is on disk.
+    """
+    from fastapi import HTTPException
+    from src.qatest import queue
+    from src.routers import qa
+
+    monkeypatch.setattr(queue, "list_runner_state", lambda *a, **k: [
+        {"name": "admin/qa-runner", "protocol": 2, "machine": "local-verify"}])
+
+    with pytest.raises(HTTPException) as raised:
+        qa._require_app_capable("admin/qa-runner")
+
+    detail = str(raised.value.detail)
+    assert raised.value.status_code == 409
+    assert "local-verify" in detail, "the message must name the machine, not just the label"
+    restart_at, pull_at = detail.index("restart it"), detail.index("git pull")
+    assert restart_at < pull_at, "restart is the likely fix and must come first"
