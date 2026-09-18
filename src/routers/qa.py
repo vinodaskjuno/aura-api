@@ -1036,11 +1036,26 @@ def control_project_emulators(project_id: str, action: str, body: EmulatorReques
 
     facts = plan.fetch_facts(project_id)
     clouds = [c.name for c in emulators.clouds_for(facts.get("dependencies") or [])]
+    if not clouds and action == "stop":
+        # STOP MUST NOT DEPEND ON THE GRAPH. The clouds are derived from dependency
+        # analysis, and that analysis can be unavailable long after an emulator is up —
+        # a graph database that is down answers "no dependencies", which is
+        # indistinguishable here from a project that genuinely has none. Refusing on
+        # that left a developer looking at a running emulator in the panel, with a Stop
+        # button that returned 409 and blamed their project for declaring no cloud
+        # dependencies.
+        #
+        # Stopping is safe to widen in a way that starting is not: the agent only ever
+        # touches `aura-dev-<cloud>` containers, and removing one that is not there is
+        # success, not an error.
+        clouds = [c.name for c in emulators.CLOUDS]
     if not clouds:
         raise HTTPException(
             409,
-            "This project declares no cloud dependencies, so there is no emulator to "
-            "start. Aura derives them from the packages your code imports.")
+            "Aura found no cloud dependencies for this project, so there is no emulator "
+            "to start. They are derived from the packages your code imports — if you "
+            "expected some, the project may not be analysed yet, or the knowledge graph "
+            "may be unreachable.")
     return {**queue.request_command(body.runner, f"emulator-{action}", project_id,
                                     clouds=",".join(clouds)),
             "clouds": clouds,

@@ -716,6 +716,13 @@ def remove_container(name: str) -> tuple[bool, str]:
         return False, "podman not found on PATH"
     code, out = _run(["rm", "-f", name], timeout=60)
     if code != 0:
+        # ALREADY GONE IS SUCCESS. Stop asks for a container not to be running, and one
+        # that never was satisfies that. It matters because a stop is now issued for
+        # every cloud Aura knows when dependency analysis cannot say which are in use —
+        # so most of those containers legitimately do not exist, and reporting each as a
+        # failure would turn a clean stop into a wall of errors.
+        if "no such container" in out.lower():
+            return True, ""
         return False, out.strip()[-300:] or f"podman rm exited {code}"
     return True, ""
 

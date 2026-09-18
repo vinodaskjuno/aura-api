@@ -534,6 +534,40 @@ def test_a_project_with_no_cloud_has_no_account(fake_dynamo, as_dev, monkeypatch
     assert body["clouds"] == []
 
 
+def test_stop_works_when_the_graph_cannot_name_the_clouds(fake_dynamo, as_dev,
+                                                          monkeypatch):
+    """Observed: a graph database down for three days answered "no dependencies", and
+    Stop returned 409 blaming the project — while the emulator sat running in the panel
+    with a Stop button that could not work. Starting nothing is meaningless; stopping
+    everything Aura manages is both meaningful and safe."""
+    from src.qatest import plan
+    monkeypatch.setattr(plan, "fetch_facts", lambda pid: {"dependencies": []})
+    client.post(f"{BASE}/runner/state", json=_state())
+
+    stop = client.post(f"{BASE}/emulators/p1/stop", json={"runner": RUNNER})
+    assert stop.status_code == 200
+    assert "aws" in stop.json()["clouds"]
+
+    # Start still refuses: there is nothing to derive, and guessing what to bring up is
+    # not the same kind of safe.
+    start = client.post(f"{BASE}/emulators/p1/start", json={"runner": RUNNER})
+    assert start.status_code == 409
+    assert "no cloud dependencies" in start.json()["detail"]
+    # …and it does not assert something it cannot know.
+    assert "may be unreachable" in start.json()["detail"]
+
+
+def test_the_refusal_names_the_action_the_caller_asked_for(fake_dynamo, as_dev,
+                                                           monkeypatch):
+    """It said "no emulator to start" for a stop, because the word was hardcoded."""
+    from src.qatest import plan
+    monkeypatch.setattr(plan, "fetch_facts", lambda pid: {"dependencies": []})
+    client.post(f"{BASE}/runner/state", json=_state())
+    detail = client.post(f"{BASE}/emulators/p1/start",
+                         json={"runner": RUNNER}).json()["detail"]
+    assert "to start" in detail and "to stop" not in detail
+
+
 def test_the_emulator_endpoint_returns_only_this_projects_jobs(fake_dynamo, as_dev, monkeypatch):
     from src.qatest import plan
     monkeypatch.setattr(plan, "fetch_facts",

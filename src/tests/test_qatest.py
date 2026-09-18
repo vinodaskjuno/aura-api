@@ -257,6 +257,27 @@ def test_start_container_reports_its_three_stages_in_order(monkeypatch):
     assert "image" in stages[0] and "Starting" in stages[1] and "answer" in stages[2]
 
 
+def test_stopping_a_container_that_is_not_there_is_success(monkeypatch):
+    """Stop asks for a container not to be running, and one that never was satisfies
+    that. Load-bearing now that a stop is issued for every cloud Aura knows when
+    dependency analysis cannot say which are in use — most of those legitimately do not
+    exist, and one failure each would turn a clean stop into a wall of errors."""
+    monkeypatch.setattr(emulators, "podman_available", lambda: True)
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, timeout=30: (1, 'Error: no such container: x'))
+    ok, why = emulators.remove_container("aura-dev-gcp")
+    assert ok and why == ""
+
+
+def test_a_real_removal_failure_is_still_reported(monkeypatch):
+    """The widening must not swallow the failures that matter."""
+    monkeypatch.setattr(emulators, "podman_available", lambda: True)
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, timeout=30: (1, "permission denied"))
+    ok, why = emulators.remove_container("aura-dev-aws")
+    assert not ok and "permission denied" in why
+
+
 def test_a_failed_pull_names_the_image_rather_than_the_exit_code(monkeypatch):
     monkeypatch.setattr(emulators, "podman_ready", lambda: (True, ""))
     monkeypatch.setattr(emulators, "_run",
