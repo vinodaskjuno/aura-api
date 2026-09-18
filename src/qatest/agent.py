@@ -1508,18 +1508,22 @@ def main(argv: list[str] | None = None) -> int:
             **_machine_state(busy, args.report_all_containers, allow_logs),
             **({"commandResults": finished} if finished else {})})
         _warn_if_stale(reply)
+        threaded = False
         for command in (reply or {}).get("commands") or []:
             log.info("  command  %s %s", command.get("kind"),
                      command.get("container", ""))
             if command.get("kind") == "app-populate":
                 # Returns immediately; its result arrives on a later state POST.
                 _start_populate(command)
+                threaded = True
                 continue
             if command.get("kind") == "app-start":
                 _start_app(command)
+                threaded = True
                 continue
             if command.get("kind") == "app-stop":
                 _stop_app(command)
+                threaded = True
                 continue
             if command.get("kind") in ("emulator-start", "emulator-stop"):
                 # Threaded like the rest, and for the same reason: a cold start pulls an
@@ -1527,10 +1531,23 @@ def main(argv: list[str] | None = None) -> int:
                 # RUNNER_STALE_S and used to take this machine offline in the panel while
                 # it was doing exactly what it was asked.
                 _start_emulator(command)
+                threaded = True
                 continue
             client.report_state({**_machine_state(busy, args.report_all_containers,
                                                   allow_logs),
                                  "commandResults": [_run_command(command, allow_logs)]})
+
+        # Say STRAIGHT AWAY that the job exists, instead of letting the panel wait out
+        # the next report. Measured: an `emulator-start` against an already-running
+        # emulator takes 251ms, and the idle report interval is 15s — so the job was
+        # created and finished between two reports and the bar was never once
+        # observable. `_run_threaded` registers its progress record synchronously,
+        # before the thread runs, so by here there is always something to send.
+        if threaded:
+            finished, _PENDING_RESULTS[:] = list(_PENDING_RESULTS), []
+            client.report_state({
+                **_machine_state(busy, args.report_all_containers, allow_logs),
+                **({"commandResults": finished} if finished else {})})
 
     def report_state(busy: str = "") -> None:
         """The in-loop form. A key revoked mid-life must not end the process here with
@@ -1590,7 +1607,11 @@ def main(argv: list[str] | None = None) -> int:
             log.info("nothing queued")
             return 0
         else:
-            if polls % STATE_EVERY_N_POLLS == 0:
+            # A finished background job used to wait for the next third poll — up to
+            # 15s — before its result and its final progress reached the panel. For work
+            # that takes 250ms that is the entire visible lifetime of the job spent
+            # showing nothing. Anything waiting to be reported now reports at once.
+            if _PENDING_RESULTS or polls % STATE_EVERY_N_POLLS == 0:
                 report_state()
             time.sleep(args.poll)
 

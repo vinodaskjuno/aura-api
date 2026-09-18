@@ -13,6 +13,7 @@ wrong rather than visibly broken:
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -253,6 +254,35 @@ def test_a_populate_reports_every_stage_it_reaches(monkeypatch):
                     "Locating the app on this machine"]
     assert "no working copy" in result["error"]
     assert prog.record["index"] == 1        # one stage COMPLETED, not two entered
+
+
+def test_a_job_is_registered_before_its_thread_runs():
+    """What makes a fast job visible at all.
+
+    Measured: `emulator-start` against an already-running emulator takes 251ms, and the
+    agent's idle report interval is 15s — so the job was created AND finished between
+    two reports and the bar was never once observable. The dispatch loop reports
+    immediately after threading a command, which only helps because `_run_threaded`
+    registers the progress record synchronously, before the thread is started."""
+    from src.qatest import agent
+
+    agent._JOBS.clear()
+    agent._JOB_PROGRESS.clear()
+    started = threading.Event()
+
+    def body(command, result, progress):
+        started.wait(5)              # the thread does nothing until we let it
+        result["ok"] = True
+        return result
+
+    agent._run_threaded("populate", "p-fast", {"id": "cmd-fast"}, body, stages=7)
+    # Before the thread has done ANYTHING, the snapshot already carries the job.
+    snap = agent._job_snapshots()
+    assert [j["commandId"] for j in snap] == ["cmd-fast"]
+    assert snap[0]["active"] is True and snap[0]["total"] == 7
+    started.set()
+    agent._JOBS.clear()
+    agent._JOB_PROGRESS.clear()
 
 
 def test_a_failed_job_leaves_the_bar_where_it_stopped():
