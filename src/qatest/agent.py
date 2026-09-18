@@ -171,8 +171,17 @@ class Client:
         # seconds for the life of the process is noise, so stop asking.
         self._state_supported = True
 
+    #: Set by the last `claim()` when the server said a command is waiting. Read by the
+    #: poll loop, which then reports state at once instead of on its next third poll.
+    command_waiting = False
+
     def claim(self) -> dict | None:
         response = self._http.get("/api/qa/runner/next")
+        # A HEADER, never a body. Deployed agents do `if 204: return None` and treat any
+        # 200 as a job, so a body here would raise KeyError inside every runner's poll
+        # loop at once — which is why `/runner/state` exists as a separate endpoint at
+        # all. A header an old agent never reads costs it nothing.
+        self.command_waiting = response.headers.get("x-aura-command-waiting") == "1"
         if response.status_code == 204:
             return None
         if response.status_code in (401, 403):
@@ -1611,7 +1620,13 @@ def main(argv: list[str] | None = None) -> int:
             # 15s — before its result and its final progress reached the panel. For work
             # that takes 250ms that is the entire visible lifetime of the job spent
             # showing nothing. Anything waiting to be reported now reports at once.
-            if _PENDING_RESULTS or polls % STATE_EVERY_N_POLLS == 0:
+            #
+            # `command_waiting` does the same for the OTHER end of the wait: commands
+            # ride the state POST, so pressing Start sat for up to 15s before the runner
+            # even knew about it. The claim poll runs every 5s and now carries that flag,
+            # which turns the worst case into one poll without tripling state traffic.
+            if _PENDING_RESULTS or client.command_waiting \
+                    or polls % STATE_EVERY_N_POLLS == 0:
                 report_state()
             time.sleep(args.poll)
 

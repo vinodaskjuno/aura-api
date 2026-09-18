@@ -1310,7 +1310,15 @@ def runner_next(request: Request):
 
     row = queue.claim(runner, identity)
     if not row:
-        return Response(status_code=204)
+        # 204 with a HEADER, never a body. Protocol-1 agents do `if 204: return None`
+        # and treat any 200 as a job, so a body here would raise KeyError inside every
+        # deployed runner's poll loop at once — the reason `/runner/state` is a separate
+        # endpoint. A header is invisible to an agent that does not read it.
+        #
+        # Commands ride the state POST, which is three times slower than this poll, so
+        # without the hint a pressed Start sat unseen for up to 15s.
+        return Response(status_code=204, headers=(
+            {"x-aura-command-waiting": "1"} if queue.command_waiting(runner) else {}))
 
     project_id = row["projectId"]
     run_id = row["testRunId"]

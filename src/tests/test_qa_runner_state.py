@@ -435,6 +435,48 @@ def test_the_job_log_is_bounded_server_side(fake_dynamo):
     assert log[-1]["text"] == "line 399"          # the tail survives
 
 
+def test_an_idle_claim_hints_that_a_command_is_waiting(fake_dynamo):
+    """Commands ride the STATE post, which is three times slower than the claim poll,
+    so a pressed Start sat unseen for up to 15s. The claim now carries the hint."""
+    client.post(f"{BASE}/runner/state", json=_state())
+
+    idle = client.get(f"{BASE}/runner/next")
+    assert idle.status_code == 204
+    assert "x-aura-command-waiting" not in idle.headers
+
+    client.post(f"{BASE}/runners/logs",
+                json={"runner": RUNNER, "container": "aura-qa-aws-run1"})
+    waiting = client.get(f"{BASE}/runner/next")
+    assert waiting.status_code == 204
+    assert waiting.headers.get("x-aura-command-waiting") == "1"
+
+
+def test_the_claim_hint_is_a_header_and_never_a_body(fake_dynamo):
+    """THE constraint. A protocol-1 agent does `if 204: return None` and treats any 200
+    as a job, so a body here raises KeyError inside every deployed runner's poll loop at
+    once — which is why `/runner/state` exists as a separate endpoint at all."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    client.post(f"{BASE}/runners/logs",
+                json={"runner": RUNNER, "container": "aura-qa-aws-run1"})
+
+    r = client.get(f"{BASE}/runner/next")
+    assert r.status_code == 204
+    assert r.content == b""
+
+
+def test_the_hint_stops_once_the_runner_has_taken_the_command(fake_dynamo):
+    """Otherwise it would nudge a redundant state report every five seconds for as long
+    as the job runs."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    client.post(f"{BASE}/runners/logs",
+                json={"runner": RUNNER, "container": "aura-qa-aws-run1"})
+    assert client.get(f"{BASE}/runner/next").headers.get("x-aura-command-waiting") == "1"
+
+    # The state POST is what hands the command over.
+    client.post(f"{BASE}/runner/state", json=_state())
+    assert "x-aura-command-waiting" not in client.get(f"{BASE}/runner/next").headers
+
+
 def test_a_runner_that_cannot_report_jobs_still_works(fake_dynamo):
     """Every OTHER test in this file omits `jobs`, so they all double as this case —
     but the distinction the UI draws deserves naming: no `jobsAt` means "this agent

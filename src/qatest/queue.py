@@ -877,6 +877,31 @@ def app_logs(runner: str, project_id: str) -> dict:
     return {"lines": [], "at": row.get("appsAt", ""), "kind": ""}
 
 
+def command_waiting(runner: str) -> bool:
+    """Is a command parked for this runner that nobody has taken yet?
+
+    Read on the claim poll, which is the only call every runner makes every few seconds.
+    A GetItem, deliberately — `progress` and `app_logs` make the same trade for the same
+    reason: a polled endpoint backed by a scan is how this table gets hot, and a keyed
+    read on a row already in cache is not worth avoiding.
+
+    Exists because commands ride the STATE post, not the claim, so a request sat unseen
+    for up to a full state interval — 15s — before the runner knew about it. The claim
+    poll runs three times as often and can carry the hint.
+    """
+    if not runner:
+        return False
+    try:
+        row = db.get_item(TABLE, _runner_key(runner)) or {}
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("QA queue: command_waiting read failed for %s: %s", runner, exc)
+        return False
+    # Taken already means the runner has it; the state POST that follows carries the
+    # result, and nudging it again would be a redundant report every five seconds for
+    # as long as the job runs.
+    return bool(row.get("cmdId")) and not row.get("cmdTakenAt")
+
+
 def project_jobs(project_id: str, stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
     """Every runner's in-flight or just-finished work for ONE project, with its log.
 
