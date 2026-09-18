@@ -357,6 +357,153 @@ def test_the_index_carries_everything_the_panel_renders(fake_dynamo):
     assert me["browserVersion"] == "131"
 
 
+# ── Job progress ────────────────────────────────────────────────────────────
+#
+# The same shape as `setup`, for the same reason, and with the same failure mode if a
+# field is stored but not indexed. These are the tests that would have caught it.
+
+def _job(**over):
+    job = {"kind": "populate", "projectId": "p1", "commandId": "cmd-abc",
+           "active": True, "step": "Locating the app on this machine",
+           "index": 1, "total": 7, "ok": False, "error": "",
+           "startedAt": "2026-09-18T10:00:00Z", "endedAt": "",
+           "log": [{"at": "t1", "text": "working copy ready"}]}
+    job.update(over)
+    return job
+
+
+def test_job_progress_reaches_the_panel(fake_dynamo):
+    """A populate used to be a single spinner for up to fifteen minutes."""
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[_job()]))
+
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["jobs"][0]["kind"] == "populate"
+    assert me["jobs"][0]["index"] == 1 and me["jobs"][0]["total"] == 7
+    assert me["jobs"][0]["commandId"] == "cmd-abc"
+    assert me["jobsAt"]
+
+
+def test_the_index_carries_jobs(fake_dynamo):
+    """The sibling of the test above this block. `list_runner_state` reads the index
+    FIRST, so a job stored only on the per-runner row renders nowhere."""
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[_job(step="Reading what it "
+                                                                   "created", index=5)]))
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["jobs"] and me["jobs"][0]["index"] == 5
+    assert me["jobs"][0]["step"] == "Reading what it created"
+
+
+def test_the_index_does_not_carry_the_job_log(fake_dynamo):
+    """One 400 KB item is shared by EVERY runner. The log lives on the per-runner row,
+    which `project_jobs` reads with a GetItem — exactly what `apps`/`logTail` does."""
+    from src.qatest import queue
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[_job()]))
+
+    index = queue.db.get_item(queue.TABLE, {"testRunId": queue.RUNNER_INDEX_ID,
+                                            "projectId": queue.RUNNER_SK}) or {}
+    entry = next(v for k, v in index.items()
+                 if k.startswith("r_") and isinstance(v, dict) and v.get("runner"))
+    assert entry["jobs"] and "log" not in entry["jobs"][0]
+    # …and it is still on the row the log is read from.
+    assert queue.project_jobs("p1")[0]["log"][-1]["text"] == "working copy ready"
+
+
+def test_a_job_index_can_never_exceed_its_total(fake_dynamo):
+    """The agent computes it, so the server is the side that must clamp: an index past
+    the end renders a bar over 100%."""
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[_job(index=99, total=7)]))
+    assert client.get(f"{BASE}/runners").json()["runners"][0]["jobs"][0]["index"] == 7
+
+
+def test_an_unknown_job_kind_is_dropped(fake_dynamo):
+    """The panel branches on `kind` to choose its wording. A kind nobody renders would
+    occupy one of only four slots while saying nothing."""
+    client.post(f"{BASE}/runner/state", json=_state(
+        jobs=[_job(kind="rm -rf"), _job(kind="emulator-start")]))
+    kinds = [j["kind"] for j in client.get(f"{BASE}/runners").json()["runners"][0]["jobs"]]
+    assert kinds == ["emulator-start"]
+
+
+def test_the_job_log_is_bounded_server_side(fake_dynamo):
+    """Read through `project_jobs`, not `/runners`: the index drops the log on purpose
+    (see the test above), so this is the only surface that carries it."""
+    from src.qatest import queue as q
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[_job(
+        log=[{"at": f"t{i}", "text": f"line {i}"} for i in range(400)])]))
+    log = q.project_jobs("p1")[0]["log"]
+    assert len(log) <= 12
+    assert log[-1]["text"] == "line 399"          # the tail survives
+
+
+def test_a_runner_that_cannot_report_jobs_still_works(fake_dynamo):
+    """Every OTHER test in this file omits `jobs`, so they all double as this case —
+    but the distinction the UI draws deserves naming: no `jobsAt` means "this agent
+    cannot tell us", which is not the same as "nothing is running"."""
+    client.post(f"{BASE}/runner/state", json=_state())
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["jobs"] == [] and me["jobsAt"] == ""
+
+
+def test_a_newer_agent_clears_a_finished_job_by_sending_an_empty_list(fake_dynamo):
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[_job()]))
+    client.post(f"{BASE}/runner/state", json=_state(jobs=[]))
+    me = client.get(f"{BASE}/runners").json()["runners"][0]
+    assert me["jobs"] == [] and me["jobsAt"]      # reported, and empty
+
+
+# ── The emulator endpoint ───────────────────────────────────────────────────
+#
+# DevMate's, not QA's: this file's user is `user_qa`, which deliberately does NOT hold
+# `dev_workspace`, so these three swap in a developer rather than widening the default.
+
+DEV = {"userId": "u-dev", "username": "dev", "role": "user_dev",
+       "permissions": ROLE_PERMISSIONS["user_dev"]}
+
+
+@pytest.fixture
+def as_dev():
+    app.dependency_overrides[get_current_user] = lambda: DEV
+    yield
+    app.dependency_overrides[get_current_user] = lambda: QA
+
+
+def test_the_emulator_endpoint_names_the_project_account(fake_dynamo, as_dev, monkeypatch):
+    """The whole point. A console on Floci's default namespace reports every page
+    empty for a project whose resources are up, and nothing used to say which account
+    Aura actually wrote to."""
+    from src.qatest import emulators, plan
+    monkeypatch.setattr(plan, "fetch_facts",
+                        lambda pid: {"dependencies": [{"name": "boto3"}]})
+
+    body = client.get(f"{BASE}/emulators/p1").json()
+    assert body["account"] == emulators.account_for("p1")
+    assert len(body["account"]) == 12 and body["account"].isdigit()
+    assert body["clouds"] == ["aws"]
+
+
+def test_a_project_with_no_cloud_has_no_account(fake_dynamo, as_dev, monkeypatch):
+    """ABSENT IS NOT ZERO. `000000000000` is Floci's DEFAULT namespace — naming it
+    here would point the reader at the exact wrong account."""
+    from src.qatest import plan
+    monkeypatch.setattr(plan, "fetch_facts", lambda pid: {"dependencies": []})
+
+    body = client.get(f"{BASE}/emulators/p1").json()
+    assert body["account"] == ""
+    assert body["clouds"] == []
+
+
+def test_the_emulator_endpoint_returns_only_this_projects_jobs(fake_dynamo, as_dev, monkeypatch):
+    from src.qatest import plan
+    monkeypatch.setattr(plan, "fetch_facts",
+                        lambda pid: {"dependencies": [{"name": "boto3"}]})
+    client.post(f"{BASE}/runner/state", json=_state(
+        jobs=[_job(projectId="p1"), _job(projectId="p2", commandId="cmd-other")]))
+
+    jobs = client.get(f"{BASE}/emulators/p1").json()["jobs"]
+    assert [j["commandId"] for j in jobs] == ["cmd-abc"]
+    assert jobs[0]["runner"] and jobs[0]["stale"] is False
+
+
 # ── The heartbeat wire contract ─────────────────────────────────────────────
 #
 # `HeartbeatRequest` is where live emulator state enters the system, and pydantic
@@ -799,6 +946,44 @@ def test_a_container_aura_started_is_still_removed(monkeypatch):
     es.stop()
 
     assert removed == [["rm", "-f", "aura-qa-aws-run1"]]
+
+
+def test_a_failed_start_never_removes_the_shared_emulator(monkeypatch):
+    """`_start` fills `container` from `dev_container()` BEFORE it knows whether
+    anything came up, so a record for a start that failed still names the shared
+    container. Removing it deleted an emulator this run never created — reproduced by
+    running this file's own suite against a live `aura-dev-aws`, which it destroyed."""
+    from src.qatest import emulators
+    from src.qatest.types import EmulatorRecord
+
+    removed = []
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, **kw: removed.append(args) or (0, ""))
+
+    es = emulators.EmulatorSet([], "run1")
+    es.records = [EmulatorRecord(cloud="aws", image="i", digest="d", port=4566,
+                                 container="aura-dev-aws", started=False,
+                                 error="podman is not installed")]
+    es.stop()
+    assert removed == []
+
+
+def test_the_shared_emulator_is_left_running_even_when_this_run_started_it(monkeypatch):
+    """What `stop()`'s own note has always claimed — "true whether this run found it up
+    or started it" — and what the code did not do. One container per cloud serves every
+    project on the machine."""
+    from src.qatest import emulators
+    from src.qatest.types import EmulatorRecord
+
+    removed = []
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, **kw: removed.append(args) or (0, ""))
+
+    es = emulators.EmulatorSet([], "run1")
+    es.records = [EmulatorRecord(cloud="aws", image="i", digest="d", port=4566,
+                                 container="aura-dev-aws", started=True)]
+    es.stop()
+    assert removed == []
 
 
 # ── The managed-prefix widening ──────────────────────────────────────────────

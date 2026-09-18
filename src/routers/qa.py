@@ -941,6 +941,43 @@ class EmulatorRequest(BaseModel):
     runner: str
 
 
+@router.get("/emulators/{project_id}")
+def get_project_emulators(project_id: str,
+                          _: dict = Depends(require_permission("dev_workspace"))):
+    """This project's emulator identity and whatever a runner is doing about it.
+
+    Declared with its POST siblings and BEFORE `control_project_emulators`, whose
+    `{action}` catch-all would otherwise swallow anything added below it.
+
+    `account` is the whole point. One Floci emulator is shared by every project on a
+    machine, and they are kept apart INSIDE it by AWS account — Floci reads a 12-digit
+    access key as the account whose resources to return. Nothing in Aura used to say
+    which account a project got, so a console sitting on Floci's default namespace
+    reported every resource page empty for a project whose Lambdas were up and
+    answering, and there was no way to see why.
+
+    Computed here rather than reported by the runner: it is a pure function of the
+    project id under Floci's documented rule, so this answers with the runner offline,
+    costs no round trip, and cannot drift from the value `request_inventory` already
+    scopes its read with. `emulators.account_for` stays the single definition — two
+    definitions of which account a project lives in is two accounts to go looking in.
+    """
+    from src.qatest import emulators, plan, queue
+
+    facts = plan.fetch_facts(project_id)
+    clouds = [c.name for c in emulators.clouds_for(facts.get("dependencies") or [])]
+    return {
+        "projectId": project_id,
+        # ABSENT IS NOT ZERO. A project with no cloud dependency has no emulator and no
+        # account; saying `000000000000` would name Floci's default namespace, which is
+        # exactly the wrong account and the bug this endpoint exists to close.
+        "account": emulators.account_for(project_id) if clouds else "",
+        "clouds": clouds,
+        "jobs": queue.project_jobs(project_id),
+        "staleAfterSeconds": queue.RUNNER_STALE_S,
+    }
+
+
 @router.post("/emulators/{project_id}/populate")
 def populate_project_emulators(project_id: str, body: EmulatorRequest,
                                _: dict = Depends(require_permission("dev_workspace"))):
@@ -973,7 +1010,10 @@ def populate_project_emulators(project_id: str, body: EmulatorRequest,
 
     return {**queue.request_command(body.runner, "app-populate", project_id,
                                     clouds=",".join(clouds), payload=published),
-            "clouds": clouds}
+            "clouds": clouds,
+            # So the panel can name the account on the press, rather than waiting for
+            # the next GET. Same single definition, same value.
+            "account": emulators.account_for(project_id)}
 
 
 @router.post("/emulators/{project_id}/{action}")
@@ -1003,7 +1043,8 @@ def control_project_emulators(project_id: str, action: str, body: EmulatorReques
             "start. Aura derives them from the packages your code imports.")
     return {**queue.request_command(body.runner, f"emulator-{action}", project_id,
                                     clouds=",".join(clouds)),
-            "clouds": clouds}
+            "clouds": clouds,
+            "account": emulators.account_for(project_id)}
 
 
 class AppRunRequest(BaseModel):

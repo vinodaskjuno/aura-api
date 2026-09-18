@@ -14,6 +14,31 @@
         );
       })();
     </script>
+    <!-- Aura opens this console with `?account=<12 digits>` so it lands on the project
+         it came from. The console itself reads the account ONLY from localStorage, once,
+         when its bundle loads — it never looks at the URL — so this has to run here, in
+         a classic inline script, which is ordered before the deferred module below.
+
+         OVERRIDES a stored value, unlike the passive seed start.sh injects: arriving with
+         an account in the URL is a deliberate instruction, and the whole reason the link
+         exists is that the stored one is wrong after a project is re-uploaded. Then it
+         strips the parameter, so a refresh or a copied link cannot pin a stale account. -->
+    <script>
+      (function () {
+        try {
+          var m = /[?&]account=(\d{12})(?:&|$)/.exec(location.search);
+          if (!m) return;
+          localStorage.setItem("floci.accountId", m[1]);
+          // Exactly 12 digits or nothing: Floci treats anything else as "use the
+          // default account", which is the empty-console failure this link prevents.
+          var url = location.pathname + location.search.replace(
+            /([?&])account=\d{12}(&|$)/, "$1").replace(/[?&]$/, "") + location.hash;
+          history.replaceState(null, "", url);
+        } catch (e) {}
+      })();
+    </script>
+    <!-- AURA_ACCOUNT_SEED — start.sh replaces this line when it is given a project.
+         Left as a comment otherwise, so this file works unrendered. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="icon" href="/assets/floci-black-BZXfF1vs.svg" />

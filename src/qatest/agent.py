@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -506,6 +507,10 @@ def _machine_state(busy_run_id: str = "", include_unmanaged: bool = False,
         # bounded connect `_floci_ui` uses — the server cannot see a laptop's ports,
         # so if this does not say the app is up, nothing else can.
         "apps": appsession.describe_all(),
+        # Sent on EVERY report, empty list included — that is what tells the server this
+        # agent can report jobs at all, and it is how a finished job gets cleared rather
+        # than left pinned on the row.
+        "jobs": _job_snapshots(),
     }
 
 
@@ -553,13 +558,165 @@ _JOBS_LOCK = threading.Lock()
 _EXCLUSIVE = ("populate", "app-start")
 
 
+#: Work that contends for the MACHINE, not for one project. `dev_container()` ignores the
+#: project id — there is one `aura-dev-<cloud>` per machine — and `start_container` does
+#: `podman rm -f` before it runs. Two projects starting at once would have the second
+#: delete the first's container mid-readiness. That was impossible only while these ran
+#: inline on the poll loop, which serialised them; threading them makes it reachable, so
+#: they share one slot and exclude each other.
+_MACHINE_SCOPED = ("emulator-start", "emulator-stop")
+
 #: Results from finished background threads, waiting for the next state POST to carry them.
 _PENDING_RESULTS: list = []
+
+#: Per-stage progress for the work above, keyed the same way, read by `_machine_state`
+#: and reported on every state POST. Separate from `_JOBS` because it OUTLIVES the slot:
+#: a job that has finished — above all one that failed — must stay readable long enough
+#: for the panel to show why, and the slot has to be free the instant the thread ends.
+_JOB_PROGRESS: dict = {}
+_PROGRESS_LOCK = threading.Lock()
+
+#: How long a finished job stays visible. Long enough to read a failure after switching
+#: tabs, short enough that it cannot be mistaken for something still running.
+JOB_KEEP_S = 120
+
+#: Stage counts, so the server and the panel never have to guess a denominator.
+#: Emulator jobs are per cloud and computed at the call site.
+_POPULATE_STAGES = 7
+
+
+def _job_key(kind: str, project_id: str) -> tuple:
+    """The slot a job contends for. Machine-scoped kinds collapse onto one key."""
+    if kind in _MACHINE_SCOPED:
+        return ("emulator", "")
+    return (kind, project_id)
+
+
+class _Progress:
+    """What a background job is doing, as it does it.
+
+    Everything here is in memory under a short lock and NOTHING touches HTTP: a job
+    thread that blocked on the network to report progress would be back to the problem
+    threading solved. The poll loop picks the snapshot up on its next state POST.
+
+    `index` counts stages COMPLETED, never started, so the bar is `index/total` and can
+    never be an interpolation. A failure leaves it where it stopped.
+    """
+
+    def __init__(self, kind: str, project_id: str, command_id: str, total: int):
+        self.key = (kind, project_id, command_id)
+        #: Stages ENTERED. `index` (completed) is always this minus one, which is the
+        #: arithmetic that keeps a bar from showing work that has not happened yet.
+        self._entered = 0
+        self.record = {"kind": kind, "projectId": project_id, "commandId": command_id,
+                       "active": True, "step": "", "index": 0, "total": max(0, total),
+                       "ok": False, "error": "", "startedAt": _stamp(), "endedAt": "",
+                       "log": [], "_at": time.time()}
+        with _PROGRESS_LOCK:
+            _JOB_PROGRESS[self.key] = self.record
+
+    def step(self, label: str) -> None:
+        """Enter a stage. Everything before it is now complete."""
+        with _PROGRESS_LOCK:
+            self._entered += 1
+            self.record["index"] = min(self._entered - 1, self.record["total"])
+            self.record["step"] = str(label)[:120]
+            self.record["_at"] = time.time()
+
+    def note(self, text: str) -> None:
+        """A line from inside the current stage. Does not advance anything."""
+        if not text:
+            return
+        with _PROGRESS_LOCK:
+            self.record["log"].append({"at": _stamp(), "text": str(text)[:200]})
+            del self.record["log"][:-12]
+            self.record["_at"] = time.time()
+
+    def event(self, ev: dict) -> None:
+        """Adapter for the `{"type": ..., "message": ...}` shape `provision` emits."""
+        if isinstance(ev, dict):
+            self.note(_redact(str(ev.get("message") or "")))
+
+    def finish(self, ok: bool, error: str = "") -> None:
+        """Terminal. Called from ONE place — `_run_threaded`'s `finally` — so every
+        early return and every exception in a job body lands here."""
+        with _PROGRESS_LOCK:
+            self.record["active"] = False
+            self.record["ok"] = bool(ok)
+            self.record["error"] = _redact(str(error or ""))[:400]
+            self.record["endedAt"] = _stamp()
+            if ok:
+                self.record["index"] = self.record["total"]
+            self.record["_at"] = time.time()
+
+
+class _NullProgress:
+    """What a job gets when nobody is watching — the inline `--once` path and the
+    existing two-argument tests. Every method is a no-op so job bodies need no guards."""
+
+    def step(self, label: str) -> None: ...
+    def note(self, text: str) -> None: ...
+    def event(self, ev: dict) -> None: ...
+    def finish(self, ok: bool, error: str = "") -> None: ...
+
+
+_NULL_PROGRESS = _NullProgress()
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+#: The QUERY STRING of any URL, which is where a presigned credential lives.
+#:
+#: `provision` reports a fetch failure by interpolating the exception (provision.py:93),
+#: and an httpx error carries the full request URL — for a working copy that is an S3
+#: link complete with `AWSAccessKeyId`, `Signature` and `x-amz-security-token`. That is
+#: fine in a runner's local log and must never reach the server, the runner row or a
+#: browser; `request_command` forbids exactly this for `cmdPayload`, and a job log is a
+#: new way to leak the same thing.
+#:
+#: The QUERY only, not the whole URL. Redacting every URL also destroyed
+#: `http://localhost:4566` in "port 4566 is held by …, start your app against
+#: http://localhost:4566 directly" — which is the one actionable part of that message.
+#: Credentials live in the query; a host and path are diagnostics worth keeping.
+_URL_QUERY_RE = re.compile(r"(https?://[^\s?]+)\?[^\s'\"]*")
+
+
+def _redact(text: str) -> str:
+    """Strip credentials out of anything a job reports outward."""
+    return _URL_QUERY_RE.sub(r"\1?<redacted>", text or "")
+
+
+def _job_snapshots() -> list[dict]:
+    """Jobs worth reporting: everything running, plus recently finished ones.
+
+    Pruned here rather than on a timer — this is called on every state report, which is
+    the only moment the answer is used.
+    """
+    now = time.time()
+    with _PROGRESS_LOCK:
+        for key, rec in list(_JOB_PROGRESS.items()):
+            if not rec["active"] and now - rec["_at"] > JOB_KEEP_S:
+                _JOB_PROGRESS.pop(key, None)
+        out = [{k: v for k, v in rec.items() if k != "_at"}
+               for rec in _JOB_PROGRESS.values()]
+    out.sort(key=lambda r: r.get("startedAt") or "", reverse=True)
+    out.sort(key=lambda r: not r.get("active"))
+    return out[:4]
 
 
 def _claim_job(kind: str, project_id: str) -> str:
     """Take the slot for this (kind, project), or say what is already holding it."""
+    want = _job_key(kind, project_id)
     with _JOBS_LOCK:
+        if kind in _MACHINE_SCOPED:
+            # One emulator per machine, so the contention is machine-wide and the
+            # message must not name a project as though another one were fine.
+            if want in _JOBS:
+                return ("already starting or stopping emulators on this machine — "
+                        "they are shared, so this waits for that to finish")
+            _JOBS[want] = None
+            return ""
         for (held_kind, held_project) in _JOBS:
             if held_project != project_id:
                 continue
@@ -567,13 +724,13 @@ def _claim_job(kind: str, project_id: str) -> str:
                 return f"already running {held_kind} for {held_project} on this machine"
             if held_kind == kind:
                 return f"already running {kind} for {held_project} on this machine"
-        _JOBS[(kind, project_id)] = None
+        _JOBS[want] = None
         return ""
 
 
 def _release_job(kind: str, project_id: str) -> None:
     with _JOBS_LOCK:
-        _JOBS.pop((kind, project_id), None)
+        _JOBS.pop(_job_key(kind, project_id), None)
 
 
 def populate_in_flight() -> str:
@@ -585,28 +742,59 @@ def populate_in_flight() -> str:
     return ""
 
 
-def _run_threaded(kind: str, project_id: str, command: dict, body) -> None:
-    """Run `body(command, result)` off the poll loop, parking its result.
+def blocking_job() -> str:
+    """Work that must stand the poll loop off from claiming a RUN, as `kind:projectId`.
+
+    Populate was the only one, because it was the only threaded thing that touched the
+    emulator. Emulator start and stop now run off the loop too, and a run claimed while
+    a container is being rebuilt under it would adopt an emulator that is about to go
+    away. `app-start`/`app-stop` stay out deliberately: a live session is exactly what a
+    run is meant to adopt.
+    """
+    with _JOBS_LOCK:
+        for (kind, project_id) in _JOBS:
+            if kind == "populate" or kind in _MACHINE_SCOPED or kind == "emulator":
+                return f"{kind}:{project_id}"
+    return ""
+
+
+def _run_threaded(kind: str, project_id: str, command: dict, body,
+                  stages: int = 0) -> None:
+    """Run `body(command, result, progress)` off the poll loop, parking its result.
 
     Threaded for the reason `_start_populate` documents: work measured in minutes on
     the loop means no state is reported, the row goes stale after RUNNER_STALE_S, and
     the panel swaps itself for "No runner is connected" while the work is still going.
+
+    Owns the whole progress lifecycle, which is what makes the failure story short: a
+    body reports the stage it is entering and nothing else, and `finish` is called from
+    the `finally` below — so every early `return result`, every raised exception and
+    every refused claim ends up recorded in exactly one place.
     """
+    command_id = str(command.get("id", "") or "")
     busy = _claim_job(kind, project_id)
     if busy:
-        _PENDING_RESULTS.append({"id": command.get("id", ""), "output": "",
+        # Recorded, not just returned. The command result says why to whoever polls it,
+        # but a reader who has already closed the popup has nothing — and "refused
+        # because something else holds it" is the single most confusing outcome to meet
+        # as a silent no-op.
+        _Progress(kind, project_id, command_id, stages).finish(False, busy)
+        _PENDING_RESULTS.append({"id": command_id, "output": "",
                                  "ok": False, "error": busy})
         return
 
+    progress = _Progress(kind, project_id, command_id, stages)
+
     def wrapper() -> None:
-        result = {"id": command.get("id", ""), "output": "", "ok": False, "error": ""}
+        result = {"id": command_id, "output": "", "ok": False, "error": ""}
         try:
-            result = body(command, result)
+            result = body(command, result, progress)
         except Exception as exc:                              # noqa: BLE001
             # Never let a thread die silently: the reader is watching a spinner that
             # would otherwise run to its timeout and blame the runner for going quiet.
             result["error"] = f"{type(exc).__name__}: {exc}"[:400]
         finally:
+            progress.finish(bool(result.get("ok")), str(result.get("error") or ""))
             _PENDING_RESULTS.append(result)
             _release_job(kind, project_id)
 
@@ -628,7 +816,26 @@ def _start_populate(command: dict) -> None:
     app-start, which also enforces that the two never run together for one project.
     """
     _run_threaded("populate", str(command.get("container") or ""), command,
-                  _command_populate)
+                  _command_populate, stages=_POPULATE_STAGES)
+
+
+def _start_emulator(command: dict) -> None:
+    """Start or stop this machine's emulators on a worker thread.
+
+    Threaded for the same reason as populate, and it is not a theoretical one: a cold
+    `start_container` is a `podman run` bounded at 120s — which on a first use includes
+    pulling the image — followed by a readiness wait bounded at `_ready_timeout()`, 60s
+    by default. That is comfortably past RUNNER_STALE_S (90s), so a first Start used to
+    take the runner offline in the panel, from the reader's point of view, while doing
+    exactly what it was asked.
+    """
+    clouds = [c for c in str(command.get("clouds") or "").split(",") if c]
+    # Start: check podman, then pull / run / wait per cloud. Stop: check podman, then
+    # remove per cloud. Computed here because only the caller knows how many clouds.
+    stages = (1 + 3 * len(clouds) if command.get("kind") == "emulator-start"
+              else 1 + len(clouds))
+    _run_threaded(str(command.get("kind") or ""), str(command.get("container") or ""),
+                  command, _command_emulator, stages=stages)
 
 
 def _start_app(command: dict) -> None:
@@ -646,7 +853,7 @@ def _stop_app(command: dict) -> None:
                   _command_app_stop)
 
 
-def _command_populate(command: dict, result: dict) -> dict:
+def _command_populate(command: dict, result: dict, progress=_NULL_PROGRESS) -> dict:
     """Boot the app under test once so it creates its cloud resources, then stop it.
 
     Pressing Start in DevMate brings up an EMPTY emulator, and readers reasonably expect
@@ -676,9 +883,16 @@ def _command_populate(command: dict, result: dict) -> dict:
     # failed while the Resources panel fills up behind them, which is worse than either
     # a clean success or a clean failure. Whether it is fatal is decided below, by
     # whether there is anything to run.
-    stale = provision.prepare(project_id, command.get("payload") or {}, None)
+    # The emit was `None` here while the run path passed a real callback, which made the
+    # single longest part of a populate — installing the project's dependencies — the one
+    # part nothing could see. `progress.event` REDACTS, and that is not decoration: a
+    # fetch failure is reported by interpolating the exception, and an httpx error string
+    # carries the full presigned S3 URL, signature and session token included.
+    progress.step("Fetching the working copy and installing dependencies")
+    stale = provision.prepare(project_id, command.get("payload") or {}, progress.event)
     problems: list[str] = []
 
+    progress.step("Locating the app on this machine")
     root, checked = appserver.locate(project_id)
     if root is None:
         result["error"] = ("no working copy on this machine for this project"
@@ -695,6 +909,7 @@ def _command_populate(command: dict, result: dict) -> dict:
     # Only the API half. Starting the frontend dev server creates no cloud resources and
     # costs a minute of the reader's time. A compose stack is returned alone by `detect`,
     # so it survives this filter by having no "ui" sibling to drop.
+    progress.step("Detecting how the app starts")
     specs = [sp for sp in appserver.detect(root) if sp.kind == "api" or sp.compose]
     if not specs:
         result["error"] = (f"no runnable application found in {root} — there is nothing "
@@ -705,6 +920,7 @@ def _command_populate(command: dict, result: dict) -> dict:
     # matters is that it is Aura's, not whose it is. Projects are kept apart inside it by
     # AWS account (`emulators.account_for`), which is why populating an emulator another
     # project is also using is now safe rather than the worst failure available.
+    progress.step("Checking the emulator is up")
     env: dict[str, str] = {}
     endpoints: dict[str, str] = {}
     for cloud in clouds:
@@ -712,6 +928,7 @@ def _command_populate(command: dict, result: dict) -> dict:
         if not known:
             problems.append(f"unknown cloud {cloud}")
             continue
+        progress.note(f"{cloud} on :{known.port}")
         if not emulators._ready(known.port, timeout=2):
             problems.append(f"the {cloud} emulator is not running — press Start first")
             continue
@@ -732,6 +949,7 @@ def _command_populate(command: dict, result: dict) -> dict:
         result["error"] = "; ".join(problems)[:400] or "no usable emulator for this project"
         return result
 
+    progress.step("Starting the app so it creates its resources")
     try:
         with appserver.RunningApps(specs, extra_env=env) as apps:
             # Nothing to do in the body. `__enter__` has already waited for the app to
@@ -741,6 +959,7 @@ def _command_populate(command: dict, result: dict) -> dict:
         result["error"] = f"the app did not start: {type(exc).__name__}: {exc}"[:400]
         return result
 
+    progress.step("Reading what it created")
     found = inventory.collect(endpoints, account=emulators.account_for(project_id))
     # `collect` nests per cloud: {"aws": {"s3": [...], "lambda": [...]}}. Counting the
     # outer level finds dicts, not lists, and silently reports zero — which turned a
@@ -754,6 +973,7 @@ def _command_populate(command: dict, result: dict) -> dict:
         problems.append("the app started but created no resources — this project may "
                         "create them on first use rather than at startup")
 
+    progress.step("Done")
     result["ok"] = not problems
     result["output"] = json.dumps({"resources": found, "created": total,
                                    "problems": problems, "warnings": warnings})
@@ -762,7 +982,7 @@ def _command_populate(command: dict, result: dict) -> dict:
     return result
 
 
-def _command_app_start(command: dict, result: dict) -> dict:
+def _command_app_start(command: dict, result: dict, progress=_NULL_PROGRESS) -> dict:
     """Start this project's app and leave it running until someone stops it.
 
     The sibling of `_command_populate`, and deliberately almost all of the same code
@@ -866,7 +1086,7 @@ def _command_app_start(command: dict, result: dict) -> dict:
     return result
 
 
-def _command_app_stop(command: dict, result: dict) -> dict:
+def _command_app_stop(command: dict, result: dict, progress=_NULL_PROGRESS) -> dict:
     """Stop this project's app session."""
     from src.qatest import appsession
 
@@ -1016,7 +1236,7 @@ def _remember_instrumentation_failure(project_id: str) -> None:
         log.debug("could not record the instrumentation opt-out: %s", exc)
 
 
-def _command_emulator(command: dict, result: dict) -> dict:
+def _command_emulator(command: dict, result: dict, progress=_NULL_PROGRESS) -> dict:
     """Start or stop this project's emulators, on request from DevMate.
 
     Project-scoped: named `aura-dev-<cloud>-<projectId>` so they are told apart from a
@@ -1032,6 +1252,15 @@ def _command_emulator(command: dict, result: dict) -> dict:
         result["error"] = "no project"
         return result
 
+    # Checked once, up front, and reported as its own stage. It is the single most
+    # common reason a Start fails on a laptop — podman installed but its VM not started —
+    # and finding out per cloud repeats the same message once per emulator.
+    progress.step("Checking podman")
+    ready, why = emulators.podman_ready()
+    if not ready:
+        result["error"] = why
+        return result
+
     done, problems = [], []
     for cloud in clouds:
         known = emulators._BY_NAME.get(cloud)
@@ -1040,6 +1269,7 @@ def _command_emulator(command: dict, result: dict) -> dict:
             continue
         name = emulators.dev_container(cloud)
         if kind == "emulator-stop":
+            progress.step(f"Stopping {name}")
             # Shared: this stops the emulator for EVERY project on the machine, and
             # Floci keeps state in memory, so their resources go with it. The UI says so
             # before asking; this is the other half of that contract.
@@ -1053,8 +1283,15 @@ def _command_emulator(command: dict, result: dict) -> dict:
         # another project took it; projects are now separated by AWS account inside one
         # container instead, so attaching is correct.
         if emulators._ready(known.port, timeout=2):
+            # An emulator already up skips all three of this cloud's stages at once, so
+            # the bar still reaches `total` rather than stopping short of it and reading
+            # as an unfinished job.
+            progress.step(f"Fetching the {cloud} emulator image")
+            progress.step(f"Starting {name}")
+            progress.step(f"Waiting for {cloud} to answer on :{known.port}")
             holder = emulators._container_on_port(known.port).get("name", "")
             if not holder or holder.startswith(emulators.MANAGED_PREFIXES):
+                progress.note(f"{holder or name}: already running — shared")
                 done.append(f"{holder or name} (already running — shared)")
             else:
                 # Something Aura did not start. Still refuse: Aura has no idea what it
@@ -1064,7 +1301,12 @@ def _command_emulator(command: dict, result: dict) -> dict:
                     f"Stop it first, or use it as-is by starting your app against "
                     f"http://localhost:{known.port} directly.")
             continue
-        ok, why = emulators.start_container(name, known)
+
+        def _stage(label: str, _p=progress) -> None:
+            """`start_container`'s way of saying which of its three phases it reached."""
+            _p.step(label)
+
+        ok, why = emulators.start_container(name, known, on_stage=_stage)
         (done if ok else problems).append(name if ok else f"{name}: {why}")
 
     result["ok"] = not problems
@@ -1279,6 +1521,13 @@ def main(argv: list[str] | None = None) -> int:
             if command.get("kind") == "app-stop":
                 _stop_app(command)
                 continue
+            if command.get("kind") in ("emulator-start", "emulator-stop"):
+                # Threaded like the rest, and for the same reason: a cold start pulls an
+                # image and then waits for readiness, which together run past
+                # RUNNER_STALE_S and used to take this machine offline in the panel while
+                # it was doing exactly what it was asked.
+                _start_emulator(command)
+                continue
             client.report_state({**_machine_state(busy, args.report_all_containers,
                                                   allow_logs),
                                  "commandResults": [_run_command(command, allow_logs)]})
@@ -1306,9 +1555,13 @@ def main(argv: list[str] | None = None) -> int:
         # project's emulator. A run claimed now would collide on both, so stand off and
         # say why — `busyRunId` is what makes the panel show the machine as occupied
         # rather than idle-but-unresponsive.
-        populating = populate_in_flight()
-        if populating:
-            report_state(f"populate:{populating}")
+        # Emulator work counts too, now that it runs off the loop: a run claimed while a
+        # container is being rebuilt under it would adopt an emulator about to go away.
+        # Reporting every poll rather than every third is also what gives a progress bar
+        # its ~5s granularity, so this is the same mechanism serving both.
+        blocking = blocking_job()
+        if blocking:
+            report_state(blocking)
             time.sleep(args.poll)
             continue
         try:

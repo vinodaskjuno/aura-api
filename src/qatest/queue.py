@@ -584,6 +584,18 @@ MANAGED_PREFIXES = ("aura-qa-", "aura-dev-")
 #: Cap so the 400 KB item limit is unreachable no matter how many containers exist.
 _MAX_CONTAINERS = 25
 
+#: Long-running work a runner is doing for a project, reported as it goes. Bounded for
+#: the same reason as everything else on this row: every runner shares one 400 KB index
+#: item. Four is generous — `_EXCLUSIVE` already stops a project running two at once,
+#: and the machine-scoped emulator slot allows one of those per machine.
+_MAX_JOBS = 4
+_JOB_LOG_KEEP = 12
+
+#: What a job may claim to be. An unknown kind drops the entry rather than being stored:
+#: the UI branches on `kind` to pick its wording, and a kind nobody renders is a row that
+#: occupies the cap while saying nothing.
+_JOB_KINDS = ("populate", "emulator-start", "emulator-stop", "app-start", "app-stop")
+
 
 def _clean_containers(containers: list | None) -> list[dict]:
     out: list[dict] = []
@@ -638,14 +650,17 @@ def _clean_apps(apps: list | None) -> list[dict]:
     return out
 
 
-def _without_logs(apps: list | None) -> list[dict]:
+def _without_logs(apps: list | None, key: str = "logTail") -> list[dict]:
     """The same rows with the console dropped.
 
     The index is ONE 400 KB item shared by EVERY runner, and a console tail is by far
     the largest thing an app row can carry. It lives on the per-runner row only, and
     `app_logs` reads it from there — a GetItem, so the panel pays nothing extra for it.
+
+    `key` because a job row carries the same weight under a different name (`log`), and
+    `project_jobs` reads it back off the per-runner row exactly as `app_logs` does.
     """
-    return [{k: v for k, v in row.items() if k != "logTail"} for row in (apps or [])]
+    return [{k: v for k, v in row.items() if k != key} for row in (apps or [])]
 
 
 def _text(value, limit: int = HEALTH_MAX_TEXT) -> str:
@@ -696,6 +711,58 @@ def _clean_setup(setup) -> dict | None:
             "log": log}
 
 
+def _clean_jobs(jobs) -> list[dict]:
+    """Long-running work a runner is doing FOR A PROJECT, reported as it goes.
+
+    The sibling of `_clean_setup` and deliberately the same shape, because it answers the
+    same question — how far along is this, and what is it doing right now. It differs in
+    being project-scoped and server-caused, so it carries `projectId` and `commandId`:
+    without the latter a panel cannot tell a job belonging to the command it is watching
+    from one left over from a command that was superseded.
+
+    A LIST, not one slot. `_JOBS` on the agent is keyed (kind, projectId) and `_EXCLUSIVE`
+    is per project, so a populate for one project and an app-start for another legitimately
+    coexist; a single slot would have to lie about one of them.
+
+    INDEX SEMANTICS, which every reader depends on: `index` counts stages COMPLETED, so a
+    bar is `index/total` and never an interpolation. Entering stage k reports k-1. Success
+    reports `total`. A failure leaves it where it stopped — that is the whole point, and it
+    is why the panel can say "2 of 7 · Locating the app · failed" instead of jumping to 0
+    or 100.
+
+    Nothing branches on this. A command's outcome is `command_result`'s business, and
+    keeping it that way is what stops a display field becoming a source of truth.
+    """
+    out: list[dict] = []
+    for job in (jobs or [])[:_MAX_JOBS]:
+        if not isinstance(job, dict):
+            continue
+        kind = _text(job.get("kind"), 40)
+        if kind not in _JOB_KINDS:
+            continue
+        total = max(0, min(int(job.get("total") or 0), 50))
+        # Clamped against `total` as well as zero: an index past the end would render a
+        # bar over 100%, and the agent computing it is the side not to trust.
+        index = max(0, min(int(job.get("index") or 0), total))
+        out.append({
+            "kind": kind,
+            "projectId": _text(job.get("projectId"), 128),
+            "commandId": _text(job.get("commandId"), 64),
+            "active": bool(job.get("active")),
+            "step": _text(job.get("step"), 120),
+            "index": index,
+            "total": total,
+            "ok": bool(job.get("ok")),
+            "error": _text(job.get("error"), 400),
+            "startedAt": _text(job.get("startedAt"), 40),
+            "endedAt": _text(job.get("endedAt"), 40),
+            "log": [{"at": _text(e.get("at"), 40), "text": _text(e.get("text"), 200)}
+                    for e in (job.get("log") or [])[-_JOB_LOG_KEEP:]
+                    if isinstance(e, dict)],
+        })
+    return out
+
+
 def record_runner_state(runner: str, state: dict,
                         identity: dict | None = None) -> dict:
     """Store what a runner just said about itself. Returns any pending command.
@@ -715,6 +782,16 @@ def record_runner_state(runner: str, state: dict,
     setup = _clean_setup(state.get("setup"))
     if setup:
         payload["setup"] = setup
+    # On the KEY being present, not on the value being truthy. An agent that can report
+    # jobs clears them by sending `[]`, and testing truthiness would pin the last job on
+    # the row forever; an agent too old to report them omits the key and must not have
+    # whatever it last said wiped by a newer one's empty list.
+    if "jobs" in state:
+        payload["jobs"] = _clean_jobs(state.get("jobs"))
+        # Its own timestamp, for the reason `appsAt` gives below: "the runner went quiet"
+        # and "the job is still on stage 3" are different facts and a panel must not read
+        # a frozen job as a live one.
+        payload["jobsAt"] = _now()
     payload.update({
         "type": RUNNER_KIND,
         "runner": runner,
@@ -772,6 +849,11 @@ def _index_runner(runner: str, payload: dict) -> None:
                             "containersAt": payload.get("containersAt") or "",
                             "apps": _without_logs(payload.get("apps")),
                             "appsAt": payload.get("appsAt") or "",
+                            # Log stripped for the reason `_without_logs` documents —
+                            # this row is shared by every runner. `project_jobs` reads
+                            # the log off the per-runner row, a GetItem, like app_logs.
+                            "jobs": _without_logs(payload.get("jobs"), "log"),
+                            "jobsAt": payload.get("jobsAt") or "",
                         }})
     except Exception as exc:                                  # noqa: BLE001
         # The index is a cache. Losing a write costs a scan, not correctness.
@@ -793,6 +875,48 @@ def app_logs(runner: str, project_id: str) -> dict:
             return {"lines": list(app.get("logTail") or []),
                     "at": row.get("appsAt", ""), "kind": app.get("kind", "")}
     return {"lines": [], "at": row.get("appsAt", ""), "kind": ""}
+
+
+def project_jobs(project_id: str, stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
+    """Every runner's in-flight or just-finished work for ONE project, with its log.
+
+    Deliberately NOT a command, for the reason `app_logs` gives: a runner has one command
+    slot, and a panel polling it would clobber every start and populate in between. Jobs
+    already ride the regular state report.
+
+    Two reads, in the order that keeps this cheap: the index says WHICH runners have a job
+    for this project (one GetItem, already cached for the runners panel), and only those
+    runners' rows are then fetched for the log the index deliberately drops. A machine with
+    nothing to say about this project costs nothing.
+
+    `stale` rides each row because a job on a runner that has gone quiet is LAST KNOWN, not
+    live — the same rule `containersAt` and `appsAt` carry, and the one a progress bar most
+    needs, since a frozen bar and a slow one look identical.
+    """
+    if not project_id:
+        return []
+    out: list[dict] = []
+    for runner in list_runner_state(stale_after_s):
+        # The index copy has no `log`; it is enough to know whether to read the row.
+        if not any(str(j.get("projectId") or "") == project_id
+                   for j in runner.get("jobs") or []):
+            continue
+        row = runner_state(runner["name"]) or {}
+        for job in row.get("jobs") or []:
+            if str(job.get("projectId") or "") != project_id:
+                continue
+            out.append({**job,
+                        "runner": runner["name"],
+                        "machine": runner.get("machine") or runner["name"],
+                        "stale": runner.get("stale", False),
+                        "jobsAt": row.get("jobsAt", "")})
+    # Active first, then newest. Two passes because the two keys sort in opposite
+    # directions and Python's sort is stable, which is cheaper to read than negating a
+    # timestamp. A panel reads the top row, and a finished job must never sit above the
+    # one still running.
+    out.sort(key=lambda j: j.get("startedAt") or "", reverse=True)
+    out.sort(key=lambda j: not j.get("active"))
+    return out
 
 
 def _index_attr(runner: str) -> str:
@@ -877,6 +1001,11 @@ def list_runner_state(stale_after_s: int = RUNNER_STALE_S) -> list[dict]:
             "appsAt": row.get("appsAt", ""),
             "health": dict(row.get("health") or {}),
             "setup": dict(row.get("setup") or {}),
+            "jobs": list(row.get("jobs") or []),
+            # Empty means "this agent cannot report jobs", the same distinction
+            # `reportsState` draws from `containersAt`. An agent that can report them
+            # stamps this on every state POST, job or no job.
+            "jobsAt": row.get("jobsAt", ""),
         })
     return sorted(out, key=lambda r: r.get("lastSeen") or "", reverse=True)
 

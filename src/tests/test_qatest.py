@@ -207,6 +207,66 @@ def test_podman_ready_reports_an_unexpected_failure_verbatim(monkeypatch):
     assert not ok and "disk quota exceeded" in why
 
 
+# ── Starting a container, stage by stage ─────────────────────────────────────
+
+def _fake_podman(monkeypatch, *, image_present: bool, calls: list):
+    """Record every podman invocation and answer plausibly."""
+    monkeypatch.setattr(emulators, "podman_ready", lambda: (True, ""))
+    monkeypatch.setattr(emulators, "_ready", lambda *a, **k: True)
+
+    def run(args, timeout=30):
+        calls.append((tuple(args[:2]), timeout))
+        if args[:2] == ["image", "exists"]:
+            return (0 if image_present else 1), ""
+        return 0, ""
+
+    monkeypatch.setattr(emulators, "_run", run)
+
+
+def test_a_missing_image_is_pulled_on_its_own_budget(monkeypatch):
+    """`podman run` on an absent image pulls it first, inside the 120s that suited
+    starting a LOCAL image — so a first Start failed naming a timeout rather than a
+    download."""
+    calls: list = []
+    _fake_podman(monkeypatch, image_present=False, calls=calls)
+    ok, why = emulators.start_container("aura-dev-aws", emulators._BY_NAME["aws"])
+    assert ok and why == ""
+
+    pull = [c for c in calls if c[0][0] == "pull"]
+    assert pull, "a missing image was never pulled"
+    assert pull[0][1] == emulators.IMAGE_PULL_TIMEOUT_S
+    assert emulators.IMAGE_PULL_TIMEOUT_S > 120
+
+
+def test_an_image_already_present_is_not_pulled(monkeypatch):
+    calls: list = []
+    _fake_podman(monkeypatch, image_present=True, calls=calls)
+    assert emulators.start_container("aura-dev-aws", emulators._BY_NAME["aws"])[0]
+    assert not [c for c in calls if c[0][0] == "pull"]
+
+
+def test_start_container_reports_its_three_stages_in_order(monkeypatch):
+    """What lets the panel say which part is taking the time, instead of one opaque
+    'starting…' covering a multi-minute download."""
+    calls: list = []
+    _fake_podman(monkeypatch, image_present=False, calls=calls)
+    stages: list = []
+    emulators.start_container("aura-dev-aws", emulators._BY_NAME["aws"],
+                              on_stage=stages.append)
+    assert len(stages) == 3
+    assert "image" in stages[0] and "Starting" in stages[1] and "answer" in stages[2]
+
+
+def test_a_failed_pull_names_the_image_rather_than_the_exit_code(monkeypatch):
+    monkeypatch.setattr(emulators, "podman_ready", lambda: (True, ""))
+    monkeypatch.setattr(emulators, "_run",
+                        lambda args, timeout=30: (0, "") if args[:2] == ["rm", "-f"]
+                        else (1, "no space left on device"))
+    ok, why = emulators.start_container("aura-dev-aws", emulators._BY_NAME["aws"])
+    assert not ok
+    assert "could not fetch" in why and "no space left" in why
+
+
 # ── Evidence ─────────────────────────────────────────────────────────────────
 
 class FakeS3:

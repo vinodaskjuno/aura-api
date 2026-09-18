@@ -29,6 +29,10 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT_S = 30
 
+#: Pulling an emulator image is a download, not a container start, and belongs on a
+#: budget that reflects that. Sized for a first run on a domestic connection.
+IMAGE_PULL_TIMEOUT_S = 600
+
 #: Container names Aura considers its own. TWO prefixes, because an emulator now has two
 #: possible lifetimes: `aura-qa-<cloud>-<runId>` lives and dies with one test run, while
 #: `aura-dev-<cloud>-<projectId>` is started by a developer from DevMate and lives until
@@ -446,6 +450,23 @@ class EmulatorSet:
                            message=f"{rec.cloud} emulator left running — it is shared "
                                    f"with any other project on this machine")
                 continue
+            # A start that FAILED still left the shared name on the record: `_start`
+            # fills `container` from `dev_container()` before it knows whether anything
+            # came up. Removing it here deleted an emulator this run never created —
+            # measured: a `podman_ready()` of False was enough to take down a running
+            # `aura-dev-aws` belonging to somebody else's project.
+            if not rec.started:
+                continue
+            # And the shared container is never ours to remove even when we DID start
+            # it, which is what the note above has always claimed and the code did not
+            # do: one container per cloud serves every project on this machine, so a
+            # run tearing it down takes their resources with it.
+            if rec.container.startswith(DEV_PREFIX):
+                self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
+                           started=True, stopped=False, adopted=True,
+                           message=f"{rec.cloud} emulator left running — it is shared "
+                                   f"with any other project on this machine")
+                continue
             if rec.container:
                 _run(["rm", "-f", rec.container])
                 self._emit(cloud=rec.cloud, container=rec.container, port=rec.port,
@@ -632,13 +653,18 @@ def _socket_args(cloud: "Cloud") -> list[str]:
     ]
 
 
-def start_container(name: str, cloud: "Cloud") -> tuple[bool, str]:
+def start_container(name: str, cloud: "Cloud", on_stage=None) -> tuple[bool, str]:
     """Bring up one Floci container under an explicit name. (ok, reason).
 
     Shared by the run path and the DevMate path so there is ONE definition of how a
     Floci container is started — the container-runtime socket included. Two ways to
     start a container is two ways for them to drift.
+
+    `on_stage(label)` is called as each of the three phases begins — fetch, run, wait —
+    so a caller watching from a browser can say which one is taking the time. Optional,
+    because the run path has its own event stream and the readiness probe has none.
     """
+    on_stage = on_stage or (lambda _label: None)
     if not name.startswith(MANAGED_PREFIXES):
         return False, "refusing to start a container outside Aura's own namespace"
     ready, why = podman_ready()
@@ -646,11 +672,30 @@ def start_container(name: str, cloud: "Cloud") -> tuple[bool, str]:
         return False, why
 
     _run(["rm", "-f", name])
+
+    # PULLED SEPARATELY, on its own budget. `podman run` on an absent image pulls it
+    # first, and a Floci image over a domestic connection does not reliably finish
+    # inside the 120s that suited starting a container that is already local — so a
+    # first Start failed with a truncated podman error that named a timeout rather than
+    # a download. Splitting it also gives the panel the one stage that actually takes
+    # minutes, instead of a single opaque "starting".
+    if _run(["image", "exists", cloud.image])[0] != 0:
+        on_stage(f"Fetching the {cloud.name} emulator image")
+        code, out = _run(["pull", cloud.image], timeout=IMAGE_PULL_TIMEOUT_S)
+        if code != 0:
+            return False, (f"could not fetch {cloud.image}: "
+                           f"{out.strip()[-300:] or f'podman pull exited {code}'}")
+    else:
+        on_stage(f"Fetching the {cloud.name} emulator image")
+
+    on_stage(f"Starting {name}")
     code, out = _run(["run", "-d", "--name", name,
                       "-p", f"{cloud.port}:{cloud.port}",
                       *_socket_args(cloud), cloud.image], timeout=120)
     if code != 0:
         return False, out.strip()[-400:] or f"podman run exited {code}"
+
+    on_stage(f"Waiting for {cloud.name} to answer on :{cloud.port}")
     if not _ready(cloud.port):
         logs = _run(["logs", "--tail", "20", name])[1]
         _run(["rm", "-f", name])

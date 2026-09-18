@@ -185,6 +185,148 @@ def test_populate_and_app_start_cannot_run_together():
     agent._JOBS.clear()
 
 
+def test_two_emulator_jobs_cannot_run_together_even_for_different_projects():
+    """`dev_container()` ignores the project id — there is ONE `aura-dev-<cloud>` per
+    machine — and `start_container` does `podman rm -f` before it runs. Two projects
+    starting at once would have the second delete the first's container mid-readiness.
+    Running inline on the poll loop hid this by serialising it; threading exposes it."""
+    from src.qatest import agent
+
+    agent._JOBS.clear()
+    assert agent._claim_job("emulator-start", "p1") == ""
+    busy = agent._claim_job("emulator-start", "p2")
+    assert "on this machine" in busy
+    # Start and Stop exclude each other too — they are the same container.
+    assert agent._claim_job("emulator-stop", "p1") != ""
+    agent._release_job("emulator-start", "p1")
+    assert agent._claim_job("emulator-stop", "p2") == ""
+    agent._JOBS.clear()
+
+
+def test_an_emulator_start_and_a_populate_for_different_projects_can_coexist():
+    """Machine-scoped and project-scoped slots are separate. A populate waiting on
+    another project's Start would be a deadlock nobody could explain."""
+    from src.qatest import agent
+
+    agent._JOBS.clear()
+    assert agent._claim_job("emulator-start", "p1") == ""
+    assert agent._claim_job("populate", "p2") == ""
+    agent._JOBS.clear()
+
+
+def test_emulator_work_stands_the_poll_loop_off_from_claiming_a_run():
+    """A run claimed while a container is rebuilt under it would adopt an emulator that
+    is about to go away. `app-start` stays OUT — a live session is what a run adopts."""
+    from src.qatest import agent
+
+    agent._JOBS.clear()
+    assert agent.blocking_job() == ""
+    agent._claim_job("emulator-start", "p1")
+    assert agent.blocking_job().startswith("emulator")
+    agent._release_job("emulator-start", "p1")
+
+    agent._claim_job("app-start", "p1")
+    assert agent.blocking_job() == ""
+    agent._release_job("app-start", "p1")
+    agent._JOBS.clear()
+
+
+# ── Job progress ─────────────────────────────────────────────────────────────
+
+def test_a_populate_reports_every_stage_it_reaches(monkeypatch):
+    """Seven named stages instead of one spinner for up to fifteen minutes."""
+    from src.qatest import agent
+
+    seen = []
+    prog = agent._Progress("populate", "p1", "cmd-1", agent._POPULATE_STAGES)
+    monkeypatch.setattr(prog, "step", lambda label: (seen.append(label),
+                                                     agent._Progress.step(prog, label))[0])
+
+    from src.qatest import appserver, provision
+    monkeypatch.setattr(provision, "prepare", lambda *a, **k: [])
+    monkeypatch.setattr(appserver, "locate", lambda pid: (None, ["/tmp/x"]))
+
+    result = agent._command_populate({"container": "p1", "clouds": "aws"},
+                                     {"id": "cmd-1", "ok": False, "error": ""}, prog)
+    # Stopped at stage 2 and said so; the stages after it never claim to have run.
+    assert seen == ["Fetching the working copy and installing dependencies",
+                    "Locating the app on this machine"]
+    assert "no working copy" in result["error"]
+    assert prog.record["index"] == 1        # one stage COMPLETED, not two entered
+
+
+def test_a_failed_job_leaves_the_bar_where_it_stopped():
+    """The point of counting stages completed. A failure that jumped to 0 or 100 would
+    lose the only thing the reader needs: how far it got."""
+    from src.qatest import agent
+
+    prog = agent._Progress("populate", "p1", "cmd-1", 7)
+    prog.step("one"); prog.step("two"); prog.step("three")
+    prog.finish(False, "detect failed")
+    assert prog.record["index"] == 2 and prog.record["active"] is False
+    assert prog.record["ok"] is False and prog.record["error"] == "detect failed"
+
+    ok = agent._Progress("populate", "p2", "cmd-2", 7)
+    ok.step("one")
+    ok.finish(True)
+    assert ok.record["index"] == 7          # success fills the bar
+
+
+def test_the_populate_path_now_passes_a_real_emit_to_provision(monkeypatch):
+    """It passed `None` while the RUN path passed a real callback, which made the
+    longest part of a populate the one part nothing could see."""
+    from src.qatest import agent, appserver, provision
+
+    captured = {}
+
+    def fake_prepare(project_id, workspace, emit):
+        captured["emit"] = emit
+        return []
+
+    monkeypatch.setattr(provision, "prepare", fake_prepare)
+    monkeypatch.setattr(appserver, "locate", lambda pid: (None, []))
+    prog = agent._Progress("populate", "p1", "cmd-1", 7)
+    agent._command_populate({"container": "p1"}, {"id": "c", "error": ""}, prog)
+
+    assert captured["emit"] is not None
+    assert callable(captured["emit"])
+
+
+def test_a_job_log_never_carries_a_presigned_url(monkeypatch):
+    """THE leak this wiring could have introduced. `provision` reports a fetch failure
+    by interpolating the exception, and an httpx error string carries the full request
+    URL — for a working copy that is an S3 link with `Signature` and
+    `x-amz-security-token` in it. Fine in a local log; never on the wire."""
+    from src.qatest import agent
+
+    prog = agent._Progress("populate", "p1", "cmd-1", 7)
+    prog.event({"type": "provision", "message":
+                "could not fetch the working copy: HTTPStatusError: Client error "
+                "'403 Forbidden' for url 'https://aura-test-artifacts.s3.amazonaws.com"
+                "/p1/_workspace/abc.tar.gz?AWSAccessKeyId=ASIA123&Signature=deadbeef"
+                "&x-amz-security-token=SECRET'"})
+    prog.finish(False, "could not fetch https://x.s3.amazonaws.com/a?Signature=zzz")
+
+    blob = str(prog.record)
+    for secret in ("Signature=", "x-amz-security-token", "AWSAccessKeyId"):
+        assert secret not in blob, f"{secret} leaked into a job record"
+    assert "<redacted>" in prog.record["log"][-1]["text"]
+
+
+def test_redaction_keeps_the_url_that_makes_an_error_actionable():
+    """The QUERY is the credential; the host and path are diagnostics. Redacting whole
+    URLs destroyed the one useful part of the most common Start failure — "port 4566 is
+    held by …, start your app against http://localhost:4566 directly"."""
+    from src.qatest import agent
+
+    held = ("port 4566 is held by floci-main, which Aura did not start. Stop it first, "
+            "or use it as-is by starting your app against http://localhost:4566 directly.")
+    assert agent._redact(held) == held, "a credential-free URL was destroyed"
+    # …while a presigned one still loses everything that authenticates it.
+    out = agent._redact("GET https://b.s3.amazonaws.com/p/w.tar.gz?Signature=abc&x=1 failed")
+    assert "Signature" not in out and "b.s3.amazonaws.com/p/w.tar.gz" in out
+
+
 # ── A QA run meets a live session ────────────────────────────────────────────
 
 def test_a_run_adopts_a_live_session_without_losing_file_checks(monkeypatch):

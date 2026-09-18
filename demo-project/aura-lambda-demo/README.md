@@ -100,3 +100,4 @@ object that `/media` then listed, and `podman ps` showed both functions running 
 | Populate works but no Lambdas | `QATEST_CONTAINER_BACKED_SERVICES` unset, or the agent was not restarted | set it in `src/.env`, restart the agent |
 | `Task timed out after 30 seconds` | the function cannot reach Floci | check its endpoint is `http://floci:4566`, not `localhost` |
 | Resources empty after a restart | Floci keeps state in memory by default | press Populate again |
+| Floci's own console on :4500 shows no Serverless / no resources | its ACCOUNT menu defaults to `0000-0000-0000`; Aura populates into this project's 12-digit account | pick the project's account in the console's ACCOUNT menu (top right), or restart it pre-seeded: `aura-api/floci-ui-brand/start.sh --project <projectId>` |
